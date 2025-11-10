@@ -41,8 +41,8 @@ pub struct SearchCmd {
     #[arg(long, short, help = "Maximum number of results")]
     pub limit: Option<i64>,
 
-    #[arg(long, help = "Filter by namespace")]
-    pub namespace: Option<String>,
+    #[arg(long, help = "Filter by category")]
+    pub category: Option<String>,
 
     #[arg(
         long,
@@ -91,7 +91,7 @@ pub async fn handle(
         search_service
             .search_with_options(
                 &cmd.query,
-                cmd.namespace.as_deref(),
+                cmd.category.as_deref(),
                 limit,
                 search_mode,
                 rerank,
@@ -101,7 +101,7 @@ pub async fn handle(
 
     if cmd.json {
         let json = serde_json::to_string_pretty(&results)?;
-        println!("{}", json);
+        println!("{json}");
         return Ok(());
     }
 
@@ -112,7 +112,7 @@ pub async fn handle(
 
     let mode_str = search_mode.map_or_else(
         || format!("{:?}", config.search.mode),
-        |m| format!("{:?}", m),
+        |m| format!("{m:?}"),
     );
     println!("Found {} memories (mode: {}):\n", results.len(), mode_str);
 

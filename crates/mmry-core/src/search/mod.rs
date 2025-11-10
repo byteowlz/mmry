@@ -51,14 +51,14 @@ impl SearchService {
     async fn execute_search(
         &self,
         query: &str,
-        namespace: Option<&str>,
+        category: Option<&str>,
         limit: i64,
         query_embedding: Option<Vec<f32>>,
         query_sparse_embedding: Option<StoredSparseEmbedding>,
         mode_override: Option<SearchMode>,
         rerank_override: Option<bool>,
     ) -> Result<Vec<Memory>> {
-        let mut memories = self.fetch_candidates(namespace).await?;
+        let mut memories = self.fetch_candidates(category).await?;
         if memories.is_empty() {
             return Ok(Vec::new());
         }
@@ -264,17 +264,17 @@ impl SearchService {
     pub async fn search(
         &self,
         query: &str,
-        namespace: Option<&str>,
+        category: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Memory>> {
-        self.search_with_options(query, namespace, limit, None, None)
+        self.search_with_options(query, category, limit, None, None)
             .await
     }
 
     pub async fn search_with_options(
         &self,
         query: &str,
-        namespace: Option<&str>,
+        category: Option<&str>,
         limit: i64,
         mode: Option<SearchMode>,
         rerank: Option<bool>,
@@ -293,7 +293,7 @@ impl SearchService {
 
         self.execute_search(
             query,
-            namespace,
+            category,
             limit,
             query_embedding,
             query_sparse_embedding,
@@ -307,30 +307,30 @@ impl SearchService {
     pub async fn search_with_embedding(
         &self,
         query: &str,
-        namespace: Option<&str>,
+        category: Option<&str>,
         limit: i64,
         query_embedding: Option<Vec<f32>>,
     ) -> Result<Vec<Memory>> {
-        self.execute_search(query, namespace, limit, query_embedding, None, None, None)
+        self.execute_search(query, category, limit, query_embedding, None, None, None)
             .await
     }
 
-    async fn fetch_candidates(&self, namespace: Option<&str>) -> Result<Vec<Memory>> {
-        let rows = if let Some(ns) = namespace {
+    async fn fetch_candidates(&self, category: Option<&str>) -> Result<Vec<Memory>> {
+        let rows = if let Some(cat) = category {
             sqlx::query(
                 r#"
-                SELECT id, type, content, embedding, sparse_embedding, metadata, importance, namespace, created_at, updated_at
+                SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
                 FROM memories
-                WHERE namespace = ?
+                WHERE category = ?
                 "#,
             )
-            .bind(ns)
+            .bind(cat)
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query(
                 r#"
-                SELECT id, type, content, embedding, sparse_embedding, metadata, importance, namespace, created_at, updated_at
+                SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
                 FROM memories
                 "#,
             )
@@ -356,7 +356,8 @@ impl SearchService {
                 sparse_embedding: sparse_embedding_vec,
                 metadata: serde_json::from_str(row.try_get("metadata")?)?,
                 importance: row.try_get("importance")?,
-                namespace: row.try_get("namespace")?,
+                category: row.try_get("category")?,
+                tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
                 created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
                     .unwrap()
                     .with_timezone(&chrono::Utc),

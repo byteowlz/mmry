@@ -15,8 +15,8 @@ pub struct ReembedCmd {
     #[arg(long, help = "Only regenerate sparse embeddings")]
     pub sparse_only: bool,
 
-    #[arg(long, help = "Filter by namespace")]
-    pub namespace: Option<String>,
+    #[arg(long, help = "Filter by category")]
+    pub category: Option<String>,
 
     #[arg(long, help = "Force regenerate even if embeddings exist")]
     pub force: bool,
@@ -52,7 +52,7 @@ pub async fn handle(
     println!("Fetching memories...");
     let memories = operations::list_memories(
         db.pool(),
-        cmd.namespace.as_deref(),
+        cmd.category.as_deref(),
         i64::MAX, // Get all memories
     )
     .await?;
@@ -69,16 +69,14 @@ pub async fn handle(
     let mut sparse_update_count = 0;
 
     for memory in &memories {
-        if regenerate_dense && embeddings.is_enabled() {
-            if cmd.force || memory.embedding.is_none() {
+        if regenerate_dense && embeddings.is_enabled()
+            && (cmd.force || memory.embedding.is_none()) {
                 dense_update_count += 1;
             }
-        }
-        if regenerate_sparse && sparse_embeddings.is_enabled() {
-            if cmd.force || memory.sparse_embedding.is_none() {
+        if regenerate_sparse && sparse_embeddings.is_enabled()
+            && (cmd.force || memory.sparse_embedding.is_none()) {
                 sparse_update_count += 1;
             }
-        }
     }
 
     if dense_update_count == 0 && sparse_update_count == 0 {
@@ -89,10 +87,10 @@ pub async fn handle(
     println!();
     println!("Will update:");
     if dense_update_count > 0 {
-        println!("  - {} dense embeddings", dense_update_count);
+        println!("  - {dense_update_count} dense embeddings");
     }
     if sparse_update_count > 0 {
-        println!("  - {} sparse embeddings", sparse_update_count);
+        println!("  - {sparse_update_count} sparse embeddings");
     }
 
     if cmd.dry_run {
@@ -109,24 +107,22 @@ pub async fn handle(
         let mut updated = false;
 
         // Generate dense embedding if needed
-        if regenerate_dense && embeddings.is_enabled() {
-            if cmd.force || memory.embedding.is_none() {
+        if regenerate_dense && embeddings.is_enabled()
+            && (cmd.force || memory.embedding.is_none()) {
                 if let Some(embedding) = embeddings.embed(&memory.content).await? {
                     memory.embedding = Some(embedding);
                     updated = true;
                 }
             }
-        }
 
         // Generate sparse embedding if needed
-        if regenerate_sparse && sparse_embeddings.is_enabled() {
-            if cmd.force || memory.sparse_embedding.is_none() {
+        if regenerate_sparse && sparse_embeddings.is_enabled()
+            && (cmd.force || memory.sparse_embedding.is_none()) {
                 if let Some(sparse_embedding) = sparse_embeddings.embed(&memory.content).await? {
                     memory.sparse_embedding = Some(sparse_embedding.into());
                     updated = true;
                 }
             }
-        }
 
         if updated {
             operations::update_memory_embeddings(
@@ -145,7 +141,7 @@ pub async fn handle(
     }
 
     println!();
-    println!("✓ Successfully updated {} memories", updated_count);
+    println!("✓ Successfully updated {updated_count} memories");
 
     Ok(())
 }

@@ -45,7 +45,52 @@ impl Database {
             sqlx::query("ALTER TABLE memories ADD COLUMN sparse_embedding BLOB")
                 .execute(pool)
                 .await?;
-            tracing::info!("Schema update completed");
+            tracing::info!("sparse_embedding column added");
+        }
+
+        // Check if we need to rename namespace to category
+        let namespace_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='namespace'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        let category_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='category'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if namespace_exists && !category_exists {
+            tracing::info!("Migrating 'namespace' column to 'category'...");
+            sqlx::query("ALTER TABLE memories RENAME COLUMN namespace TO category")
+                .execute(pool)
+                .await?;
+
+            // Drop old index and create new one
+            sqlx::query("DROP INDEX IF EXISTS idx_memories_namespace")
+                .execute(pool)
+                .await?;
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)")
+                .execute(pool)
+                .await?;
+
+            tracing::info!("Column renamed from 'namespace' to 'category'");
+        }
+
+        // Check if tags column exists, add if not
+        let tags_column_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='tags'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !tags_column_exists {
+            tracing::info!("Adding tags column to memories table...");
+            sqlx::query("ALTER TABLE memories ADD COLUMN tags JSON DEFAULT '[]'")
+                .execute(pool)
+                .await?;
+            tracing::info!("tags column added");
         }
 
         Ok(())

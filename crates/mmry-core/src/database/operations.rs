@@ -17,8 +17,8 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 
     sqlx::query(
         r#"
-        INSERT INTO memories (id, type, content, embedding, sparse_embedding, metadata, importance, namespace, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO memories (id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#
     )
     .bind(memory.id.to_string())
@@ -28,7 +28,8 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(sparse_embedding_bytes)
     .bind(memory.metadata.to_string())
     .bind(memory.importance)
-    .bind(&memory.namespace)
+    .bind(&memory.category)
+    .bind(serde_json::to_string(&memory.tags)?)
     .bind(memory.created_at.to_rfc3339())
     .bind(memory.updated_at.to_rfc3339())
     .execute(pool)
@@ -40,7 +41,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, namespace, created_at, updated_at
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
         FROM memories
         WHERE id = ?
         "#,
@@ -66,7 +67,8 @@ pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Mem
             sparse_embedding: sparse_embedding_vec,
             metadata: serde_json::from_str(row.try_get("metadata")?)?,
             importance: row.try_get("importance")?,
-            namespace: row.try_get("namespace")?,
+            category: row.try_get("category")?,
+            tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
             created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
                 .unwrap()
                 .with_timezone(&chrono::Utc),
@@ -81,27 +83,27 @@ pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Mem
 
 pub async fn list_memories(
     pool: &SqlitePool,
-    namespace: Option<&str>,
+    category: Option<&str>,
     limit: i64,
 ) -> crate::Result<Vec<Memory>> {
-    let rows = if let Some(ns) = namespace {
+    let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, namespace, created_at, updated_at
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
             FROM memories
-            WHERE namespace = ?
+            WHERE category = ?
             ORDER BY created_at DESC
             LIMIT ?
             "#
         )
-        .bind(ns)
+        .bind(cat)
         .bind(limit)
         .fetch_all(pool)
         .await?
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, namespace, created_at, updated_at
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -130,7 +132,8 @@ pub async fn list_memories(
             sparse_embedding: sparse_embedding_vec,
             metadata: serde_json::from_str(row.try_get("metadata")?)?,
             importance: row.try_get("importance")?,
-            namespace: row.try_get("namespace")?,
+            category: row.try_get("category")?,
+            tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
             created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
                 .unwrap()
                 .with_timezone(&chrono::Utc),

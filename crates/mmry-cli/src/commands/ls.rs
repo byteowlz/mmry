@@ -8,8 +8,8 @@ pub struct LsCmd {
     #[arg(long, short, help = "Maximum number of results")]
     pub limit: Option<i64>,
 
-    #[arg(long, help = "Filter by namespace")]
-    pub namespace: Option<String>,
+    #[arg(long, help = "Filter by category")]
+    pub category: Option<String>,
 
     #[arg(long, help = "Output results as JSON")]
     pub json: bool,
@@ -18,11 +18,11 @@ pub struct LsCmd {
 pub async fn handle(cmd: LsCmd, config: &Config, db: &Database) -> anyhow::Result<()> {
     let limit = cmd.limit.unwrap_or(config.search.default_limit as i64);
 
-    let memories = operations::list_memories(db.pool(), cmd.namespace.as_deref(), limit).await?;
+    let memories = operations::list_memories(db.pool(), cmd.category.as_deref(), limit).await?;
 
     if cmd.json {
         let json = serde_json::to_string_pretty(&memories)?;
-        println!("{}", json);
+        println!("{json}");
         return Ok(());
     }
 

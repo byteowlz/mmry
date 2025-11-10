@@ -25,7 +25,8 @@ pub struct Memory {
     pub importance: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub namespace: String,
+    pub category: String,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,7 +61,7 @@ pub struct ProceduralMemory {
 }
 
 impl Memory {
-    pub fn new(memory_type: MemoryType, content: String, namespace: String) -> Self {
+    pub fn new(memory_type: MemoryType, content: String, category: String) -> Self {
         Self {
             id: Uuid::new_v4(),
             memory_type,
@@ -71,7 +72,8 @@ impl Memory {
             importance: 5,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            namespace,
+            category,
+            tags: Vec::new(),
         }
     }
 }

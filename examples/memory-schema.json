@@ -18,7 +18,9 @@
   "definitions": {
     "singleMemory": {
       "type": "object",
-      "required": ["content"],
+      "required": [
+        "content"
+      ],
       "properties": {
         "content": {
           "type": "string",
@@ -27,18 +29,21 @@
         },
         "type": {
           "type": "string",
-          "enum": ["episodic", "semantic", "procedural"],
+          "enum": [
+            "episodic",
+            "semantic",
+            "procedural"
+          ],
           "description": "Type of memory. Auto-classified if not provided."
         },
         "memory_type": {
           "type": "string",
-          "enum": ["episodic", "semantic", "procedural"],
+          "enum": [
+            "episodic",
+            "semantic",
+            "procedural"
+          ],
           "description": "Alternative field name for type. Auto-classified if not provided."
-        },
-        "namespace": {
-          "type": "string",
-          "description": "Namespace for organizing memories. Defaults to 'default'.",
-          "minLength": 1
         },
         "importance": {
           "type": "integer",
@@ -49,6 +54,18 @@
         "metadata": {
           "type": "object",
           "description": "Additional metadata as key-value pairs"
+        },
+        "category": {
+          "type": "string",
+          "description": "Category for organizing memories. Defaults to 'default'.",
+          "minLength": 1
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags for categorizing and filtering memories"
         }
       },
       "additionalProperties": false
@@ -61,13 +78,21 @@
     {
       "content": "Important fact about the project",
       "type": "semantic",
-      "importance": 9
+      "importance": 9,
+      "tags": [
+        "work",
+        "important"
+      ]
     },
     {
       "content": "Meeting notes from today",
       "type": "episodic",
-      "namespace": "meetings",
-      "importance": 7
+      "category": "meetings",
+      "importance": 7,
+      "tags": [
+        "work",
+        "meetings"
+      ]
     },
     [
       {
@@ -75,7 +100,10 @@
       },
       {
         "content": "Second memory in batch",
-        "type": "semantic"
+        "type": "semantic",
+        "tags": [
+          "learning"
+        ]
       }
     ]
   ]

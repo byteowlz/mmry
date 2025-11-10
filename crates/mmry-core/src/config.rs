@@ -97,7 +97,7 @@ pub struct SearchConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    pub default_namespace: String,
+    pub default_category: String,
     pub auto_dedupe: bool,
     pub dedupe_threshold: f32,
     pub importance_auto_score: bool,
@@ -161,7 +161,7 @@ impl Default for Config {
             },
             search: SearchConfig::default(),
             memory: MemoryConfig {
-                default_namespace: "default".to_string(),
+                default_category: "default".to_string(),
                 auto_dedupe: true,
                 dedupe_threshold: 0.95,
                 importance_auto_score: true,

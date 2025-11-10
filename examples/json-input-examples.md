@@ -15,7 +15,7 @@ The JSON schema is available at `examples/memory-schema.json` and follows JSON S
 All other fields are optional and will be auto-generated or classified if not provided:
 
 - `type` or `memory_type` (string): One of "episodic", "semantic", or "procedural"
-- `namespace` (string): Namespace for organizing memories (defaults to "default")
+- `category` (string): Category for organizing memories (defaults to "default")
 - `importance` (integer): Importance level from 1-10 (defaults to 5)
 - `metadata` (object): Additional metadata as key-value pairs
 
@@ -37,12 +37,12 @@ echo '{
 }' | mmry add -
 ```
 
-### With namespace
+### With category
 ```bash
 echo '{
   "content": "Meeting notes from today",
   "type": "episodic",
-  "namespace": "meetings",
+  "category": "meetings",
   "importance": 7
 }' | mmry add -
 ```
@@ -70,10 +70,10 @@ echo '[
 
 ## Pipeline Examples
 
-### Copy memories to a different namespace
+### Copy memories to a different category
 ```bash
 mmry search "important" --json | \
-  jq 'map({content, importance, namespace: "archive"})' | \
+  jq 'map({content, importance, category: "archive"})' | \
   mmry add -
 ```
 
@@ -85,8 +85,8 @@ cat data.json | jq '.items[] | {content: .text, type: "semantic"}' | \
 
 ### Duplicate memories with modifications
 ```bash
-mmry ls --namespace default --json | \
-  jq 'map({content: ("Copy: " + .content), namespace: "backup"})' | \
+mmry ls --category default --json | \
+  jq 'map({content: ("Copy: " + .content), category: "backup"})' | \
   mmry add -
 ```
 

@@ -79,8 +79,8 @@ bm25_k1 = 1.2                   # Term frequency saturation (1.2-2.0 typical)
 bm25_b = 0.75                   # Length normalization (0.0-1.0, 0.75 typical)
 
 [memory]
-# Default namespace for memories
-default_namespace = "default"
+# Default category for memories
+default_category = "default"
 # Automatically deduplicate similar memories
 auto_dedupe = true
 # Similarity threshold for deduplication (0.0-1.0)

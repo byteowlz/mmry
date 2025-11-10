@@ -19,8 +19,11 @@ pub struct AddCmd {
     #[arg(long, help = "Memory type (episodic, semantic, procedural)")]
     pub memory_type: Option<String>,
 
-    #[arg(long, help = "Namespace for the memory")]
-    pub namespace: Option<String>,
+    #[arg(long, help = "Category for the memory")]
+    pub category: Option<String>,
+
+    #[arg(long, help = "Tags for the memory (comma-separated)")]
+    pub tags: Option<String>,
 
     #[arg(long, help = "Importance (1-10)")]
     pub importance: Option<i32>,
@@ -74,11 +77,16 @@ pub async fn handle(
         classify_memory(&content)
     };
 
-    let namespace = cmd
-        .namespace
-        .unwrap_or_else(|| config.memory.default_namespace.clone());
+    let category = cmd
+        .category
+        .unwrap_or_else(|| config.memory.default_category.clone());
 
-    let mut memory = Memory::new(memory_type, content.clone(), namespace);
+    let mut memory = Memory::new(memory_type, content.clone(), category);
+
+    // Handle tags
+    if let Some(tags_str) = cmd.tags {
+        memory.tags = tags_str.split(',').map(|s| s.trim().to_string()).collect();
+    }
 
     if let Some(importance) = cmd.importance {
         memory.importance = importance.clamp(1, 10);
@@ -101,7 +109,7 @@ pub async fn handle(
 
     if cmd.json {
         let json = serde_json::to_string_pretty(&memory)?;
-        println!("{}", json);
+        println!("{json}");
     } else {
         println!("✓ Added memory: {}", memory.id);
         println!("  Type: {:?}", memory.memory_type);
@@ -131,7 +139,7 @@ async fn handle_json_input(
 
         if cmd.json {
             let json = serde_json::to_string_pretty(&results)?;
-            println!("{}", json);
+            println!("{json}");
         } else {
             println!("✓ Added {} memories", results.len());
             for memory in &results {
@@ -148,7 +156,7 @@ async fn handle_json_input(
 
     if cmd.json {
         let json = serde_json::to_string_pretty(&memory)?;
-        println!("{}", json);
+        println!("{json}");
     } else {
         println!("✓ Added memory: {}", memory.id);
         println!("  Type: {:?}", memory.memory_type);
@@ -207,18 +215,18 @@ async fn process_json_memory(
     };
 
     // Extract namespace
-    let namespace = if let Some(ns) = cmd.namespace.as_ref() {
+    let category = if let Some(ns) = cmd.category.as_ref() {
         ns.clone()
-    } else if let Some(ns_val) = obj.get("namespace") {
+    } else if let Some(ns_val) = obj.get("category") {
         ns_val
             .as_str()
-            .unwrap_or(&config.memory.default_namespace)
+            .unwrap_or(&config.memory.default_category)
             .to_string()
     } else {
-        config.memory.default_namespace.clone()
+        config.memory.default_category.clone()
     };
 
-    let mut memory = Memory::new(memory_type, content.clone(), namespace);
+    let mut memory = Memory::new(memory_type, content.clone(), category);
 
     // Extract importance
     if let Some(importance) = cmd.importance {
@@ -226,6 +234,18 @@ async fn process_json_memory(
     } else if let Some(imp_val) = obj.get("importance") {
         if let Some(imp) = imp_val.as_i64() {
             memory.importance = (imp as i32).clamp(1, 10);
+        }
+    }
+
+    // Extract tags
+    if let Some(tags_str) = cmd.tags.as_ref() {
+        memory.tags = tags_str.split(',').map(|s| s.trim().to_string()).collect();
+    } else if let Some(tags_val) = obj.get("tags") {
+        if let Some(tags_arr) = tags_val.as_array() {
+            memory.tags = tags_arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
         }
     }
 

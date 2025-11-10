@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS memories (
     importance INTEGER DEFAULT 5,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    namespace TEXT DEFAULT 'default'
+    category TEXT DEFAULT 'default',
+    tags JSON DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -39,7 +40,7 @@ CREATE TABLE IF NOT EXISTS relationships (
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
-CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
+CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_memory_entities_memory ON memory_entities(memory_id);
 CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);
 "#;
