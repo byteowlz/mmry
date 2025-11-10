@@ -1,17 +1,15 @@
 [workspace]
-members = [
-    "crates/mmry-core",
-    "crates/mmry-cli",
-    "crates/mmry-mcp",
-]
+members = ["crates/mmry-core", "crates/mmry-cli", "crates/mmry-mcp"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Tommy Falkowski"]
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/tommyfalkowski/mmry"
+authors = ["byteowlz"]
+license = "MIT"
+repository = "https://github.com/byteowlz/mmry"
+# Do not publish to crates.io (set to true when ready)
+publish = false
 
 [workspace.dependencies]
 # Core dependencies

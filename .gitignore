@@ -1,25 +1,27 @@
-# Rust
-/target
-Cargo.lock
 **/*.rs.bk
-*.pdb
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# mmry data
 *.db
 *.db-shm
 *.db-wal
-.fastembed_cache/
-
-# Logs
+*.egg-info
 *.log
+*.pdb
+*.py[oc]
+*.swo
+*.swp
+*~
+.DS_Store
+.DS_Store_
+.env 
+.fastembed_cache/
+.idea/
+.venv/
+.vscode/
+/target
+Applications/ 
+Cargo.lock
+Thumbs.db
+_pycache__/ 
+build/
+dist/
+wheels/ 
+docs/
