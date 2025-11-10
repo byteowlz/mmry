@@ -1,0 +1,40 @@
+[package]
+name = "mmry-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+fastembed = { workspace = true }
+strsim = { workspace = true }
+once_cell = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+shellexpand = "3.1"
+ort = { version = "=2.0.0-rc.10", default-features = false, optional = true }
+
+[features]
+default = []
+ort-coreml = ["dep:ort", "ort?/coreml"]
+ort-cuda = ["dep:ort", "ort?/cuda"]
+ort-directml = ["dep:ort", "ort?/directml"]
+ort-openvino = ["dep:ort", "ort?/openvino"]
+ort-tensorrt = ["dep:ort", "ort?/tensorrt"]
+ort-rocm = ["dep:ort", "ort?/rocm"]
+ort-nnapi = ["dep:ort", "ort?/nnapi"]
+ort-xnnpack = ["dep:ort", "ort?/xnnpack"]
+ort-load-dynamic = ["dep:ort", "ort?/load-dynamic"]
+
+[dev-dependencies]
+tokio-test = "0.4"

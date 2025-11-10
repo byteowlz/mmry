@@ -1,0 +1,120 @@
+# Example mmry configuration file
+# Place this at ~/.config/mmry/config.toml or $XDG_CONFIG_HOME/mmry/config.toml
+#
+# Note: Paths support tilde (~) expansion and environment variables
+# Examples:
+#   - "~/path/to/file" expands to "$HOME/path/to/file"
+#   - "$XDG_DATA_HOME/mmry" expands based on the environment
+#   - "$HOME/.local/share/mmry" works too
+
+[database]
+# Path to the SQLite database file
+# You can use ~ or environment variables like $HOME or $XDG_DATA_HOME
+path = "~/.local/share/mmry/memories.db"
+# Backup database on startup
+backup_on_startup = true
+# Days to keep backup files
+backup_retention_days = 30
+
+[embeddings]
+# Enable embeddings for semantic search
+enabled = true
+# Embedding model to use (fastembed model codes)
+# Popular options:
+#   - "Xenova/all-MiniLM-L6-v2" (default, fast, 384 dimensions)
+#   - "Xenova/bge-small-en-v1.5" (better quality, 384 dimensions)
+#   - "Xenova/bge-base-en-v1.5" (even better quality, 768 dimensions)
+#   - "nomic-ai/nomic-embed-text-v1.5" (high quality, 768 dimensions)
+model = "Xenova/all-MiniLM-L6-v2"
+# Backend to use (currently only "fastembed" is supported)
+backend = "fastembed"
+# Dimension of embeddings (must match model)
+dimension = 384
+# Batch size for embedding generation
+batch_size = 32
+
+[sparse_embeddings]
+# Enable sparse embeddings (SPLADE++) for neural sparse retrieval
+enabled = false
+# Sparse embedding model (currently only SPLADE++ is supported)
+model = "Qdrant/Splade_PP_en_v1"
+
+[search]
+# Default number of results to return
+default_limit = 10
+# Minimum similarity score for vector search (0.0-1.0)
+similarity_threshold = 0.65
+# Search mode: hybrid, keyword, fuzzy, semantic, bm25, or sparse
+# - hybrid: combines multiple search strategies (default)
+# - keyword: exact and partial keyword matching
+# - fuzzy: approximate string matching (typo-tolerant)
+# - semantic: dense vector embeddings for conceptual similarity
+# - bm25: BM25 statistical relevance (like traditional search engines)
+# - sparse: SPLADE++ learned sparse embeddings
+mode = "hybrid"
+# Boost recently created memories
+boost_recent = true
+# Weight for recency boost (0.0-1.0)
+recency_weight = 0.3
+# Enable reranking for better search results
+rerank_enabled = true
+# Number of top results to rerank
+rerank_top_k = 20
+# Reranker model (optional)
+# Available models (run `mmry rerankers` to see all):
+#   - "BAAI/bge-reranker-base" (default, English and Chinese)
+#   - "rozgo/bge-reranker-v2-m3" (multilingual)
+#   - "jinaai/jina-reranker-v1-turbo-en" (fast, English)
+#   - "jinaai/jina-reranker-v2-base-multilingual" (multilingual)
+rerank_model = "BAAI/bge-reranker-base"
+# Scoring weights for hybrid mode (should sum to ~0.8-1.0 before recency/importance)
+keyword_weight = 0.4             # Exact/partial keyword matches
+fuzzy_weight = 0.2               # Fuzzy string matching
+vector_weight = 0.35             # Dense embeddings similarity
+bm25_weight = 0.0                # BM25 statistical scoring (set to 0.2-0.3 to enable)
+sparse_embedding_weight = 0.0    # SPLADE++ sparse embeddings (set to 0.2-0.3 to enable)
+importance_weight = 0.05         # Memory importance boost
+# BM25 parameters (for bm25 search mode or hybrid with bm25_weight > 0)
+bm25_k1 = 1.2                   # Term frequency saturation (1.2-2.0 typical)
+bm25_b = 0.75                   # Length normalization (0.0-1.0, 0.75 typical)
+
+[memory]
+# Default namespace for memories
+default_namespace = "default"
+# Automatically deduplicate similar memories
+auto_dedupe = true
+# Similarity threshold for deduplication (0.0-1.0)
+dedupe_threshold = 0.95
+# Automatically score importance of memories
+importance_auto_score = true
+
+[entities]
+# Extract entities from memories
+extract_enabled = true
+# Automatically link related entities
+auto_link = true
+# Entity types to extract
+types = ["person", "place", "organization", "project", "technology"]
+
+[cleanup]
+# Automatically prune old/low-importance memories
+auto_prune = false
+# Age threshold for pruning (days)
+prune_threshold_days = 365
+# Minimum importance to keep (1-10)
+prune_importance_min = 2
+
+[integrations.lst]
+# Enable lst (todo/notes) integration
+enabled = true
+# Path to lst data directory (auto-detected if not set)
+# Supports ~ and environment variables like $XDG_DATA_HOME
+# data_dir = "~/.local/share/lst"
+# Only import completed tasks
+only_completed = true
+# Interactive mode for lst integration
+interactive = true
+# Minimum task length to import
+min_task_length = 10
+# Minimum note length to import
+min_note_length = 20

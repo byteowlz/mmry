@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mmry/memory-schema.json",
+  "title": "Memory",
+  "description": "Schema for adding memories to mmry. All fields except 'content' are optional and will be auto-generated or classified if not provided.",
+  "oneOf": [
+    {
+      "$ref": "#/definitions/singleMemory"
+    },
+    {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/singleMemory"
+      },
+      "minItems": 1
+    }
+  ],
+  "definitions": {
+    "singleMemory": {
+      "type": "object",
+      "required": ["content"],
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "The content of the memory",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": ["episodic", "semantic", "procedural"],
+          "description": "Type of memory. Auto-classified if not provided."
+        },
+        "memory_type": {
+          "type": "string",
+          "enum": ["episodic", "semantic", "procedural"],
+          "description": "Alternative field name for type. Auto-classified if not provided."
+        },
+        "namespace": {
+          "type": "string",
+          "description": "Namespace for organizing memories. Defaults to 'default'.",
+          "minLength": 1
+        },
+        "importance": {
+          "type": "integer",
+          "description": "Importance level of the memory",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Additional metadata as key-value pairs"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "examples": [
+    {
+      "content": "Simple memory with auto-generated fields"
+    },
+    {
+      "content": "Important fact about the project",
+      "type": "semantic",
+      "importance": 9
+    },
+    {
+      "content": "Meeting notes from today",
+      "type": "episodic",
+      "namespace": "meetings",
+      "importance": 7
+    },
+    [
+      {
+        "content": "First memory in batch"
+      },
+      {
+        "content": "Second memory in batch",
+        "type": "semantic"
+      }
+    ]
+  ]
+}
