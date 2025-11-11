@@ -13,17 +13,6 @@ pub enum AppEvent {
     Tick,
 }
 
-impl AppEvent {
-    pub fn char(&self) -> Option<char> {
-        if let AppEvent::Key(key) = self {
-            if let KeyCode::Char(c) = key.code {
-                return Some(c);
-            }
-        }
-        None
-    }
-}
-
 pub struct EventHandler {
     tick_rate: Duration,
 }
@@ -76,6 +65,7 @@ pub fn parse_key_event(key: KeyEvent) -> KeyAction {
 
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => KeyAction::PageDown,
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => KeyAction::PageUp,
+        (KeyCode::Tab, _) => KeyAction::CycleSearchMode,
 
         (KeyCode::Char(c), _) => KeyAction::Char(c),
 
@@ -86,36 +76,18 @@ pub fn parse_key_event(key: KeyEvent) -> KeyAction {
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeyAction {
     Quit,
-    ToggleHelp,
-
     Up,
     Down,
     Left,
     Right,
-
-    GPrefix,
-    Bottom,
-
     PageDown,
     PageUp,
-
-    Delete,
-    Edit,
-    Add,
-    Refresh,
-
-    Search,
-    NextResult,
-    PrevResult,
-
-    Sort,
-
     Select,
     Escape,
-    Confirm,
     Backspace,
     Char(char),
     ToggleSelect,
     SelectAll,
+    CycleSearchMode,
     Noop,
 }

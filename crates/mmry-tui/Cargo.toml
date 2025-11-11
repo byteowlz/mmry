@@ -24,3 +24,15 @@ dirs = { workspace = true }
 [[bin]]
 name = "mmry-tui"
 path = "src/main.rs"
+
+[features]
+default = []
+ort-coreml = ["mmry-core/ort-coreml"]
+ort-cuda = ["mmry-core/ort-cuda"]
+ort-directml = ["mmry-core/ort-directml"]
+ort-openvino = ["mmry-core/ort-openvino"]
+ort-tensorrt = ["mmry-core/ort-tensorrt"]
+ort-rocm = ["mmry-core/ort-rocm"]
+ort-nnapi = ["mmry-core/ort-nnapi"]
+ort-xnnpack = ["mmry-core/ort-xnnpack"]
+ort-load-dynamic = ["mmry-core/ort-load-dynamic"]

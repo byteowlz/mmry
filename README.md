@@ -9,8 +9,8 @@ A local-first memory system for humans and AI agents. Store any text and find it
 ### CLI
 
 ```bash
-# Install
-cargo install --git https://github.com/byteowlz/mmry mmry-cli
+# Install (interactive script installs both CLI + TUI and asks for ORT features)
+just install-all
 
 # Add memories
 mmry add "I love coding in Rust"
@@ -29,8 +29,7 @@ mmry search "important" --json | jq '.[].content'
 ### TUI
 
 ```bash
-# Install
-cargo install --git https://github.com/byteowlz/mmry mmry-tui
+# Install (already handled by `just install-all`)
 
 # Launch the TUI
 mmry-tui
@@ -40,6 +39,7 @@ mmry-tui
 # - e to edit memory in your $EDITOR
 # - d to delete (with confirmation)
 # - / to search
+# - Tab to cycle search mode
 # - s to sort
 # - ? for help
 ```

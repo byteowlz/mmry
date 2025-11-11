@@ -16,22 +16,26 @@ pub struct AddCmd {
     /// The content of the memory to add (use "-" to read from stdin, supports JSON)
     pub content: String,
 
-    #[arg(long, help = "Memory type (episodic, semantic, procedural)")]
+    #[arg(
+        long = "memory-type",
+        short = 'm',
+        help = "Memory type (episodic, semantic, procedural)"
+    )]
     pub memory_type: Option<String>,
 
-    #[arg(long, help = "Category for the memory")]
+    #[arg(long, short = 'c', help = "Category for the memory")]
     pub category: Option<String>,
 
-    #[arg(long, help = "Tags for the memory (comma-separated)")]
+    #[arg(long, short = 't', help = "Tags for the memory (comma-separated)")]
     pub tags: Option<String>,
 
-    #[arg(long, help = "Importance (1-10)")]
+    #[arg(long, short = 'i', help = "Importance (1-10)")]
     pub importance: Option<i32>,
 
-    #[arg(long, help = "Output result as JSON")]
+    #[arg(long, short = 'j', help = "Output result as JSON")]
     pub json: bool,
 
-    #[arg(long, help = "Include full embeddings in JSON output")]
+    #[arg(long, short = 'f', help = "Include full embeddings in JSON output")]
     pub full: bool,
 }
 
@@ -219,8 +223,12 @@ mod tests {
 
         let stored = operations::list_memories(db.pool(), None, 10).await?;
         assert_eq!(stored.len(), 2);
-        assert!(stored.iter().any(|m| m.category == "work" && m.content == "First memory"));
-        assert!(stored.iter().any(|m| m.importance == 9 && m.content == "Second memory"));
+        assert!(stored
+            .iter()
+            .any(|m| m.category == "work" && m.content == "First memory"));
+        assert!(stored
+            .iter()
+            .any(|m| m.importance == 9 && m.content == "Second memory"));
 
         db.close().await;
         Ok(())

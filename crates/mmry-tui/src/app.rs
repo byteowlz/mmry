@@ -3,28 +3,50 @@ use crossterm::cursor;
 use crossterm::execute;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
-use crossterm::terminal::Clear;
-use crossterm::terminal::ClearType;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use mmry_core::config::Config;
+use mmry_core::config::SearchMode;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
+use mmry_core::embeddings::EmbeddingService;
 use mmry_core::memory::Memory;
+use mmry_core::reranker::RerankerService;
+use mmry_core::search::SearchService;
+use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use std::collections::HashSet;
 use std::io::Write;
 use std::io::{self};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::editor;
 use crate::events::parse_key_event;
 use crate::events::AppEvent;
 use crate::events::KeyAction;
+use crate::state::sort::SortMode;
 use crate::state::AppMode;
 use crate::state::FilterState;
 use crate::state::Pane;
 use crate::state::Selection;
 use crate::state::SortState;
+
+const SEARCH_MODES: [SearchMode; 6] = [
+    SearchMode::Hybrid,
+    SearchMode::Keyword,
+    SearchMode::Fuzzy,
+    SearchMode::Semantic,
+    SearchMode::Bm25,
+    SearchMode::SparseEmbedding,
+];
+const SORT_MODES: [SortMode; 6] = [
+    SortMode::DateNewest,
+    SortMode::DateOldest,
+    SortMode::ImportanceHigh,
+    SortMode::ImportanceLow,
+    SortMode::Category,
+    SortMode::Type,
+];
 
 pub enum LeftPaneItem {
     FilterAll,
@@ -41,6 +63,10 @@ pub enum LeftPaneItem {
 pub struct App {
     pub config: Config,
     pub db: Database,
+    search_service: SearchService,
+    search_mode_index: usize,
+    sort_menu_index: usize,
+    search_backup: Option<Vec<Memory>>,
     pub memories: Vec<Memory>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
@@ -64,10 +90,24 @@ impl App {
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
         let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+        let embeddings = Arc::new(EmbeddingService::new(&config.embeddings)?);
+        let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
+        let reranker = Arc::new(RerankerService::from_config(&config.search)?);
+        let search_service = SearchService::new(
+            db.pool().clone(),
+            config.search.clone(),
+            Arc::clone(&embeddings),
+            Arc::clone(&sparse_embeddings),
+            Arc::clone(&reranker),
+        );
 
         let mut app = Self {
             config,
             db,
+            search_service,
+            search_mode_index: 0,
+            sort_menu_index: 0,
+            search_backup: None,
             memories: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
@@ -83,6 +123,7 @@ impl App {
             needs_redraw: false,
         };
 
+        app.search_mode_index = app.index_for_mode(app.config.search.mode);
         app.refresh_memories().await?;
         app.update_categories_and_tags();
 
@@ -93,6 +134,7 @@ impl App {
         self.memories = operations::list_memories(self.db.pool(), None, 1000).await?;
         self.sort_state.sort_memories(&mut self.memories);
         self.update_categories_and_tags();
+        self.search_backup = None;
         Ok(())
     }
 
@@ -370,9 +412,17 @@ impl App {
 
             KeyAction::Char('/') | KeyAction::Char(':') => {
                 self.mode = AppMode::Search(String::new());
+                self.search_mode_index = self.index_for_mode(self.config.search.mode);
+            }
+
+            KeyAction::Escape => {
+                if self.restore_search_results() {
+                    return Ok(true);
+                }
             }
 
             KeyAction::Char('s') => {
+                self.sort_menu_index = self.index_for_sort_mode(self.sort_state.mode);
                 self.mode = AppMode::Sort;
             }
 
@@ -391,6 +441,9 @@ impl App {
                 KeyAction::Char(c) => {
                     query.push(c);
                 }
+                KeyAction::ToggleSelect => {
+                    query.push(' ');
+                }
                 KeyAction::Backspace => {
                     query.pop();
                 }
@@ -401,8 +454,12 @@ impl App {
                         self.perform_search(&search_query).await?;
                     }
                 }
+                KeyAction::CycleSearchMode => {
+                    self.search_mode_index = (self.search_mode_index + 1) % SEARCH_MODES.len();
+                }
                 KeyAction::Escape => {
                     self.mode = AppMode::Normal;
+                    self.restore_search_results();
                 }
                 _ => {}
             }
@@ -410,8 +467,29 @@ impl App {
         Ok(true)
     }
 
-    async fn perform_search(&mut self, _query: &str) -> Result<()> {
-        self.status_message = Some("Search functionality coming soon".to_string());
+    async fn perform_search(&mut self, query: &str) -> Result<()> {
+        if self.search_backup.is_none() {
+            self.search_backup = Some(self.memories.clone());
+        }
+        let limit = self.config.search.default_limit as i64;
+        let mode = self.current_search_mode();
+        let results = self
+            .search_service
+            .search_with_options(query, None, limit, Some(mode), None)
+            .await?;
+
+        if results.is_empty() {
+            self.status_message = Some(format!("No memories found for \"{query}\""));
+        } else {
+            self.memories = results;
+            self.middle_selection.reset();
+            self.status_message = Some(format!(
+                "Showing {} result(s) for \"{query}\"",
+                self.memories.len()
+            ));
+        }
+
+        self.update_categories_and_tags();
         Ok(())
     }
 
@@ -475,44 +553,43 @@ impl App {
     }
 
     async fn handle_sort_mode(&mut self, action: KeyAction) -> Result<bool> {
-        use crate::state::sort::SortMode;
-
         match action {
+            KeyAction::Up | KeyAction::Char('k') => {
+                if self.sort_menu_index == 0 {
+                    self.sort_menu_index = SORT_MODES.len() - 1;
+                } else {
+                    self.sort_menu_index -= 1;
+                }
+            }
+            KeyAction::Down | KeyAction::Char('j') => {
+                self.sort_menu_index = (self.sort_menu_index + 1) % SORT_MODES.len();
+            }
+            KeyAction::Select => {
+                self.apply_sort_selection();
+            }
             KeyAction::Char('1') => {
-                self.sort_state.mode = SortMode::DateNewest;
-                self.sort_state.sort_memories(&mut self.memories);
-                self.mode = AppMode::Normal;
-                self.status_message = Some("Sorted by date (newest first)".to_string());
+                self.sort_menu_index = 0;
+                self.apply_sort_selection();
             }
             KeyAction::Char('2') => {
-                self.sort_state.mode = SortMode::DateOldest;
-                self.sort_state.sort_memories(&mut self.memories);
-                self.mode = AppMode::Normal;
-                self.status_message = Some("Sorted by date (oldest first)".to_string());
+                self.sort_menu_index = 1;
+                self.apply_sort_selection();
             }
             KeyAction::Char('3') => {
-                self.sort_state.mode = SortMode::ImportanceHigh;
-                self.sort_state.sort_memories(&mut self.memories);
-                self.mode = AppMode::Normal;
-                self.status_message = Some("Sorted by importance (high to low)".to_string());
+                self.sort_menu_index = 2;
+                self.apply_sort_selection();
             }
             KeyAction::Char('4') => {
-                self.sort_state.mode = SortMode::ImportanceLow;
-                self.sort_state.sort_memories(&mut self.memories);
-                self.mode = AppMode::Normal;
-                self.status_message = Some("Sorted by importance (low to high)".to_string());
+                self.sort_menu_index = 3;
+                self.apply_sort_selection();
             }
             KeyAction::Char('5') => {
-                self.sort_state.mode = SortMode::Category;
-                self.sort_state.sort_memories(&mut self.memories);
-                self.mode = AppMode::Normal;
-                self.status_message = Some("Sorted by category".to_string());
+                self.sort_menu_index = 4;
+                self.apply_sort_selection();
             }
             KeyAction::Char('6') => {
-                self.sort_state.mode = SortMode::Type;
-                self.sort_state.sort_memories(&mut self.memories);
-                self.mode = AppMode::Normal;
-                self.status_message = Some("Sorted by type".to_string());
+                self.sort_menu_index = 5;
+                self.apply_sort_selection();
             }
             KeyAction::Escape => {
                 self.mode = AppMode::Normal;
@@ -799,5 +876,65 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    fn restore_search_results(&mut self) -> bool {
+        if let Some(original) = self.search_backup.take() {
+            self.memories = original;
+            self.sort_state.sort_memories(&mut self.memories);
+            self.update_categories_and_tags();
+            self.middle_selection.reset();
+            self.status_message = Some("Exited search results".to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn current_search_mode(&self) -> SearchMode {
+        SEARCH_MODES[self.search_mode_index % SEARCH_MODES.len()]
+    }
+
+    fn index_for_mode(&self, mode: SearchMode) -> usize {
+        SEARCH_MODES.iter().position(|m| *m == mode).unwrap_or(0)
+    }
+
+    pub fn current_search_mode_label(&self) -> &'static str {
+        match self.current_search_mode() {
+            SearchMode::Hybrid => "Hybrid",
+            SearchMode::Keyword => "Keyword",
+            SearchMode::Fuzzy => "Fuzzy",
+            SearchMode::Semantic => "Semantic",
+            SearchMode::Bm25 => "BM25",
+            SearchMode::SparseEmbedding => "Sparse",
+        }
+    }
+
+    fn index_for_sort_mode(&self, mode: SortMode) -> usize {
+        SORT_MODES.iter().position(|m| *m == mode).unwrap_or(0)
+    }
+
+    fn apply_sort_selection(&mut self) {
+        let mode = SORT_MODES[self.sort_menu_index % SORT_MODES.len()];
+        self.sort_state.set_mode(mode);
+        self.sort_state.sort_memories(&mut self.memories);
+        self.middle_selection.reset();
+        self.status_message = Some(self.sort_status_message(mode).to_string());
+        self.mode = AppMode::Normal;
+    }
+
+    fn sort_status_message(&self, mode: SortMode) -> &'static str {
+        match mode {
+            SortMode::DateNewest => "Sorted by date (newest first)",
+            SortMode::DateOldest => "Sorted by date (oldest first)",
+            SortMode::ImportanceHigh => "Sorted by importance (high to low)",
+            SortMode::ImportanceLow => "Sorted by importance (low to high)",
+            SortMode::Category => "Sorted by category",
+            SortMode::Type => "Sorted by type",
+        }
+    }
+
+    pub fn is_sort_option_selected(&self, index: usize) -> bool {
+        self.sort_menu_index % SORT_MODES.len() == index % SORT_MODES.len()
     }
 }

@@ -19,6 +19,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
         f.render_widget(Clear, area);
 
+        let mode_label = app.current_search_mode_label();
+
         let input_text = vec![
             Line::from(vec![
                 Span::styled("Search: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -28,11 +30,11 @@ pub fn draw(f: &mut Frame, app: &App) {
             Line::from(""),
             Line::from(vec![
                 Span::styled("Mode: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled("Hybrid", Style::default().fg(Color::Cyan)),
+                Span::styled(mode_label, Style::default().fg(Color::Cyan)),
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "Enter to search | ESC to cancel",
+                "Enter to search | Tab to change mode | ESC to cancel",
                 Style::default().fg(Color::DarkGray),
             )),
         ];

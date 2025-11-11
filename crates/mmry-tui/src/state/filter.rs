@@ -1,16 +1,6 @@
 use mmry_core::memory::MemoryType;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Filter {
-    All,
-    Category(String),
-    Tag(String),
-    MemoryType(MemoryType),
-    Recent,
-    Important,
-}
-
 #[derive(Debug, Clone)]
 pub struct FilterState {
     pub enabled_categories: HashSet<String>,

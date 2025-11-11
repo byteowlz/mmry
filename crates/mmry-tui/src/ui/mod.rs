@@ -101,6 +101,7 @@ fn draw_delete_multiple_confirmation(f: &mut Frame, count: usize) {
 
 fn draw_sort_menu(f: &mut Frame, app: &App) {
     use ratatui::style::Color;
+    use ratatui::style::Modifier;
     use ratatui::style::Style;
     use ratatui::text::Line;
     use ratatui::text::Span;
@@ -120,11 +121,16 @@ fn draw_sort_menu(f: &mut Frame, app: &App) {
 
     let items = vec![
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::DateNewest {
-                "> "
+            if app.is_sort_option_selected(0) {
+                Span::styled(
+                    "◉ ",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                "  "
-            }),
+                Span::raw("  ")
+            },
             Span::styled(
                 "1. Date (newest first)",
                 Style::default().fg(if current_mode == SortMode::DateNewest {
@@ -135,19 +141,29 @@ fn draw_sort_menu(f: &mut Frame, app: &App) {
             ),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::DateOldest {
-                "> "
+            if app.is_sort_option_selected(1) {
+                Span::styled(
+                    "◉ ",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                "  "
-            }),
+                Span::raw("  ")
+            },
             Span::raw("2. Date (oldest first)"),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::ImportanceHigh {
-                "> "
+            if app.is_sort_option_selected(2) {
+                Span::styled(
+                    "◉ ",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                "  "
-            }),
+                Span::raw("  ")
+            },
             Span::styled(
                 "3. Importance (high to low)",
                 Style::default().fg(if current_mode == SortMode::ImportanceHigh {
@@ -158,19 +174,29 @@ fn draw_sort_menu(f: &mut Frame, app: &App) {
             ),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::ImportanceLow {
-                "> "
+            if app.is_sort_option_selected(3) {
+                Span::styled(
+                    "◉ ",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                "  "
-            }),
+                Span::raw("  ")
+            },
             Span::raw("4. Importance (low to high)"),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::Category {
-                "> "
+            if app.is_sort_option_selected(4) {
+                Span::styled(
+                    "◉ ",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                "  "
-            }),
+                Span::raw("  ")
+            },
             Span::styled(
                 "5. Category (A-Z)",
                 Style::default().fg(if current_mode == SortMode::Category {
@@ -181,11 +207,16 @@ fn draw_sort_menu(f: &mut Frame, app: &App) {
             ),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::Type {
-                "> "
+            if app.is_sort_option_selected(5) {
+                Span::styled(
+                    "◉ ",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                "  "
-            }),
+                Span::raw("  ")
+            },
             Span::raw("6. Memory Type"),
         ])),
     ];

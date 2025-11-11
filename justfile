@@ -18,6 +18,10 @@ install:
     rustup show active-toolchain
     cargo fetch
 
+# Install CLI and TUI with an optional shared ORT feature
+install-all:
+    ./scripts/install-mmry.sh
+
 # Run `cargo nextest` since it's faster than `cargo test`, though including
 # --no-fail-fast is important to ensure all tests are run.
 #
