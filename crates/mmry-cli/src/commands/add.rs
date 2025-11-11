@@ -122,6 +122,111 @@ pub async fn handle(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mmry_core::config::Config;
+    use mmry_core::database::operations;
+    use mmry_core::database::Database;
+    use mmry_core::embeddings::EmbeddingService;
+    use mmry_core::sparse_embeddings::SparseEmbeddingService;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    async fn setup_context() -> anyhow::Result<(
+        tempfile::TempDir,
+        Config,
+        Database,
+        Arc<EmbeddingService>,
+        Arc<SparseEmbeddingService>,
+    )> {
+        let temp = tempdir()?;
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.embeddings.enabled = false;
+        config.embeddings.dimension = 3;
+        config.sparse_embeddings.enabled = false;
+
+        let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+        let embeddings = Arc::new(EmbeddingService::new(&config.embeddings)?);
+        let sparse = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
+
+        Ok((temp, config, db, embeddings, sparse))
+    }
+
+    #[tokio::test]
+    async fn add_command_persists_plain_text_memory() -> anyhow::Result<()> {
+        let (_temp, config, db, embeddings, sparse_embeddings) = setup_context().await?;
+
+        let cmd = AddCmd {
+            content: "remember the milk".to_string(),
+            memory_type: None,
+            category: None,
+            tags: None,
+            importance: None,
+            json: false,
+            full: false,
+        };
+
+        handle(
+            cmd,
+            &config,
+            &db,
+            Arc::clone(&embeddings),
+            Arc::clone(&sparse_embeddings),
+        )
+        .await?;
+
+        let stored = operations::list_memories(db.pool(), None, 10).await?;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].content, "remember the milk");
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_command_accepts_json_arrays() -> anyhow::Result<()> {
+        let (_temp, config, db, embeddings, sparse_embeddings) = setup_context().await?;
+
+        let json_payload = r#"
+        [
+            {"content": "First memory", "category": "work"},
+            {"content": "Second memory", "importance": 9}
+        ]
+        "#
+        .trim()
+        .to_string();
+
+        let cmd = AddCmd {
+            content: json_payload,
+            memory_type: None,
+            category: None,
+            tags: None,
+            importance: None,
+            json: true,
+            full: false,
+        };
+
+        handle(
+            cmd,
+            &config,
+            &db,
+            Arc::clone(&embeddings),
+            Arc::clone(&sparse_embeddings),
+        )
+        .await?;
+
+        let stored = operations::list_memories(db.pool(), None, 10).await?;
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().any(|m| m.category == "work" && m.content == "First memory"));
+        assert!(stored.iter().any(|m| m.importance == 9 && m.content == "Second memory"));
+
+        db.close().await;
+        Ok(())
+    }
+}
+
 async fn handle_json_input(
     json_value: serde_json::Value,
     cmd: AddCmd,

@@ -1,10 +1,10 @@
 pub mod filter;
-pub mod sort;
 pub mod selection;
+pub mod sort;
 
 pub use filter::FilterState;
-pub use sort::SortState;
 pub use selection::Selection;
+pub use sort::SortState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {

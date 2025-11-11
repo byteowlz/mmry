@@ -1,3 +1,5 @@
+use super::delete_vector_embedding;
+use super::upsert_vector_embedding;
 use crate::memory::Memory;
 use crate::sparse_embeddings::StoredSparseEmbedding;
 use sqlx::Row;
@@ -34,6 +36,10 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(memory.updated_at.to_rfc3339())
     .execute(pool)
     .await?;
+
+    if let Some(embedding) = memory.embedding.as_ref() {
+        upsert_vector_embedding(pool, &memory.id, embedding).await?;
+    }
 
     Ok(())
 }
@@ -156,7 +162,12 @@ pub async fn delete_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<bool> {
     .execute(pool)
     .await?;
 
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() > 0 {
+        delete_vector_embedding(pool, &id).await?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 pub async fn update_memory_embeddings(
@@ -181,6 +192,12 @@ pub async fn update_memory_embeddings(
     .bind(id.to_string())
     .execute(pool)
     .await?;
+
+    if let Some(vec) = embedding {
+        upsert_vector_embedding(pool, id, vec).await?;
+    } else {
+        delete_vector_embedding(pool, id).await?;
+    }
 
     Ok(())
 }

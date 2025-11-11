@@ -5,12 +5,15 @@ mod state;
 mod ui;
 
 use anyhow::Result;
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ratatui::{backend::CrosstermBackend, Terminal};
+use crossterm::event::DisableMouseCapture;
+use crossterm::event::EnableMouseCapture;
+use crossterm::execute;
+use crossterm::terminal::disable_raw_mode;
+use crossterm::terminal::enable_raw_mode;
+use crossterm::terminal::EnterAlternateScreen;
+use crossterm::terminal::LeaveAlternateScreen;
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use std::io;
 
 use app::App;
@@ -55,14 +58,14 @@ async fn run_app<B: ratatui::backend::Backend>(
             terminal.clear()?;
             needs_full_redraw = false;
         }
-        
+
         terminal.draw(|f| ui::draw(f, app))?;
 
         if let Some(event) = event_handler.next()? {
             if !app.handle_event(event).await? {
                 break;
             }
-            
+
             // Check if we need a full redraw (after returning from editor)
             if app.needs_redraw {
                 needs_full_redraw = true;

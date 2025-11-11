@@ -56,7 +56,7 @@ impl Selection {
     pub fn next(&mut self, max: usize, page_size: usize) {
         if self.index < max.saturating_sub(1) {
             self.index += 1;
-            
+
             if self.index >= self.offset + page_size {
                 self.offset = self.index.saturating_sub(page_size - 1);
             }
@@ -66,7 +66,7 @@ impl Selection {
     pub fn previous(&mut self) {
         if self.index > 0 {
             self.index -= 1;
-            
+
             if self.index < self.offset {
                 self.offset = self.index;
             }
@@ -105,10 +105,13 @@ impl Selection {
         for &idx in removed_indices {
             self.selected_indices.remove(&idx);
         }
-        
+
         let mut new_selected = HashSet::new();
         for &selected_idx in &self.selected_indices {
-            let removed_before = removed_indices.iter().filter(|&&i| i < selected_idx).count();
+            let removed_before = removed_indices
+                .iter()
+                .filter(|&&i| i < selected_idx)
+                .count();
             new_selected.insert(selected_idx - removed_before);
         }
         self.selected_indices = new_selected;
@@ -118,5 +121,50 @@ impl Selection {
 impl Default for Selection {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Selection;
+
+    #[test]
+    fn toggle_selection_marks_and_unmarks_index() {
+        let mut selection = Selection::new();
+        selection.toggle_selection();
+        assert!(selection.is_selected(0));
+
+        selection.toggle_selection();
+        assert!(!selection.is_selected(0));
+        assert_eq!(selection.selection_count(), 0);
+    }
+
+    #[test]
+    fn paging_updates_index_and_offset() {
+        let mut selection = Selection::new();
+        selection.page_down(50, 10);
+        assert_eq!(selection.index, 10);
+        assert_eq!(selection.offset, 10);
+
+        selection.page_down(50, 10);
+        assert_eq!(selection.index, 20);
+        assert_eq!(selection.offset, 20);
+
+        selection.page_up(10);
+        assert_eq!(selection.index, 10);
+        assert_eq!(selection.offset, 10);
+    }
+
+    #[test]
+    fn remove_indices_compacts_remaining_selection() {
+        let mut selection = Selection::new();
+        selection.index = 2;
+        selection.toggle_selection(); // select index 2
+        selection.index = 4;
+        selection.toggle_selection(); // select index 4
+
+        selection.remove_indices(&[1, 3]);
+        let indices = selection.get_selected_indices();
+        assert_eq!(indices, vec![1, 2]);
     }
 }

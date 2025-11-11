@@ -1,5 +1,9 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::Event;
+use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
+use crossterm::event::KeyModifiers;
+use crossterm::event::{self};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,10 +55,10 @@ pub fn parse_key_event(key: KeyEvent) -> KeyAction {
         (KeyCode::Enter, _) => KeyAction::Select,
         (KeyCode::Backspace, _) => KeyAction::Backspace,
         (KeyCode::Char(' '), KeyModifiers::NONE) => KeyAction::ToggleSelect,
-        
+
         (KeyCode::Char('q'), KeyModifiers::NONE) => KeyAction::Char('q'),
         (KeyCode::Char('?'), KeyModifiers::SHIFT) => KeyAction::Char('?'),
-        
+
         (KeyCode::Char('j'), KeyModifiers::NONE) => KeyAction::Char('j'),
         (KeyCode::Char('k'), KeyModifiers::NONE) => KeyAction::Char('k'),
         (KeyCode::Char('h'), KeyModifiers::NONE) => KeyAction::Char('h'),
@@ -63,18 +67,18 @@ pub fn parse_key_event(key: KeyEvent) -> KeyAction {
         (KeyCode::Up, _) => KeyAction::Up,
         (KeyCode::Left, _) => KeyAction::Left,
         (KeyCode::Right, _) => KeyAction::Right,
-        
+
         (KeyCode::Char('g'), KeyModifiers::NONE) => KeyAction::Char('g'),
         (KeyCode::Char('G'), KeyModifiers::SHIFT) => KeyAction::Char('G'),
         (KeyCode::Char('V'), KeyModifiers::SHIFT) => KeyAction::Char('V'),
-        
+
         (KeyCode::Char('a'), KeyModifiers::CONTROL) => KeyAction::SelectAll,
-        
+
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => KeyAction::PageDown,
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => KeyAction::PageUp,
-        
+
         (KeyCode::Char(c), _) => KeyAction::Char(c),
-        
+
         _ => KeyAction::Noop,
     }
 }
@@ -83,29 +87,29 @@ pub fn parse_key_event(key: KeyEvent) -> KeyAction {
 pub enum KeyAction {
     Quit,
     ToggleHelp,
-    
+
     Up,
     Down,
     Left,
     Right,
-    
+
     GPrefix,
     Bottom,
-    
+
     PageDown,
     PageUp,
-    
+
     Delete,
     Edit,
     Add,
     Refresh,
-    
+
     Search,
     NextResult,
     PrevResult,
-    
+
     Sort,
-    
+
     Select,
     Escape,
     Confirm,

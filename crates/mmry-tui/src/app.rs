@@ -1,23 +1,30 @@
 use anyhow::Result;
-use crossterm::{
-    cursor,
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use mmry_core::{
-    config::Config,
-    database::{operations, Database},
-    memory::Memory,
-};
+use crossterm::cursor;
+use crossterm::execute;
+use crossterm::terminal::disable_raw_mode;
+use crossterm::terminal::enable_raw_mode;
+use crossterm::terminal::Clear;
+use crossterm::terminal::ClearType;
+use crossterm::terminal::EnterAlternateScreen;
+use crossterm::terminal::LeaveAlternateScreen;
+use mmry_core::config::Config;
+use mmry_core::database::operations;
+use mmry_core::database::Database;
+use mmry_core::memory::Memory;
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::Write;
+use std::io::{self};
 use uuid::Uuid;
 
-use crate::{
-    editor,
-    events::{parse_key_event, AppEvent, KeyAction},
-    state::{AppMode, FilterState, Pane, Selection, SortState},
-};
+use crate::editor;
+use crate::events::parse_key_event;
+use crate::events::AppEvent;
+use crate::events::KeyAction;
+use crate::state::AppMode;
+use crate::state::FilterState;
+use crate::state::Pane;
+use crate::state::Selection;
+use crate::state::SortState;
 
 pub enum LeftPaneItem {
     FilterAll,
@@ -37,17 +44,17 @@ pub struct App {
     pub memories: Vec<Memory>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
-    
+
     pub mode: AppMode,
     pub active_pane: Pane,
-    
+
     pub left_selection: Selection,
     pub middle_selection: Selection,
     pub right_scroll: usize,
-    
+
     pub filter_state: FilterState,
     pub sort_state: SortState,
-    
+
     pub g_prefix: bool,
     pub status_message: Option<String>,
     pub needs_redraw: bool,
@@ -56,8 +63,8 @@ pub struct App {
 impl App {
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
-        let db = Database::init(&config.database.path).await?;
-        
+        let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+
         let mut app = Self {
             config,
             db,
@@ -75,42 +82,44 @@ impl App {
             status_message: None,
             needs_redraw: false,
         };
-        
+
         app.refresh_memories().await?;
         app.update_categories_and_tags();
-        
+
         Ok(app)
     }
-    
+
     pub async fn refresh_memories(&mut self) -> Result<()> {
         self.memories = operations::list_memories(self.db.pool(), None, 1000).await?;
         self.sort_state.sort_memories(&mut self.memories);
         self.update_categories_and_tags();
         Ok(())
     }
-    
+
     fn update_categories_and_tags(&mut self) {
         let mut categories = HashSet::new();
         let mut tags = HashSet::new();
-        
+
         for memory in &self.memories {
             categories.insert(memory.category.clone());
             for tag in &memory.tags {
                 tags.insert(tag.clone());
             }
         }
-        
+
         self.categories = categories.into_iter().collect();
         self.categories.sort();
-        
+
         self.tags = tags.into_iter().collect();
         self.tags.sort();
     }
-    
+
     pub fn selected_memory(&self) -> Option<&Memory> {
-        self.filtered_memories().get(self.middle_selection.index).copied()
+        self.filtered_memories()
+            .get(self.middle_selection.index)
+            .copied()
     }
-    
+
     pub fn filtered_memories(&self) -> Vec<&Memory> {
         self.memories
             .iter()
@@ -119,20 +128,21 @@ impl App {
                 if !self.filter_state.is_category_enabled(&m.category) {
                     return false;
                 }
-                
+
                 // Type filter
                 if !self.filter_state.is_type_enabled(&m.memory_type) {
                     return false;
                 }
-                
+
                 // Tag filter - if any tags are filtered, at least one of the memory's tags must be enabled
                 if !self.filter_state.enabled_tags.is_empty() {
-                    let has_enabled_tag = m.tags.iter().any(|t| self.filter_state.is_tag_enabled(t));
+                    let has_enabled_tag =
+                        m.tags.iter().any(|t| self.filter_state.is_tag_enabled(t));
                     if !has_enabled_tag {
                         return false;
                     }
                 }
-                
+
                 // Recent filter (last 7 days)
                 if self.filter_state.show_recent {
                     let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
@@ -140,79 +150,106 @@ impl App {
                         return false;
                     }
                 }
-                
+
                 // Important filter (importance > 7)
                 if self.filter_state.show_important && m.importance <= 7 {
                     return false;
                 }
-                
+
                 true
             })
             .collect()
     }
-    
+
     pub fn get_left_pane_item_count(&self) -> usize {
         // FILTERS header (1) + All/Recent/Important (3) + separator (1)
         // + MEMORY TYPES header (1) + Episodic/Semantic/Procedural (3) + separator (1)
         // + CATEGORIES header (1) + categories (N) + separator (1)
         // + TAGS header (1) + tags (up to 10)
-        let count = 1 + 3 + 1 + 1 + 3 + 1 + 1 + self.categories.len() + 1 + 1 + self.tags.len().min(10);
+        let count =
+            1 + 3 + 1 + 1 + 3 + 1 + 1 + self.categories.len() + 1 + 1 + self.tags.len().min(10);
         count
     }
-    
+
     pub fn get_selected_left_item(&self) -> Option<LeftPaneItem> {
         let idx = self.left_selection.index;
         let mut current = 0;
-        
-        if idx == current { return Some(LeftPaneItem::Separator); }
+
+        if idx == current {
+            return Some(LeftPaneItem::Separator);
+        }
         current += 1;
-        
-        if idx == current { return Some(LeftPaneItem::FilterAll); }
+
+        if idx == current {
+            return Some(LeftPaneItem::FilterAll);
+        }
         current += 1;
-        if idx == current { return Some(LeftPaneItem::FilterRecent); }
+        if idx == current {
+            return Some(LeftPaneItem::FilterRecent);
+        }
         current += 1;
-        if idx == current { return Some(LeftPaneItem::FilterImportant); }
+        if idx == current {
+            return Some(LeftPaneItem::FilterImportant);
+        }
         current += 1;
-        if idx == current { return Some(LeftPaneItem::Separator); }
+        if idx == current {
+            return Some(LeftPaneItem::Separator);
+        }
         current += 1;
-        
-        if idx == current { return Some(LeftPaneItem::Separator); }
+
+        if idx == current {
+            return Some(LeftPaneItem::Separator);
+        }
         current += 1;
-        if idx == current { return Some(LeftPaneItem::TypeEpisodic); }
+        if idx == current {
+            return Some(LeftPaneItem::TypeEpisodic);
+        }
         current += 1;
-        if idx == current { return Some(LeftPaneItem::TypeSemantic); }
+        if idx == current {
+            return Some(LeftPaneItem::TypeSemantic);
+        }
         current += 1;
-        if idx == current { return Some(LeftPaneItem::TypeProcedural); }
+        if idx == current {
+            return Some(LeftPaneItem::TypeProcedural);
+        }
         current += 1;
-        if idx == current { return Some(LeftPaneItem::Separator); }
+        if idx == current {
+            return Some(LeftPaneItem::Separator);
+        }
         current += 1;
-        
-        if idx == current { return Some(LeftPaneItem::Separator); }
+
+        if idx == current {
+            return Some(LeftPaneItem::Separator);
+        }
         current += 1;
-        
+
         for category in &self.categories {
             if idx == current {
                 return Some(LeftPaneItem::Category(category.clone()));
             }
             current += 1;
         }
-        
-        if idx == current { return Some(LeftPaneItem::Separator); }
+
+        if idx == current {
+            return Some(LeftPaneItem::Separator);
+        }
         current += 1;
-        
-        if idx == current { return Some(LeftPaneItem::Separator); }
+
+        if idx == current {
+            return Some(LeftPaneItem::Separator);
+        }
         current += 1;
-        
+
         for tag in self.tags.iter().take(10) {
             if idx == current {
                 return Some(LeftPaneItem::Tag(tag.clone()));
             }
             current += 1;
         }
-        
+
         None
     }
-    
+
     pub async fn handle_event(&mut self, event: AppEvent) -> Result<bool> {
         match event {
             AppEvent::Key(key) => {
@@ -224,7 +261,7 @@ impl App {
         }
         Ok(true)
     }
-    
+
     async fn handle_key_action(&mut self, action: KeyAction) -> Result<bool> {
         match self.mode {
             AppMode::Normal => self.handle_normal_mode(action).await,
@@ -235,7 +272,7 @@ impl App {
             AppMode::Sort => self.handle_sort_mode(action).await,
         }
     }
-    
+
     async fn handle_normal_mode(&mut self, action: KeyAction) -> Result<bool> {
         match action {
             KeyAction::Char('q') => return Ok(false),
@@ -243,12 +280,12 @@ impl App {
             KeyAction::Char('?') => {
                 self.mode = AppMode::Help;
             }
-            
+
             KeyAction::Down | KeyAction::Char('j') => self.move_down(),
             KeyAction::Up | KeyAction::Char('k') => self.move_up(),
             KeyAction::Left | KeyAction::Char('h') => self.switch_pane_left(),
             KeyAction::Right | KeyAction::Char('l') => self.switch_pane_right(),
-            
+
             KeyAction::Char('g') => {
                 if self.g_prefix {
                     self.move_top();
@@ -258,14 +295,15 @@ impl App {
                 }
             }
             KeyAction::Char('G') => self.move_bottom(),
-            
+
             KeyAction::PageDown => self.page_down(),
             KeyAction::PageUp => self.page_up(),
-            
+
             KeyAction::Char('d') => {
                 if self.middle_selection.has_selections() {
                     let filtered = self.filtered_memories();
-                    let ids: Vec<Uuid> = self.middle_selection
+                    let ids: Vec<Uuid> = self
+                        .middle_selection
                         .get_selected_indices()
                         .iter()
                         .filter_map(|&idx| filtered.get(idx).map(|m| m.id))
@@ -275,14 +313,17 @@ impl App {
                     self.mode = AppMode::Delete(memory.id);
                 }
             }
-            
+
             KeyAction::ToggleSelect => {
                 if self.active_pane == Pane::Middle {
                     self.middle_selection.toggle_selection();
                     let count = self.filtered_memories().len();
                     self.middle_selection.next(count, 20);
                     self.status_message = if self.middle_selection.has_selections() {
-                        Some(format!("{} selected", self.middle_selection.selection_count()))
+                        Some(format!(
+                            "{} selected",
+                            self.middle_selection.selection_count()
+                        ))
                     } else {
                         None
                     };
@@ -290,13 +331,13 @@ impl App {
                     self.toggle_filter_item();
                 }
             }
-            
+
             KeyAction::Char('i') => {
                 if self.active_pane == Pane::Left {
                     self.isolate_filter_item();
                 }
             }
-            
+
             KeyAction::SelectAll => {
                 if self.active_pane == Pane::Middle {
                     let count = self.filtered_memories().len();
@@ -304,37 +345,37 @@ impl App {
                     self.status_message = Some(format!("Selected all {} memories", count));
                 }
             }
-            
+
             KeyAction::Char('V') => {
                 if self.active_pane == Pane::Middle {
                     self.middle_selection.deselect_all();
                     self.status_message = Some("Cleared selection".to_string());
                 }
             }
-            
+
             KeyAction::Char('e') => {
                 if let Some(memory) = self.selected_memory() {
                     self.edit_memory(memory.id).await?;
                 }
             }
-            
+
             KeyAction::Char('a') => {
                 self.add_memory().await?;
             }
-            
+
             KeyAction::Char('r') => {
                 self.refresh_memories().await?;
                 self.status_message = Some("Refreshed memories".to_string());
             }
-            
+
             KeyAction::Char('/') | KeyAction::Char(':') => {
                 self.mode = AppMode::Search(String::new());
             }
-            
+
             KeyAction::Char('s') => {
                 self.mode = AppMode::Sort;
             }
-            
+
             _ => {
                 if self.g_prefix {
                     self.g_prefix = false;
@@ -343,7 +384,7 @@ impl App {
         }
         Ok(true)
     }
-    
+
     async fn handle_search_mode(&mut self, action: KeyAction) -> Result<bool> {
         if let AppMode::Search(ref mut query) = self.mode {
             match action {
@@ -368,12 +409,12 @@ impl App {
         }
         Ok(true)
     }
-    
+
     async fn perform_search(&mut self, _query: &str) -> Result<()> {
         self.status_message = Some("Search functionality coming soon".to_string());
         Ok(())
     }
-    
+
     async fn handle_delete_mode(&mut self, action: KeyAction) -> Result<bool> {
         if let AppMode::Delete(id) = self.mode {
             match action {
@@ -395,20 +436,20 @@ impl App {
         }
         Ok(true)
     }
-    
+
     async fn handle_delete_multiple_mode(&mut self, action: KeyAction) -> Result<bool> {
         if let AppMode::DeleteMultiple(ref ids) = self.mode {
             match action {
                 KeyAction::Char('y') => {
                     let count = ids.len();
                     let mut deleted_count = 0;
-                    
+
                     for id in ids {
                         if operations::delete_memory(self.db.pool(), *id).await? {
                             deleted_count += 1;
                         }
                     }
-                    
+
                     self.middle_selection.deselect_all();
                     self.refresh_memories().await?;
                     self.status_message = Some(format!("Deleted {deleted_count}/{count} memories"));
@@ -422,7 +463,7 @@ impl App {
         }
         Ok(true)
     }
-    
+
     async fn handle_help_mode(&mut self, action: KeyAction) -> Result<bool> {
         match action {
             KeyAction::Escape | KeyAction::Char('?') | KeyAction::Char('q') | KeyAction::Quit => {
@@ -432,10 +473,10 @@ impl App {
         }
         Ok(true)
     }
-    
+
     async fn handle_sort_mode(&mut self, action: KeyAction) -> Result<bool> {
         use crate::state::sort::SortMode;
-        
+
         match action {
             KeyAction::Char('1') => {
                 self.sort_state.mode = SortMode::DateNewest;
@@ -480,7 +521,7 @@ impl App {
         }
         Ok(true)
     }
-    
+
     fn move_down(&mut self) {
         match self.active_pane {
             Pane::Left => {
@@ -497,7 +538,7 @@ impl App {
             }
         }
     }
-    
+
     fn move_up(&mut self) {
         match self.active_pane {
             Pane::Left => {
@@ -512,7 +553,7 @@ impl App {
             }
         }
     }
-    
+
     fn move_top(&mut self) {
         match self.active_pane {
             Pane::Left => self.left_selection.top(),
@@ -523,7 +564,7 @@ impl App {
             Pane::Right => self.right_scroll = 0,
         }
     }
-    
+
     fn move_bottom(&mut self) {
         match self.active_pane {
             Pane::Left => {
@@ -540,7 +581,7 @@ impl App {
             }
         }
     }
-    
+
     fn page_down(&mut self) {
         match self.active_pane {
             Pane::Left => {
@@ -556,7 +597,7 @@ impl App {
             }
         }
     }
-    
+
     fn page_up(&mut self) {
         match self.active_pane {
             Pane::Left => {
@@ -570,7 +611,7 @@ impl App {
             }
         }
     }
-    
+
     fn switch_pane_left(&mut self) {
         self.active_pane = match self.active_pane {
             Pane::Left => Pane::Left,
@@ -578,7 +619,7 @@ impl App {
             Pane::Right => Pane::Middle,
         };
     }
-    
+
     fn switch_pane_right(&mut self) {
         self.active_pane = match self.active_pane {
             Pane::Left => Pane::Middle,
@@ -586,45 +627,46 @@ impl App {
             Pane::Right => Pane::Right,
         };
     }
-    
+
     async fn edit_memory(&mut self, id: Uuid) -> Result<()> {
         let memory = operations::get_memory(self.db.pool(), id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Memory not found"))?;
-        
+
         let serialized = editor::serialize_memory_for_editing(&memory);
-        
+
         // Properly exit the TUI
         disable_raw_mode()?;
         execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
         io::stdout().flush()?;
-        
+
         let edited_result = editor::edit_in_external_editor(&serialized);
-        
+
         // Properly re-enter the TUI
         enable_raw_mode()?;
         execute!(io::stdout(), EnterAlternateScreen, cursor::Hide)?;
         io::stdout().flush()?;
-        
+
         match edited_result {
             Ok(edited) => {
                 match editor::parse_edited_memory(&edited, Some(id)) {
                     Ok(mut updated_memory) => {
                         updated_memory.created_at = memory.created_at;
                         updated_memory.updated_at = chrono::Utc::now();
-                        
+
                         operations::delete_memory(self.db.pool(), id).await?;
                         operations::insert_memory(self.db.pool(), &updated_memory).await?;
-                        
+
                         self.refresh_memories().await?;
-                        
+
                         // Find the edited memory and move cursor to it
                         self.active_pane = Pane::Middle;
-                        if let Some(pos) = self.filtered_memories().iter().position(|m| m.id == id) {
+                        if let Some(pos) = self.filtered_memories().iter().position(|m| m.id == id)
+                        {
                             self.middle_selection.index = pos;
                             self.middle_selection.offset = pos.saturating_sub(10);
                         }
-                        
+
                         self.status_message = Some(format!("Updated memory {id}"));
                         self.needs_redraw = true;
                     }
@@ -639,41 +681,43 @@ impl App {
                 self.needs_redraw = true;
             }
         }
-        
+
         Ok(())
     }
-    
+
     pub async fn add_memory(&mut self) -> Result<()> {
         let template = editor::serialize_new_memory_template();
-        
+
         // Properly exit the TUI
         disable_raw_mode()?;
         execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
         io::stdout().flush()?;
-        
+
         let edited_result = editor::edit_in_external_editor(&template);
-        
+
         // Properly re-enter the TUI
         enable_raw_mode()?;
         execute!(io::stdout(), EnterAlternateScreen, cursor::Hide)?;
         io::stdout().flush()?;
-        
+
         match edited_result {
             Ok(edited) => {
                 match editor::parse_edited_memory(&edited, None) {
                     Ok(new_memory) => {
                         let new_id = new_memory.id;
                         operations::insert_memory(self.db.pool(), &new_memory).await?;
-                        
+
                         self.refresh_memories().await?;
-                        
+
                         // Find the new memory and move cursor to it
                         self.active_pane = Pane::Middle;
-                        if let Some(pos) = self.filtered_memories().iter().position(|m| m.id == new_id) {
+                        if let Some(pos) =
+                            self.filtered_memories().iter().position(|m| m.id == new_id)
+                        {
                             self.middle_selection.index = pos;
                             self.middle_selection.offset = pos.saturating_sub(10);
                         }
-                        
+
                         self.status_message = Some(format!("Created memory {new_id}"));
                         self.needs_redraw = true;
                     }
@@ -688,13 +732,13 @@ impl App {
                 self.needs_redraw = true;
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn toggle_filter_item(&mut self) {
         use mmry_core::memory::MemoryType;
-        
+
         if let Some(item) = self.get_selected_left_item() {
             match item {
                 LeftPaneItem::FilterAll => {
@@ -726,10 +770,10 @@ impl App {
             }
         }
     }
-    
+
     fn isolate_filter_item(&mut self) {
         use mmry_core::memory::MemoryType;
-        
+
         if let Some(item) = self.get_selected_left_item() {
             match item {
                 LeftPaneItem::TypeEpisodic => {

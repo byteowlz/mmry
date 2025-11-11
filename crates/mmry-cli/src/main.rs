@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
 
     // Initialize database
-    let db = Database::init(&config.database.path).await?;
+    let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
 
     // Prepare shared services
     let embeddings = Arc::new(EmbeddingService::new(&config.embeddings)?);

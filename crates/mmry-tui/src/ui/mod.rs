@@ -5,10 +5,11 @@ mod middle_pane;
 mod right_pane;
 mod status_bar;
 
-use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    Frame,
-};
+use ratatui::layout::Constraint;
+use ratatui::layout::Direction;
+use ratatui::layout::Layout;
+use ratatui::layout::Rect;
+use ratatui::Frame;
 
 use crate::app::App;
 use crate::state::AppMode;
@@ -47,108 +48,157 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_delete_confirmation(f: &mut Frame, id: uuid::Uuid) {
-    use ratatui::{
-        style::{Color, Style},
-        widgets::{Block, Borders, Clear, Paragraph},
-    };
+    use ratatui::style::Color;
+    use ratatui::style::Style;
+    use ratatui::widgets::Block;
+    use ratatui::widgets::Borders;
+    use ratatui::widgets::Clear;
+    use ratatui::widgets::Paragraph;
 
     let area = centered_rect(50, 20, f.area());
-    
+
     f.render_widget(Clear, area);
-    
+
     let block = Block::default()
         .title(" Delete Memory ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
-    
-    let text = format!("Delete memory {}?\n\nPress 'y' to confirm, ESC to cancel", id);
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .style(Style::default());
-    
+
+    let text = format!(
+        "Delete memory {}?\n\nPress 'y' to confirm, ESC to cancel",
+        id
+    );
+    let paragraph = Paragraph::new(text).block(block).style(Style::default());
+
     f.render_widget(paragraph, area);
 }
 
 fn draw_delete_multiple_confirmation(f: &mut Frame, count: usize) {
-    use ratatui::{
-        style::{Color, Style},
-        widgets::{Block, Borders, Clear, Paragraph},
-    };
+    use ratatui::style::Color;
+    use ratatui::style::Style;
+    use ratatui::widgets::Block;
+    use ratatui::widgets::Borders;
+    use ratatui::widgets::Clear;
+    use ratatui::widgets::Paragraph;
 
     let area = centered_rect(50, 20, f.area());
-    
+
     f.render_widget(Clear, area);
-    
+
     let block = Block::default()
         .title(" Delete Multiple Memories ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
-    
-    let text = format!("Delete {} selected memories?\n\nPress 'y' to confirm, ESC to cancel", count);
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .style(Style::default());
-    
+
+    let text = format!(
+        "Delete {} selected memories?\n\nPress 'y' to confirm, ESC to cancel",
+        count
+    );
+    let paragraph = Paragraph::new(text).block(block).style(Style::default());
+
     f.render_widget(paragraph, area);
 }
 
 fn draw_sort_menu(f: &mut Frame, app: &App) {
-    use ratatui::{
-        style::{Color, Style},
-        text::{Line, Span},
-        widgets::{Block, Borders, Clear, List, ListItem},
-    };
+    use ratatui::style::Color;
+    use ratatui::style::Style;
+    use ratatui::text::Line;
+    use ratatui::text::Span;
+    use ratatui::widgets::Block;
+    use ratatui::widgets::Borders;
+    use ratatui::widgets::Clear;
+    use ratatui::widgets::List;
+    use ratatui::widgets::ListItem;
 
     let area = centered_rect(40, 30, f.area());
-    
+
     f.render_widget(Clear, area);
-    
+
     use crate::state::sort::SortMode;
-    
+
     let current_mode = app.sort_state.mode;
-    
+
     let items = vec![
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::DateNewest { "> " } else { "  " }),
-            Span::styled("1. Date (newest first)", Style::default().fg(
-                if current_mode == SortMode::DateNewest { Color::Blue } else { Color::Cyan }
-            )),
+            Span::raw(if current_mode == SortMode::DateNewest {
+                "> "
+            } else {
+                "  "
+            }),
+            Span::styled(
+                "1. Date (newest first)",
+                Style::default().fg(if current_mode == SortMode::DateNewest {
+                    Color::Blue
+                } else {
+                    Color::Cyan
+                }),
+            ),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::DateOldest { "> " } else { "  " }),
+            Span::raw(if current_mode == SortMode::DateOldest {
+                "> "
+            } else {
+                "  "
+            }),
             Span::raw("2. Date (oldest first)"),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::ImportanceHigh { "> " } else { "  " }),
-            Span::styled("3. Importance (high to low)", Style::default().fg(
-                if current_mode == SortMode::ImportanceHigh { Color::Blue } else { Color::Yellow }
-            )),
+            Span::raw(if current_mode == SortMode::ImportanceHigh {
+                "> "
+            } else {
+                "  "
+            }),
+            Span::styled(
+                "3. Importance (high to low)",
+                Style::default().fg(if current_mode == SortMode::ImportanceHigh {
+                    Color::Blue
+                } else {
+                    Color::Yellow
+                }),
+            ),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::ImportanceLow { "> " } else { "  " }),
+            Span::raw(if current_mode == SortMode::ImportanceLow {
+                "> "
+            } else {
+                "  "
+            }),
             Span::raw("4. Importance (low to high)"),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::Category { "> " } else { "  " }),
-            Span::styled("5. Category (A-Z)", Style::default().fg(
-                if current_mode == SortMode::Category { Color::Blue } else { Color::Green }
-            )),
+            Span::raw(if current_mode == SortMode::Category {
+                "> "
+            } else {
+                "  "
+            }),
+            Span::styled(
+                "5. Category (A-Z)",
+                Style::default().fg(if current_mode == SortMode::Category {
+                    Color::Blue
+                } else {
+                    Color::Green
+                }),
+            ),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw(if current_mode == SortMode::Type { "> " } else { "  " }),
+            Span::raw(if current_mode == SortMode::Type {
+                "> "
+            } else {
+                "  "
+            }),
             Span::raw("6. Memory Type"),
         ])),
     ];
-    
+
     let list = List::new(items)
         .block(
             Block::default()
                 .title(" Sort By ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
+                .border_style(Style::default().fg(Color::Blue)),
         )
         .style(Style::default());
-    
+
     f.render_widget(list, area);
 }
 

@@ -1,5 +1,7 @@
-use anyhow::{Context, Result};
-use mmry_core::memory::{Memory, MemoryType};
+use anyhow::Context;
+use anyhow::Result;
+use mmry_core::memory::Memory;
+use mmry_core::memory::MemoryType;
 use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
@@ -180,12 +182,14 @@ pub fn parse_edited_memory(content: &str, original_id: Option<Uuid>) -> Result<M
 
 pub fn edit_in_external_editor(content: &str) -> Result<String> {
     let mut temp_file = NamedTempFile::new().context("Failed to create temporary file")?;
-    
+
     temp_file
         .write_all(content.as_bytes())
         .context("Failed to write to temporary file")?;
-    
-    temp_file.flush().context("Failed to flush temporary file")?;
+
+    temp_file
+        .flush()
+        .context("Failed to flush temporary file")?;
 
     let editor = get_editor();
     let temp_path = temp_file.path();
@@ -199,8 +203,8 @@ pub fn edit_in_external_editor(content: &str) -> Result<String> {
         anyhow::bail!("Editor exited with non-zero status");
     }
 
-    let edited_content = std::fs::read_to_string(temp_path)
-        .context("Failed to read edited content")?;
+    let edited_content =
+        std::fs::read_to_string(temp_path).context("Failed to read edited content")?;
 
     Ok(edited_content)
 }

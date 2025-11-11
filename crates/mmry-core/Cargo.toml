@@ -22,6 +22,9 @@ regex = { workspace = true }
 tracing = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
+sqlite-vec = { workspace = true }
+zerocopy = { workspace = true }
+libsqlite3-sys = "0.30"
 shellexpand = "3.1"
 ort = { version = "=2.0.0-rc.10", default-features = false, optional = true }
 
@@ -39,3 +42,4 @@ ort-load-dynamic = ["dep:ort", "ort?/load-dynamic"]
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = { workspace = true }

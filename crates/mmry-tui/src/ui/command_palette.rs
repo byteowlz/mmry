@@ -1,10 +1,14 @@
-use ratatui::{
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
-};
+use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
+use ratatui::widgets::Block;
+use ratatui::widgets::Borders;
+use ratatui::widgets::Clear;
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 use crate::app::App;
 use crate::state::AppMode;
@@ -12,9 +16,9 @@ use crate::state::AppMode;
 pub fn draw(f: &mut Frame, app: &App) {
     if let AppMode::Search(query) = &app.mode {
         let area = centered_rect(80, 20, f.area());
-        
+
         f.render_widget(Clear, area);
-        
+
         let input_text = vec![
             Line::from(vec![
                 Span::styled("Search: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -32,22 +36,23 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Style::default().fg(Color::DarkGray),
             )),
         ];
-        
-        let paragraph = Paragraph::new(input_text)
-            .block(
-                Block::default()
-                    .title(" Search / Command Palette ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
-            );
-        
+
+        let paragraph = Paragraph::new(input_text).block(
+            Block::default()
+                .title(" Search / Command Palette ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+
         f.render_widget(paragraph, area);
     }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    use ratatui::layout::{Constraint, Direction, Layout};
-    
+    use ratatui::layout::Constraint;
+    use ratatui::layout::Direction;
+    use ratatui::layout::Layout;
+
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

@@ -1,13 +1,16 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Duration;
 use chrono::Utc;
+use sqlx::QueryBuilder;
 use sqlx::Row;
 use sqlx::SqlitePool;
 use strsim::jaro_winkler;
 use uuid::Uuid;
+use zerocopy::IntoBytes;
 
 use crate::config::SearchConfig;
 use crate::config::SearchMode;
@@ -22,6 +25,9 @@ const MIN_SCORE_THRESHOLD: f32 = 0.15;
 const MIN_FUZZY_CONFIDENCE: f32 = 0.82;
 const MIN_VECTOR_CONFIDENCE: f32 = 0.50;
 const MIN_VECTOR_CONFIDENCE_SHORT: f32 = 0.40;
+const VECTOR_CANDIDATE_MULTIPLIER: usize = 5;
+const MAX_CANDIDATE_POOL: usize = 2000;
+const SQLITE_MAX_BIND_PARAMS: usize = 999;
 
 pub struct SearchService {
     pool: SqlitePool,
@@ -58,7 +64,49 @@ impl SearchService {
         mode_override: Option<SearchMode>,
         rerank_override: Option<bool>,
     ) -> Result<Vec<Memory>> {
-        let mut memories = self.fetch_candidates(category).await?;
+        let mut vector_distance_hint: HashMap<Uuid, f32> = HashMap::new();
+        let mut memories = {
+            let mut candidate_ids = Vec::new();
+            let mut seen = HashSet::new();
+
+            if let Some(query_vec) = query_embedding.as_ref() {
+                let vector_limit = (limit as usize)
+                    .max(self.config.default_limit)
+                    .saturating_mul(VECTOR_CANDIDATE_MULTIPLIER)
+                    .min(MAX_CANDIDATE_POOL);
+
+                let vector_candidates = self
+                    .vector_candidates(query_vec, category, vector_limit)
+                    .await?;
+
+                for (id, distance) in vector_candidates {
+                    if seen.insert(id) {
+                        candidate_ids.push(id);
+                    }
+                    vector_distance_hint.insert(id, distance);
+                }
+            }
+
+            if candidate_ids.len() < MAX_CANDIDATE_POOL {
+                let fallback_limit = MAX_CANDIDATE_POOL - candidate_ids.len();
+                let recents = self.recent_candidate_ids(category, fallback_limit).await?;
+                for id in recents {
+                    if seen.insert(id) {
+                        candidate_ids.push(id);
+                    }
+                    if candidate_ids.len() >= MAX_CANDIDATE_POOL {
+                        break;
+                    }
+                }
+            }
+
+            if candidate_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            self.load_memories_by_ids(&candidate_ids).await?
+        };
+
         if memories.is_empty() {
             return Ok(Vec::new());
         }
@@ -142,7 +190,17 @@ impl SearchService {
                                 0.0
                             }
                         }
-                        _ => 0.0,
+                        _ => {
+                            if query_embedding.is_some() {
+                                vector_distance_hint
+                                    .get(&memory.id)
+                                    .copied()
+                                    .map(distance_to_similarity)
+                                    .unwrap_or(0.0)
+                            } else {
+                                0.0
+                            }
+                        }
                     }
                 }
                 _ => 0.0,
@@ -315,60 +373,138 @@ impl SearchService {
             .await
     }
 
-    async fn fetch_candidates(&self, category: Option<&str>) -> Result<Vec<Memory>> {
-        let rows = if let Some(cat) = category {
-            sqlx::query(
-                r#"
-                SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
-                FROM memories
-                WHERE category = ?
-                "#,
-            )
-            .bind(cat)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                r#"
-                SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
-                FROM memories
-                "#,
-            )
-            .fetch_all(&self.pool)
-            .await?
-        };
-
-        let mut memories = Vec::with_capacity(rows.len());
-        for row in rows {
-            let embedding_bytes: Option<Vec<u8>> = row.try_get("embedding").ok();
-            let embedding_vec =
-                embedding_bytes.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
-
-            let sparse_embedding_bytes: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
-            let sparse_embedding_vec = sparse_embedding_bytes
-                .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
-
-            memories.push(Memory {
-                id: Uuid::parse_str(row.try_get("id")?).unwrap(),
-                memory_type: serde_json::from_str(row.try_get("type")?)?,
-                content: row.try_get("content")?,
-                embedding: embedding_vec,
-                sparse_embedding: sparse_embedding_vec,
-                metadata: serde_json::from_str(row.try_get("metadata")?)?,
-                importance: row.try_get("importance")?,
-                category: row.try_get("category")?,
-                tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
-                created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-            });
+    async fn vector_candidates(
+        &self,
+        query_embedding: &[f32],
+        category: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(Uuid, f32)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
         }
 
+        let mut sql = String::from(
+            "SELECT memory_id, distance FROM memory_embeddings WHERE embedding MATCH ? AND k = ?",
+        );
+        if category.is_some() {
+            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE category = ?)");
+        }
+        sql.push_str(" ORDER BY distance");
+
+        let mut query = sqlx::query(&sql);
+        query = query.bind(query_embedding.as_bytes());
+        query = query.bind(limit as i64);
+        if let Some(cat) = category {
+            query = query.bind(cat);
+        }
+
+        let rows = query.fetch_all(&self.pool).await?;
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id_str: String = row.try_get("memory_id")?;
+            let distance: f64 = row.try_get("distance")?;
+            if let Ok(id) = Uuid::parse_str(&id_str) {
+                results.push((id, distance as f32));
+            }
+        }
+
+        Ok(results)
+    }
+
+    async fn recent_candidate_ids(
+        &self,
+        category: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Uuid>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut sql = String::from("SELECT id FROM memories");
+        if category.is_some() {
+            sql.push_str(" WHERE category = ?");
+        }
+        sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+
+        let mut query = sqlx::query(&sql);
+        if let Some(cat) = category {
+            query = query.bind(cat);
+        }
+        query = query.bind(limit as i64);
+
+        let rows = query.fetch_all(&self.pool).await?;
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id_str: String = row.try_get("id")?;
+            if let Ok(id) = Uuid::parse_str(&id_str) {
+                ids.push(id);
+            }
+        }
+
+        Ok(ids)
+    }
+
+    async fn load_memories_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Memory>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut order = HashMap::with_capacity(ids.len());
+        for (idx, id) in ids.iter().enumerate() {
+            order.insert(*id, idx);
+        }
+
+        let mut memories = Vec::new();
+        for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
+            let mut builder = QueryBuilder::new(
+                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at FROM memories WHERE id IN (",
+            );
+            {
+                let mut separated = builder.separated(", ");
+                for id in chunk {
+                    separated.push_bind(id.to_string());
+                }
+            }
+            builder.push(")");
+
+            let rows = builder.build().fetch_all(&self.pool).await?;
+            for row in rows {
+                let embedding_bytes: Option<Vec<u8>> = row.try_get("embedding").ok();
+                let embedding_vec = embedding_bytes
+                    .and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
+
+                let sparse_embedding_bytes: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
+                let sparse_embedding_vec = sparse_embedding_bytes
+                    .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
+
+                memories.push(Memory {
+                    id: Uuid::parse_str(row.try_get("id")?).unwrap(),
+                    memory_type: serde_json::from_str(row.try_get("type")?)?,
+                    content: row.try_get("content")?,
+                    embedding: embedding_vec,
+                    sparse_embedding: sparse_embedding_vec,
+                    metadata: serde_json::from_str(row.try_get("metadata")?)?,
+                    importance: row.try_get("importance")?,
+                    category: row.try_get("category")?,
+                    tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
+                    created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                    updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc),
+                });
+            }
+        }
+
+        memories.sort_by_key(|memory| order.get(&memory.id).copied().unwrap_or(usize::MAX));
         Ok(memories)
     }
+}
+
+fn distance_to_similarity(distance: f32) -> f32 {
+    (1.0 / (1.0 + distance.max(0.0))).clamp(0.0, 1.0)
 }
 
 fn keyword_match_score(content: &str, query: &str, tokens: &[String]) -> f32 {
@@ -597,6 +733,7 @@ mod tests {
     use crate::config::SparseEmbeddingsConfig;
     use crate::database::operations;
     use crate::database::schema;
+    use crate::database::Database;
     use crate::memory::Memory;
     use crate::memory::MemoryType;
     use crate::reranker::RerankerService;
@@ -604,6 +741,8 @@ mod tests {
     use crate::Result;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::sync::Arc;
+
+    const TEST_DIMENSION: usize = 3;
 
     fn disabled_embeddings() -> Arc<EmbeddingService> {
         let config = EmbeddingsConfig {
@@ -632,11 +771,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn search_filters_irrelevant_results() -> Result<()> {
+        crate::database::ensure_sqlite_vec_loaded()?;
+
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
         sqlx::query(schema::INIT_SQL).execute(&pool).await?;
+        Database::ensure_vector_table(&pool, TEST_DIMENSION).await?;
 
         let first = Memory::new(
             MemoryType::Episodic,
@@ -677,11 +819,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn semantic_query_finds_related_memory() -> Result<()> {
+        crate::database::ensure_sqlite_vec_loaded()?;
+
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
         sqlx::query(schema::INIT_SQL).execute(&pool).await?;
+        Database::ensure_vector_table(&pool, TEST_DIMENSION).await?;
 
         let mut memory = Memory::new(
             MemoryType::Episodic,

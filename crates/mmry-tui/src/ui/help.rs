@@ -1,18 +1,23 @@
-use ratatui::{
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame,
-};
+use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
+use ratatui::widgets::Block;
+use ratatui::widgets::Borders;
+use ratatui::widgets::Clear;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Wrap;
+use ratatui::Frame;
 
 use crate::app::App;
 
 pub fn draw(f: &mut Frame, _app: &App) {
     let area = centered_rect(70, 80, f.area());
-    
+
     f.render_widget(Clear, area);
-    
+
     let help_text = vec![
         Line::from(Span::styled(
             "MMRY TUI - Keybindings",
@@ -93,22 +98,24 @@ pub fn draw(f: &mut Frame, _app: &App) {
             Style::default().fg(Color::Yellow),
         )),
     ];
-    
+
     let paragraph = Paragraph::new(help_text)
         .block(
             Block::default()
                 .title(" Help ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(Color::Cyan)),
         )
         .wrap(Wrap { trim: false });
-    
+
     f.render_widget(paragraph, area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    use ratatui::layout::{Constraint, Direction, Layout};
-    
+    use ratatui::layout::Constraint;
+    use ratatui::layout::Direction;
+    use ratatui::layout::Layout;
+
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
