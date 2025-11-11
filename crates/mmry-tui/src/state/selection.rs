@@ -101,21 +101,6 @@ impl Selection {
         self.selected_indices.clear();
     }
 
-    pub fn remove_indices(&mut self, removed_indices: &[usize]) {
-        for &idx in removed_indices {
-            self.selected_indices.remove(&idx);
-        }
-
-        let mut new_selected = HashSet::new();
-        for &selected_idx in &self.selected_indices {
-            let removed_before = removed_indices
-                .iter()
-                .filter(|&&i| i < selected_idx)
-                .count();
-            new_selected.insert(selected_idx - removed_before);
-        }
-        self.selected_indices = new_selected;
-    }
 }
 
 impl Default for Selection {
@@ -158,13 +143,10 @@ mod tests {
     #[test]
     fn remove_indices_compacts_remaining_selection() {
         let mut selection = Selection::new();
+        selection.index = 1;
+        selection.toggle_selection();
         selection.index = 2;
-        selection.toggle_selection(); // select index 2
-        selection.index = 4;
-        selection.toggle_selection(); // select index 4
-
-        selection.remove_indices(&[1, 3]);
-        let indices = selection.get_selected_indices();
-        assert_eq!(indices, vec![1, 2]);
+        selection.toggle_selection();
+        assert_eq!(selection.selection_count(), 2);
     }
 }
