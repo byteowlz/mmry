@@ -67,31 +67,19 @@ impl FilterState {
         self.enabled_types.is_empty() || self.enabled_types.contains(mem_type)
     }
 
-    pub fn isolate_category(&mut self, category: &str, all_categories: &[String]) {
+    pub fn isolate_category(&mut self, category: &str, _all_categories: &[String]) {
         self.enabled_categories.clear();
-        for cat in all_categories {
-            if cat != category {
-                self.enabled_categories.insert(cat.clone());
-            }
-        }
+        self.enabled_categories.insert(category.to_string());
     }
 
-    pub fn isolate_tag(&mut self, tag: &str, all_tags: &[String]) {
+    pub fn isolate_tag(&mut self, tag: &str, _all_tags: &[String]) {
         self.enabled_tags.clear();
-        for t in all_tags {
-            if t != tag {
-                self.enabled_tags.insert(t.clone());
-            }
-        }
+        self.enabled_tags.insert(tag.to_string());
     }
 
     pub fn isolate_type(&mut self, mem_type: MemoryType) {
         self.enabled_types.clear();
-        for t in [MemoryType::Episodic, MemoryType::Semantic, MemoryType::Procedural] {
-            if t != mem_type {
-                self.enabled_types.insert(t);
-            }
-        }
+        self.enabled_types.insert(mem_type);
     }
 
     pub fn clear(&mut self) {

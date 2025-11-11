@@ -1,7 +1,8 @@
 use anyhow::Result;
 use crossterm::{
+    cursor,
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use mmry_core::{
     config::Config,
@@ -49,6 +50,7 @@ pub struct App {
     
     pub g_prefix: bool,
     pub status_message: Option<String>,
+    pub needs_redraw: bool,
 }
 
 impl App {
@@ -71,6 +73,7 @@ impl App {
             sort_state: SortState::new(),
             g_prefix: false,
             status_message: None,
+            needs_redraw: false,
         };
         
         app.refresh_memories().await?;
@@ -105,16 +108,56 @@ impl App {
     }
     
     pub fn selected_memory(&self) -> Option<&Memory> {
-        self.memories.get(self.middle_selection.index)
+        self.filtered_memories().get(self.middle_selection.index).copied()
+    }
+    
+    pub fn filtered_memories(&self) -> Vec<&Memory> {
+        self.memories
+            .iter()
+            .filter(|m| {
+                // Category filter
+                if !self.filter_state.is_category_enabled(&m.category) {
+                    return false;
+                }
+                
+                // Type filter
+                if !self.filter_state.is_type_enabled(&m.memory_type) {
+                    return false;
+                }
+                
+                // Tag filter - if any tags are filtered, at least one of the memory's tags must be enabled
+                if !self.filter_state.enabled_tags.is_empty() {
+                    let has_enabled_tag = m.tags.iter().any(|t| self.filter_state.is_tag_enabled(t));
+                    if !has_enabled_tag {
+                        return false;
+                    }
+                }
+                
+                // Recent filter (last 7 days)
+                if self.filter_state.show_recent {
+                    let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
+                    if m.created_at < seven_days_ago {
+                        return false;
+                    }
+                }
+                
+                // Important filter (importance > 7)
+                if self.filter_state.show_important && m.importance <= 7 {
+                    return false;
+                }
+                
+                true
+            })
+            .collect()
     }
     
     pub fn get_left_pane_item_count(&self) -> usize {
-        let filters = 4;
-        let types = 3;
-        let categories = self.categories.len();
-        let tags = self.tags.len().min(10);
-        
-        filters + 1 + types + 1 + categories + 1 + tags
+        // FILTERS header (1) + All/Recent/Important (3) + separator (1)
+        // + MEMORY TYPES header (1) + Episodic/Semantic/Procedural (3) + separator (1)
+        // + CATEGORIES header (1) + categories (N) + separator (1)
+        // + TAGS header (1) + tags (up to 10)
+        let count = 1 + 3 + 1 + 1 + 3 + 1 + 1 + self.categories.len() + 1 + 1 + self.tags.len().min(10);
+        count
     }
     
     pub fn get_selected_left_item(&self) -> Option<LeftPaneItem> {
@@ -221,10 +264,11 @@ impl App {
             
             KeyAction::Char('d') => {
                 if self.middle_selection.has_selections() {
+                    let filtered = self.filtered_memories();
                     let ids: Vec<Uuid> = self.middle_selection
                         .get_selected_indices()
                         .iter()
-                        .filter_map(|&idx| self.memories.get(idx).map(|m| m.id))
+                        .filter_map(|&idx| filtered.get(idx).map(|m| m.id))
                         .collect();
                     self.mode = AppMode::DeleteMultiple(ids);
                 } else if let Some(memory) = self.selected_memory() {
@@ -235,7 +279,8 @@ impl App {
             KeyAction::ToggleSelect => {
                 if self.active_pane == Pane::Middle {
                     self.middle_selection.toggle_selection();
-                    self.middle_selection.next(self.memories.len(), 20);
+                    let count = self.filtered_memories().len();
+                    self.middle_selection.next(count, 20);
                     self.status_message = if self.middle_selection.has_selections() {
                         Some(format!("{} selected", self.middle_selection.selection_count()))
                     } else {
@@ -254,8 +299,9 @@ impl App {
             
             KeyAction::SelectAll => {
                 if self.active_pane == Pane::Middle {
-                    self.middle_selection.select_all(self.memories.len());
-                    self.status_message = Some(format!("Selected all {} memories", self.memories.len()));
+                    let count = self.filtered_memories().len();
+                    self.middle_selection.select_all(count);
+                    self.status_message = Some(format!("Selected all {} memories", count));
                 }
             }
             
@@ -438,11 +484,12 @@ impl App {
     fn move_down(&mut self) {
         match self.active_pane {
             Pane::Left => {
-                let max = self.categories.len() + self.tags.len() + 5;
+                let max = self.get_left_pane_item_count();
                 self.left_selection.next(max, 20);
             }
             Pane::Middle => {
-                self.middle_selection.next(self.memories.len(), 20);
+                let count = self.filtered_memories().len();
+                self.middle_selection.next(count, 20);
                 self.right_scroll = 0;
             }
             Pane::Right => {
@@ -480,11 +527,12 @@ impl App {
     fn move_bottom(&mut self) {
         match self.active_pane {
             Pane::Left => {
-                let max = self.categories.len() + self.tags.len() + 5;
+                let max = self.get_left_pane_item_count();
                 self.left_selection.bottom(max, 20);
             }
             Pane::Middle => {
-                self.middle_selection.bottom(self.memories.len(), 20);
+                let count = self.filtered_memories().len();
+                self.middle_selection.bottom(count, 20);
                 self.right_scroll = 0;
             }
             Pane::Right => {
@@ -496,11 +544,12 @@ impl App {
     fn page_down(&mut self) {
         match self.active_pane {
             Pane::Left => {
-                let max = self.categories.len() + self.tags.len() + 5;
+                let max = self.get_left_pane_item_count();
                 self.left_selection.page_down(max, 20);
             }
             Pane::Middle => {
-                self.middle_selection.page_down(self.memories.len(), 20);
+                let count = self.filtered_memories().len();
+                self.middle_selection.page_down(count, 20);
             }
             Pane::Right => {
                 self.right_scroll += 10;
@@ -545,12 +594,17 @@ impl App {
         
         let serialized = editor::serialize_memory_for_editing(&memory);
         
+        // Properly exit the TUI
         disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
+        io::stdout().flush()?;
         
         let edited_result = editor::edit_in_external_editor(&serialized);
         
+        // Properly re-enter the TUI
         enable_raw_mode()?;
-        execute!(io::stdout(), Clear(ClearType::All))?;
+        execute!(io::stdout(), EnterAlternateScreen, cursor::Hide)?;
+        io::stdout().flush()?;
         
         match edited_result {
             Ok(edited) => {
@@ -563,15 +617,26 @@ impl App {
                         operations::insert_memory(self.db.pool(), &updated_memory).await?;
                         
                         self.refresh_memories().await?;
+                        
+                        // Find the edited memory and move cursor to it
+                        self.active_pane = Pane::Middle;
+                        if let Some(pos) = self.filtered_memories().iter().position(|m| m.id == id) {
+                            self.middle_selection.index = pos;
+                            self.middle_selection.offset = pos.saturating_sub(10);
+                        }
+                        
                         self.status_message = Some(format!("Updated memory {id}"));
+                        self.needs_redraw = true;
                     }
                     Err(e) => {
                         self.status_message = Some(format!("Failed to parse edited memory: {e}"));
+                        self.needs_redraw = true;
                     }
                 }
             }
             Err(e) => {
                 self.status_message = Some(format!("Failed to edit memory: {e}"));
+                self.needs_redraw = true;
             }
         }
         
@@ -581,29 +646,46 @@ impl App {
     pub async fn add_memory(&mut self) -> Result<()> {
         let template = editor::serialize_new_memory_template();
         
+        // Properly exit the TUI
         disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
+        io::stdout().flush()?;
         
         let edited_result = editor::edit_in_external_editor(&template);
         
+        // Properly re-enter the TUI
         enable_raw_mode()?;
-        execute!(io::stdout(), Clear(ClearType::All))?;
+        execute!(io::stdout(), EnterAlternateScreen, cursor::Hide)?;
+        io::stdout().flush()?;
         
         match edited_result {
             Ok(edited) => {
                 match editor::parse_edited_memory(&edited, None) {
                     Ok(new_memory) => {
+                        let new_id = new_memory.id;
                         operations::insert_memory(self.db.pool(), &new_memory).await?;
                         
                         self.refresh_memories().await?;
-                        self.status_message = Some(format!("Created memory {}", new_memory.id));
+                        
+                        // Find the new memory and move cursor to it
+                        self.active_pane = Pane::Middle;
+                        if let Some(pos) = self.filtered_memories().iter().position(|m| m.id == new_id) {
+                            self.middle_selection.index = pos;
+                            self.middle_selection.offset = pos.saturating_sub(10);
+                        }
+                        
+                        self.status_message = Some(format!("Created memory {new_id}"));
+                        self.needs_redraw = true;
                     }
                     Err(e) => {
                         self.status_message = Some(format!("Failed to parse new memory: {e}"));
+                        self.needs_redraw = true;
                     }
                 }
             }
             Err(e) => {
                 self.status_message = Some(format!("Failed to create memory: {e}"));
+                self.needs_redraw = true;
             }
         }
         

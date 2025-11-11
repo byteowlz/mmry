@@ -12,8 +12,9 @@ use mmry_core::memory::MemoryType;
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Middle;
     
-    let items: Vec<ListItem> = app
-        .memories
+    let filtered = app.filtered_memories();
+    
+    let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
         .map(|(idx, memory)| {
@@ -89,12 +90,19 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.middle_selection.index));
     
+    let total = app.memories.len();
+    let filtered_count = filtered.len();
+    
     let title = if app.middle_selection.has_selections() {
-        format!(" Memories ({}) - {} selected ", 
-            app.memories.len(), 
-            app.middle_selection.selection_count())
+        if filtered_count < total {
+            format!(" Memories ({}/{}) - {} selected ", filtered_count, total, app.middle_selection.selection_count())
+        } else {
+            format!(" Memories ({}) - {} selected ", total, app.middle_selection.selection_count())
+        }
+    } else if filtered_count < total {
+        format!(" Memories ({}/{}) ", filtered_count, total)
     } else {
-        format!(" Memories ({}) ", app.memories.len())
+        format!(" Memories ({}) ", total)
     };
     
     let list = List::new(items)

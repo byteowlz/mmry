@@ -48,13 +48,25 @@ async fn run_app<B: ratatui::backend::Backend>(
     app: &mut App,
 ) -> Result<()> {
     let mut event_handler = EventHandler::new();
+    let mut needs_full_redraw = false;
 
     loop {
+        if needs_full_redraw {
+            terminal.clear()?;
+            needs_full_redraw = false;
+        }
+        
         terminal.draw(|f| ui::draw(f, app))?;
 
         if let Some(event) = event_handler.next()? {
             if !app.handle_event(event).await? {
                 break;
+            }
+            
+            // Check if we need a full redraw (after returning from editor)
+            if app.needs_redraw {
+                needs_full_redraw = true;
+                app.needs_redraw = false;
             }
         }
     }
