@@ -98,14 +98,34 @@ You can tweak the weights of each strategy in the config, or just use hybrid mod
 ## Installation
 
 ```bash
-# From source
+# Recommended: Interactive installer (builds CLI + TUI with optional hardware acceleration)
+git clone https://github.com/tommyfalkowski/mmry
+cd mmry
+just install-all
+
+# From source (CLI only)
 cargo install --git https://github.com/tommyfalkowski/mmry mmry-cli
 
-# Or clone and build
+# Manual build
 git clone https://github.com/tommyfalkowski/mmry
 cd mmry
 cargo build --release
 ```
+
+The `just install-all` script builds and installs both mmry-cli and mmry-tui with your choice of ONNX Runtime acceleration:
+
+- none (default) - CPU-only, works everywhere
+- ort-coreml - Apple Neural Engine acceleration (macOS)
+- ort-cuda - NVIDIA GPU acceleration
+- ort-directml - DirectML acceleration (Windows)
+- ort-openvino - Intel OpenVINO
+- ort-tensorrt - NVIDIA TensorRT
+- ort-rocm - AMD ROCm
+- ort-nnapi - Android Neural Networks API
+- ort-xnnpack - XNNPACK acceleration
+- ort-load-dynamic - Dynamic loading
+
+The script will prompt you to select an option, then build and install both binaries to `~/.cargo/bin`.
 
 Binary releases coming soon.
 
@@ -236,4 +256,4 @@ Built with Rust using sqlx, fastembed, and tokio. Check `AGENTS.md` if you're an
 
 ## License
 
-MIT or Apache-2.0, your choice.
+MIT License
