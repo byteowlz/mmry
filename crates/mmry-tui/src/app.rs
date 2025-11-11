@@ -1,11 +1,15 @@
 use anyhow::Result;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::{
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+};
 use mmry_core::{
     config::Config,
     database::{operations, Database},
     memory::Memory,
 };
 use std::collections::HashSet;
+use std::io::{self, Write};
 use uuid::Uuid;
 
 use crate::{
@@ -13,6 +17,18 @@ use crate::{
     events::{parse_key_event, AppEvent, KeyAction},
     state::{AppMode, FilterState, Pane, Selection, SortState},
 };
+
+pub enum LeftPaneItem {
+    FilterAll,
+    FilterRecent,
+    FilterImportant,
+    TypeEpisodic,
+    TypeSemantic,
+    TypeProcedural,
+    Category(String),
+    Tag(String),
+    Separator,
+}
 
 pub struct App {
     pub config: Config,
@@ -92,6 +108,68 @@ impl App {
         self.memories.get(self.middle_selection.index)
     }
     
+    pub fn get_left_pane_item_count(&self) -> usize {
+        let filters = 4;
+        let types = 3;
+        let categories = self.categories.len();
+        let tags = self.tags.len().min(10);
+        
+        filters + 1 + types + 1 + categories + 1 + tags
+    }
+    
+    pub fn get_selected_left_item(&self) -> Option<LeftPaneItem> {
+        let idx = self.left_selection.index;
+        let mut current = 0;
+        
+        if idx == current { return Some(LeftPaneItem::Separator); }
+        current += 1;
+        
+        if idx == current { return Some(LeftPaneItem::FilterAll); }
+        current += 1;
+        if idx == current { return Some(LeftPaneItem::FilterRecent); }
+        current += 1;
+        if idx == current { return Some(LeftPaneItem::FilterImportant); }
+        current += 1;
+        if idx == current { return Some(LeftPaneItem::Separator); }
+        current += 1;
+        
+        if idx == current { return Some(LeftPaneItem::Separator); }
+        current += 1;
+        if idx == current { return Some(LeftPaneItem::TypeEpisodic); }
+        current += 1;
+        if idx == current { return Some(LeftPaneItem::TypeSemantic); }
+        current += 1;
+        if idx == current { return Some(LeftPaneItem::TypeProcedural); }
+        current += 1;
+        if idx == current { return Some(LeftPaneItem::Separator); }
+        current += 1;
+        
+        if idx == current { return Some(LeftPaneItem::Separator); }
+        current += 1;
+        
+        for category in &self.categories {
+            if idx == current {
+                return Some(LeftPaneItem::Category(category.clone()));
+            }
+            current += 1;
+        }
+        
+        if idx == current { return Some(LeftPaneItem::Separator); }
+        current += 1;
+        
+        if idx == current { return Some(LeftPaneItem::Separator); }
+        current += 1;
+        
+        for tag in self.tags.iter().take(10) {
+            if idx == current {
+                return Some(LeftPaneItem::Tag(tag.clone()));
+            }
+            current += 1;
+        }
+        
+        None
+    }
+    
     pub async fn handle_event(&mut self, event: AppEvent) -> Result<bool> {
         match event {
             AppEvent::Key(key) => {
@@ -163,6 +241,14 @@ impl App {
                     } else {
                         None
                     };
+                } else if self.active_pane == Pane::Left {
+                    self.toggle_filter_item();
+                }
+            }
+            
+            KeyAction::Char('i') => {
+                if self.active_pane == Pane::Left {
+                    self.isolate_filter_item();
                 }
             }
             
@@ -464,6 +550,7 @@ impl App {
         let edited_result = editor::edit_in_external_editor(&serialized);
         
         enable_raw_mode()?;
+        execute!(io::stdout(), Clear(ClearType::All))?;
         
         match edited_result {
             Ok(edited) => {
@@ -499,6 +586,7 @@ impl App {
         let edited_result = editor::edit_in_external_editor(&template);
         
         enable_raw_mode()?;
+        execute!(io::stdout(), Clear(ClearType::All))?;
         
         match edited_result {
             Ok(edited) => {
@@ -520,5 +608,70 @@ impl App {
         }
         
         Ok(())
+    }
+    
+    fn toggle_filter_item(&mut self) {
+        use mmry_core::memory::MemoryType;
+        
+        if let Some(item) = self.get_selected_left_item() {
+            match item {
+                LeftPaneItem::FilterAll => {
+                    self.filter_state.clear();
+                    self.status_message = Some("Cleared all filters".to_string());
+                }
+                LeftPaneItem::FilterRecent => {
+                    self.filter_state.show_recent = !self.filter_state.show_recent;
+                }
+                LeftPaneItem::FilterImportant => {
+                    self.filter_state.show_important = !self.filter_state.show_important;
+                }
+                LeftPaneItem::TypeEpisodic => {
+                    self.filter_state.toggle_type(MemoryType::Episodic);
+                }
+                LeftPaneItem::TypeSemantic => {
+                    self.filter_state.toggle_type(MemoryType::Semantic);
+                }
+                LeftPaneItem::TypeProcedural => {
+                    self.filter_state.toggle_type(MemoryType::Procedural);
+                }
+                LeftPaneItem::Category(cat) => {
+                    self.filter_state.toggle_category(&cat);
+                }
+                LeftPaneItem::Tag(tag) => {
+                    self.filter_state.toggle_tag(&tag);
+                }
+                LeftPaneItem::Separator => {}
+            }
+        }
+    }
+    
+    fn isolate_filter_item(&mut self) {
+        use mmry_core::memory::MemoryType;
+        
+        if let Some(item) = self.get_selected_left_item() {
+            match item {
+                LeftPaneItem::TypeEpisodic => {
+                    self.filter_state.isolate_type(MemoryType::Episodic);
+                    self.status_message = Some("Isolated Episodic memories".to_string());
+                }
+                LeftPaneItem::TypeSemantic => {
+                    self.filter_state.isolate_type(MemoryType::Semantic);
+                    self.status_message = Some("Isolated Semantic memories".to_string());
+                }
+                LeftPaneItem::TypeProcedural => {
+                    self.filter_state.isolate_type(MemoryType::Procedural);
+                    self.status_message = Some("Isolated Procedural memories".to_string());
+                }
+                LeftPaneItem::Category(cat) => {
+                    self.filter_state.isolate_category(&cat, &self.categories);
+                    self.status_message = Some(format!("Isolated category: {cat}"));
+                }
+                LeftPaneItem::Tag(tag) => {
+                    self.filter_state.isolate_tag(&tag, &self.tags);
+                    self.status_message = Some(format!("Isolated tag: {tag}"));
+                }
+                _ => {}
+            }
+        }
     }
 }

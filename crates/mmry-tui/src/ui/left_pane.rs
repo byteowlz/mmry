@@ -1,12 +1,13 @@
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, List, ListItem},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
 };
 
 use crate::{app::App, state::Pane};
+use mmry_core::memory::MemoryType;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Left;
@@ -18,9 +19,23 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     ));
-    items.push(ListItem::new("  All"));
-    items.push(ListItem::new("  Recent"));
-    items.push(ListItem::new("  Important"));
+    
+    let all_enabled = !app.filter_state.has_active_filters();
+    items.push(ListItem::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("All", if all_enabled { Style::default() } else { Style::default().fg(Color::DarkGray) }),
+    ])));
+    
+    items.push(ListItem::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Recent", if app.filter_state.show_recent { Style::default() } else { Style::default().fg(Color::DarkGray) }),
+    ])));
+    
+    items.push(ListItem::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Important", if app.filter_state.show_important { Style::default() } else { Style::default().fg(Color::DarkGray) }),
+    ])));
+    
     items.push(ListItem::new(""));
     
     items.push(ListItem::new(Line::from(" MEMORY TYPES")).style(
@@ -28,9 +43,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     ));
-    items.push(ListItem::new("  Episodic"));
-    items.push(ListItem::new("  Semantic"));
-    items.push(ListItem::new("  Procedural"));
+    
+    let episodic_enabled = app.filter_state.is_type_enabled(&MemoryType::Episodic);
+    items.push(ListItem::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Episodic", if episodic_enabled { Style::default() } else { Style::default().fg(Color::DarkGray) }),
+    ])));
+    
+    let semantic_enabled = app.filter_state.is_type_enabled(&MemoryType::Semantic);
+    items.push(ListItem::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Semantic", if semantic_enabled { Style::default() } else { Style::default().fg(Color::DarkGray) }),
+    ])));
+    
+    let procedural_enabled = app.filter_state.is_type_enabled(&MemoryType::Procedural);
+    items.push(ListItem::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Procedural", if procedural_enabled { Style::default() } else { Style::default().fg(Color::DarkGray) }),
+    ])));
+    
     items.push(ListItem::new(""));
     
     items.push(ListItem::new(Line::from(" CATEGORIES")).style(
@@ -40,7 +71,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     ));
     
     for category in &app.categories {
-        items.push(ListItem::new(format!("  {category}")));
+        let enabled = app.filter_state.is_category_enabled(category);
+        items.push(ListItem::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(category.as_str(), if enabled { Style::default() } else { Style::default().fg(Color::DarkGray) }),
+        ])));
     }
     
     items.push(ListItem::new(""));
@@ -51,8 +86,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     ));
     
     for tag in app.tags.iter().take(10) {
-        items.push(ListItem::new(format!("  #{tag}")));
+        let enabled = app.filter_state.is_tag_enabled(tag);
+        items.push(ListItem::new(Line::from(vec![
+            Span::raw("  #"),
+            Span::styled(tag.as_str(), if enabled { Style::default() } else { Style::default().fg(Color::DarkGray) }),
+        ])));
     }
+    
+    let mut state = ListState::default();
+    state.select(Some(app.left_selection.index));
     
     let list = List::new(items)
         .block(
@@ -72,5 +114,5 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD)
         );
     
-    f.render_widget(list, area);
+    f.render_stateful_widget(list, area, &mut state);
 }

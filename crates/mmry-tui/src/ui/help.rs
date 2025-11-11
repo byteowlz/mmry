@@ -35,12 +35,19 @@ pub fn draw(f: &mut Frame, _app: &App) {
         Line::from("  Ctrl-u     Page up"),
         Line::from(""),
         Line::from(Span::styled(
-            "Selection:",
+            "Selection (Middle Pane):",
             Style::default().add_modifier(Modifier::BOLD),
         )),
-        Line::from("  Space      Toggle selection on current memory"),
+        Line::from("  Space      Toggle selection on current memory and move down"),
         Line::from("  Ctrl-a     Select all memories"),
         Line::from("  V          Clear all selections"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Filtering (Left Pane):",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Space      Toggle filter on/off (greyed = disabled)"),
+        Line::from("  i          Isolate: disable all except selected"),
         Line::from(""),
         Line::from(Span::styled(
             "Memory Operations:",
