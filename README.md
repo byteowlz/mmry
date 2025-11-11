@@ -1,3 +1,5 @@
+![mmry-banner](banner.png)
+
 # mmry
 
 A local-first memory system for humans and AI agents. Store any text and find it again with multiple search strategies, pipe it anywhere with JSON. Everything runs locally. No API keys, no cloud services, your data stays on your own machine.
@@ -54,8 +56,9 @@ mmry-tui
 - `sparse` - Neural sparse embeddings (SPLADE++)
 
 **Memory types**: Three types (auto-guessed or specify with `--memory-type`)
+
 - Episodic (events and experiences) - default
-- Semantic (facts and knowledge) - if it contains "is" or "are"  
+- Semantic (facts and knowledge) - if it contains "is" or "are"
 - Procedural (how-to and instructions) - if it contains "step" or "how to"
 
 The auto-classification is basic keyword matching, so specify the type explicitly for anything important.
@@ -181,6 +184,7 @@ examples/       # Config examples and JSON schema
 The TUI (`mmry-tui`) provides an interactive interface for managing memories:
 
 **Layout**
+
 - Three-pane Yazi-inspired layout
 - Left: Categories, tags, and filters
 - Middle: Memory list with previews
@@ -189,29 +193,34 @@ The TUI (`mmry-tui`) provides an interactive interface for managing memories:
 **Keybindings** (vi-style)
 
 Navigation:
+
 - `hjkl` or arrow keys - Navigate panes and lists
 - `gg` - Jump to top
 - `G` - Jump to bottom
 - `Ctrl-d/u` - Page down/up
 
 Selection (Yazi-style):
+
 - `Space` - Toggle selection on current memory and move down
 - `Ctrl-a` - Select all memories
 - `V` - Clear all selections
 
 Memory Operations:
+
 - `e` - Edit memory in external editor ($EDITOR, $VISUAL, or vim/nano)
 - `d` - Delete memory or all selected memories (with confirmation)
 - `a` - Add new memory
 - `r` - Refresh memory list
 
 Other:
+
 - `/` - Search/command palette
 - `s` - Sort menu
 - `?` - Help overlay
 - `q` or `Ctrl-c` - Quit
 
 **Features**
+
 - Multi-select memories (Yazi-style with Space key)
 - Bulk delete selected memories
 - Memory editing in your preferred editor (respects $EDITOR/$VISUAL)

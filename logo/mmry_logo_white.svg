@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_2" data-name="Layer 2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800">
+  <defs>
+    <style>
+      .cls-1, .cls-2 {
+        fill: #fff;
+      }
+
+      .cls-2 {
+        font-family: JetBrainsMonoNF-Italic, 'JetBrainsMono Nerd Font';
+        font-size: 144.98px;
+        font-style: italic;
+      }
+    </style>
+  </defs>
+  <path class="cls-1" d="M732.11,426.52l-65.33-130.67-141.56-87.11-177.85-39.93-231.09,76.22-48.4,152.45,96.79,130.67,127.91-34.08,167.3,34.08,36.3,87.11,127.04,39.93-36.3-94.37,83.48-54.44,61.7-79.85ZM616.05,326.23h-9.14v28.06h9.14v67.77h-27.03v36.86h-228.53v-36.86h-71.26v36.86h-108.12v-36.86h-29.49v-67.77h10.52v-28.06h-10.52v-39.32h464.43v39.32Z"/>
+  <text class="cls-2" transform="translate(207.64 394.6)"><tspan x="0" y="0">mmry</tspan></text>
+</svg>
