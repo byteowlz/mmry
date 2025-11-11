@@ -16,6 +16,7 @@ All other fields are optional and will be auto-generated or classified if not pr
 
 - `type` or `memory_type` (string): One of "episodic", "semantic", or "procedural"
 - `category` (string): Category for organizing memories (defaults to "default")
+- `tags` (array of strings): Tags for organizing and filtering memories
 - `importance` (integer): Importance level from 1-10 (defaults to 5)
 - `metadata` (object): Additional metadata as key-value pairs
 
@@ -66,6 +67,22 @@ echo '[
   {"content": "Second memory in batch", "type": "semantic"},
   {"content": "Third memory", "importance": 8}
 ]' | mmry add -
+```
+
+## JSON Output
+
+By default, `--json` omits embeddings for cleaner output. Use `--full` to include embeddings:
+
+```bash
+# Clean output (no embeddings)
+mmry add "test" --json
+mmry search "work" --json
+mmry ls --json
+
+# Full output (with embeddings)
+mmry add "test" --json --full
+mmry search "work" --json --full
+mmry ls --json --full
 ```
 
 ## Pipeline Examples

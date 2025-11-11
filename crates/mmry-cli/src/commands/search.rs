@@ -59,6 +59,9 @@ pub struct SearchCmd {
 
     #[arg(long, help = "Output results as JSON")]
     pub json: bool,
+
+    #[arg(long, help = "Include full embeddings in JSON output")]
+    pub full: bool,
 }
 
 pub async fn handle(
@@ -100,8 +103,22 @@ pub async fn handle(
     };
 
     if cmd.json {
-        let json = serde_json::to_string_pretty(&results)?;
-        println!("{json}");
+        if cmd.full {
+            let json = serde_json::to_string_pretty(&results)?;
+            println!("{json}");
+        } else {
+            let mut values: Vec<serde_json::Value> = Vec::new();
+            for memory in &results {
+                let mut value = serde_json::to_value(memory)?;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.remove("embedding");
+                    obj.remove("sparse_embedding");
+                }
+                values.push(value);
+            }
+            let json = serde_json::to_string_pretty(&values)?;
+            println!("{json}");
+        }
         return Ok(());
     }
 
@@ -110,10 +127,8 @@ pub async fn handle(
         return Ok(());
     }
 
-    let mode_str = search_mode.map_or_else(
-        || format!("{:?}", config.search.mode),
-        |m| format!("{m:?}"),
-    );
+    let mode_str =
+        search_mode.map_or_else(|| format!("{:?}", config.search.mode), |m| format!("{m:?}"));
     println!("Found {} memories (mode: {}):\n", results.len(), mode_str);
 
     for (i, memory) in results.iter().enumerate() {

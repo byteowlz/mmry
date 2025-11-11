@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mmry-core", "crates/mmry-cli", "crates/mmry-mcp"]
+members = ["crates/mmry-core", "crates/mmry-cli", "crates/mmry-mcp", "crates/mmry-tui"]
 resolver = "2"
 
 [workspace.package]

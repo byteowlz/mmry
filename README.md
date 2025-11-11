@@ -4,6 +4,8 @@ A local-first memory system for humans and AI agents. Store any text and find it
 
 ## Quick Start
 
+### CLI
+
 ```bash
 # Install
 cargo install --git https://github.com/byteowlz/mmry mmry-cli
@@ -20,6 +22,24 @@ mmry search "api" --mode semantic       # conceptual similarity
 # Pipe things around
 echo "Important note" | mmry add -
 mmry search "important" --json | jq '.[].content'
+```
+
+### TUI
+
+```bash
+# Install
+cargo install --git https://github.com/byteowlz/mmry mmry-tui
+
+# Launch the TUI
+mmry-tui
+
+# Use vi keybindings to navigate:
+# - hjkl or arrow keys to navigate
+# - e to edit memory in your $EDITOR
+# - d to delete (with confirmation)
+# - / to search
+# - s to sort
+# - ? for help
 ```
 
 ## What It Does
@@ -121,6 +141,12 @@ mmry search "pizza" --mode keyword
 mmry search "piza" --mode fuzzy      # finds "pizza"
 mmry search "italian food" --mode semantic
 
+# JSON output (embeddings omitted by default)
+mmry add "test" --json           # Clean output without embeddings
+mmry add "test" --json --full    # Include full embeddings
+mmry search "work" --json        # Search results without embeddings
+mmry ls --json --full            # List with full embeddings
+
 # JSON pipelines
 mmry search "work" --json | \
   jq 'map({content, category: "archive"})' | \
@@ -144,10 +170,58 @@ See `examples/json-input-examples.md` for the full JSON schema and more pipeline
 crates/
   mmry-core/    # Core library (database, embeddings, search)
   mmry-cli/     # Command-line interface
+  mmry-tui/     # Terminal UI (Yazi-inspired, vi keybindings)
   mmry-mcp/     # Model Context Protocol server
 
 examples/       # Config examples and JSON schema
 ```
+
+## TUI Features
+
+The TUI (`mmry-tui`) provides an interactive interface for managing memories:
+
+**Layout**
+- Three-pane Yazi-inspired layout
+- Left: Categories, tags, and filters
+- Middle: Memory list with previews
+- Right: Full memory details and content
+
+**Keybindings** (vi-style)
+
+Navigation:
+- `hjkl` or arrow keys - Navigate panes and lists
+- `gg` - Jump to top
+- `G` - Jump to bottom
+- `Ctrl-d/u` - Page down/up
+
+Selection (Yazi-style):
+- `Space` - Toggle selection on current memory and move down
+- `Ctrl-a` - Select all memories
+- `V` - Clear all selections
+
+Memory Operations:
+- `e` - Edit memory in external editor ($EDITOR, $VISUAL, or vim/nano)
+- `d` - Delete memory or all selected memories (with confirmation)
+- `a` - Add new memory
+- `r` - Refresh memory list
+
+Other:
+- `/` - Search/command palette
+- `s` - Sort menu
+- `?` - Help overlay
+- `q` or `Ctrl-c` - Quit
+
+**Features**
+- Multi-select memories (Yazi-style with Space key)
+- Bulk delete selected memories
+- Memory editing in your preferred editor (respects $EDITOR/$VISUAL)
+- Memory content serialized as readable YAML for editing
+- Delete confirmation dialogs (shows count for bulk operations)
+- Sort by date, importance, category, or type
+- Visual selection indicators (◉ marker)
+- Selection count in memory list title
+- Adapts to terminal color scheme
+- Status bar with helpful hints
 
 Built with Rust using sqlx, fastembed, and tokio. Check `AGENTS.md` if you're an AI agent working on this codebase.
 

@@ -30,6 +30,9 @@ pub struct AddCmd {
 
     #[arg(long, help = "Output result as JSON")]
     pub json: bool,
+
+    #[arg(long, help = "Include full embeddings in JSON output")]
+    pub full: bool,
 }
 
 pub async fn handle(
@@ -108,7 +111,7 @@ pub async fn handle(
     operations::insert_memory(db.pool(), &memory).await?;
 
     if cmd.json {
-        let json = serde_json::to_string_pretty(&memory)?;
+        let json = serialize_memory(&memory, cmd.full)?;
         println!("{json}");
     } else {
         println!("✓ Added memory: {}", memory.id);
@@ -138,8 +141,22 @@ async fn handle_json_input(
         }
 
         if cmd.json {
-            let json = serde_json::to_string_pretty(&results)?;
-            println!("{json}");
+            if cmd.full {
+                let json = serde_json::to_string_pretty(&results)?;
+                println!("{json}");
+            } else {
+                let mut values: Vec<serde_json::Value> = Vec::new();
+                for memory in &results {
+                    let mut value = serde_json::to_value(memory)?;
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.remove("embedding");
+                        obj.remove("sparse_embedding");
+                    }
+                    values.push(value);
+                }
+                let json = serde_json::to_string_pretty(&values)?;
+                println!("{json}");
+            }
         } else {
             println!("✓ Added {} memories", results.len());
             for memory in &results {
@@ -155,7 +172,7 @@ async fn handle_json_input(
     operations::insert_memory(db.pool(), &memory).await?;
 
     if cmd.json {
-        let json = serde_json::to_string_pretty(&memory)?;
+        let json = serialize_memory(&memory, cmd.full)?;
         println!("{json}");
     } else {
         println!("✓ Added memory: {}", memory.id);
@@ -263,6 +280,19 @@ async fn process_json_memory(
     }
 
     Ok(memory)
+}
+
+fn serialize_memory(memory: &Memory, full: bool) -> anyhow::Result<String> {
+    if full {
+        serde_json::to_string_pretty(&memory).map_err(Into::into)
+    } else {
+        let mut value = serde_json::to_value(memory)?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("embedding");
+            obj.remove("sparse_embedding");
+        }
+        serde_json::to_string_pretty(&value).map_err(Into::into)
+    }
 }
 
 fn classify_memory(content: &str) -> MemoryType {

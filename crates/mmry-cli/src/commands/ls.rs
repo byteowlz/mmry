@@ -13,6 +13,9 @@ pub struct LsCmd {
 
     #[arg(long, help = "Output results as JSON")]
     pub json: bool,
+
+    #[arg(long, help = "Include full embeddings in JSON output")]
+    pub full: bool,
 }
 
 pub async fn handle(cmd: LsCmd, config: &Config, db: &Database) -> anyhow::Result<()> {
@@ -21,8 +24,22 @@ pub async fn handle(cmd: LsCmd, config: &Config, db: &Database) -> anyhow::Resul
     let memories = operations::list_memories(db.pool(), cmd.category.as_deref(), limit).await?;
 
     if cmd.json {
-        let json = serde_json::to_string_pretty(&memories)?;
-        println!("{json}");
+        if cmd.full {
+            let json = serde_json::to_string_pretty(&memories)?;
+            println!("{json}");
+        } else {
+            let mut values: Vec<serde_json::Value> = Vec::new();
+            for memory in &memories {
+                let mut value = serde_json::to_value(memory)?;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.remove("embedding");
+                    obj.remove("sparse_embedding");
+                }
+                values.push(value);
+            }
+            let json = serde_json::to_string_pretty(&values)?;
+            println!("{json}");
+        }
         return Ok(());
     }
 
