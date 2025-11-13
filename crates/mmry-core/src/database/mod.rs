@@ -97,6 +97,39 @@ impl Database {
             tracing::info!("tags column added");
         }
 
+        // Check if chunking columns exist, add if not
+        let parent_id_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='parent_id'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !parent_id_exists {
+            tracing::info!("Adding chunking columns to memories table...");
+            sqlx::query("ALTER TABLE memories ADD COLUMN parent_id TEXT")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE memories ADD COLUMN chunk_index INTEGER")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE memories ADD COLUMN total_chunks INTEGER")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE memories ADD COLUMN chunk_method TEXT")
+                .execute(pool)
+                .await?;
+            
+            // Add indices for chunking
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_id)")
+                .execute(pool)
+                .await?;
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_chunk_order ON memories(parent_id, chunk_index) WHERE parent_id IS NOT NULL")
+                .execute(pool)
+                .await?;
+            
+            tracing::info!("Chunking columns and indices added");
+        }
+
         Ok(())
     }
 
@@ -210,13 +243,24 @@ pub(crate) async fn upsert_vector_embedding(
     id: &Uuid,
     embedding: &[f32],
 ) -> crate::Result<()> {
+    // Virtual tables (vec0) don't support INSERT OR REPLACE reliably
+    // So we need to delete first, then insert
+    let id_str = id.to_string();
+    
+    // Delete existing entry if it exists (ignore errors if not found)
+    let _ = sqlx::query("DELETE FROM memory_embeddings WHERE memory_id = ?")
+        .bind(&id_str)
+        .execute(pool)
+        .await;
+    
+    // Insert new entry
     sqlx::query(
         r#"
-        INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding)
+        INSERT INTO memory_embeddings (memory_id, embedding)
         VALUES (?, ?)
         "#,
     )
-    .bind(id.to_string())
+    .bind(&id_str)
     .bind(embedding.as_bytes())
     .execute(pool)
     .await?;

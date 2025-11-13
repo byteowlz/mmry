@@ -27,6 +27,19 @@ pub struct Memory {
     pub updated_at: DateTime<Utc>,
     pub category: String,
     pub tags: Vec<String>,
+    pub parent_id: Option<Uuid>,
+    pub chunk_index: Option<i32>,
+    pub total_chunks: Option<i32>,
+    pub chunk_method: Option<ChunkMethod>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChunkMethod {
+    None,
+    Paragraph,
+    Sentence,
+    Word,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +87,18 @@ impl Memory {
             updated_at: Utc::now(),
             category,
             tags: Vec::new(),
+            parent_id: None,
+            chunk_index: None,
+            total_chunks: None,
+            chunk_method: None,
         }
+    }
+
+    pub fn is_chunk(&self) -> bool {
+        self.parent_id.is_some()
+    }
+
+    pub fn is_parent(&self) -> bool {
+        self.total_chunks.is_some() && self.total_chunks.unwrap() > 1
     }
 }

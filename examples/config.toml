@@ -88,6 +88,29 @@ dedupe_threshold = 0.95
 # Automatically score importance of memories
 importance_auto_score = true
 
+[chunking]
+# Enable automatic chunking of long memories
+enabled = true
+# Maximum tokens per chunk (adjust based on embedding model)
+# Model limits: MiniLM (256), BGE/GTE (512), Nomic/ModernBERT (8192)
+max_chunk_tokens = 200
+# Minimum chunk size (prevents tiny chunks)
+min_chunk_tokens = 50
+# Hard limit for maximum tokens (supports long-context models)
+max_tokens_hard_limit = 8192
+# Number of tokens to overlap between chunks
+overlap_tokens = 25
+# Paragraph separator (tries "\n\n" then "\n")
+paragraph_separator = "\n\n"
+# Generate embeddings for metadata (tags, category, type)
+embed_metadata = true
+# Weight for metadata in search (0.0-1.0)
+metadata_weight = 0.1
+# Enable deduplication across chunks
+dedupe_chunks = false
+# Similarity threshold for chunk deduplication (0.0-1.0)
+dedupe_chunk_threshold = 0.98
+
 [entities]
 # Extract entities from memories
 extract_enabled = true

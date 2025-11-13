@@ -6,6 +6,45 @@ use sqlx::Row;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// Helper function to parse a Memory from a database row
+fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
+    let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
+    let embedding_vec =
+        embedding.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
+
+    let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
+    let sparse_embedding_vec = sparse_embedding
+        .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
+
+    let parent_id: Option<String> = row.try_get("parent_id").ok().flatten();
+    let parent_id = parent_id.and_then(|s| Uuid::parse_str(&s).ok());
+
+    let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
+    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok());
+
+    Ok(Memory {
+        id: Uuid::parse_str(row.try_get("id")?).unwrap(),
+        memory_type: serde_json::from_str(row.try_get("type")?)?,
+        content: row.try_get("content")?,
+        embedding: embedding_vec,
+        sparse_embedding: sparse_embedding_vec,
+        metadata: serde_json::from_str(row.try_get("metadata")?)?,
+        importance: row.try_get("importance")?,
+        category: row.try_get("category")?,
+        tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
+        created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        parent_id,
+        chunk_index: row.try_get("chunk_index").ok(),
+        total_chunks: row.try_get("total_chunks").ok(),
+        chunk_method,
+    })
+}
+
 pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<()> {
     let embedding_bytes = memory
         .embedding
@@ -17,10 +56,16 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
         .as_ref()
         .and_then(|e| serde_json::to_vec(e).ok());
 
+    let chunk_method_str = memory.chunk_method.as_ref().map(|cm| {
+        serde_json::to_string(cm)
+            .ok()
+            .map(|s| s.trim_matches('"').to_string())
+    }).flatten();
+
     sqlx::query(
         r#"
-        INSERT INTO memories (id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO memories (id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#
     )
     .bind(memory.id.to_string())
@@ -34,6 +79,10 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(serde_json::to_string(&memory.tags)?)
     .bind(memory.created_at.to_rfc3339())
     .bind(memory.updated_at.to_rfc3339())
+    .bind(memory.parent_id.map(|id| id.to_string()))
+    .bind(memory.chunk_index)
+    .bind(memory.total_chunks)
+    .bind(chunk_method_str)
     .execute(pool)
     .await?;
 
@@ -47,7 +96,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
         FROM memories
         WHERE id = ?
         "#,
@@ -57,31 +106,7 @@ pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Mem
     .await?;
 
     if let Some(row) = row {
-        let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
-        let embedding_vec =
-            embedding.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
-
-        let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
-        let sparse_embedding_vec = sparse_embedding
-            .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
-
-        Ok(Some(Memory {
-            id: Uuid::parse_str(row.try_get("id")?).unwrap(),
-            memory_type: serde_json::from_str(row.try_get("type")?)?,
-            content: row.try_get("content")?,
-            embedding: embedding_vec,
-            sparse_embedding: sparse_embedding_vec,
-            metadata: serde_json::from_str(row.try_get("metadata")?)?,
-            importance: row.try_get("importance")?,
-            category: row.try_get("category")?,
-            tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-        }))
+        Ok(Some(memory_from_row(&row)?))
     } else {
         Ok(None)
     }
@@ -95,7 +120,7 @@ pub async fn list_memories(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -109,7 +134,7 @@ pub async fn list_memories(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -122,31 +147,7 @@ pub async fn list_memories(
 
     let mut memories = Vec::new();
     for row in rows {
-        let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
-        let embedding_vec =
-            embedding.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
-
-        let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
-        let sparse_embedding_vec = sparse_embedding
-            .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
-
-        memories.push(Memory {
-            id: Uuid::parse_str(row.try_get("id")?).unwrap(),
-            memory_type: serde_json::from_str(row.try_get("type")?)?,
-            content: row.try_get("content")?,
-            embedding: embedding_vec,
-            sparse_embedding: sparse_embedding_vec,
-            metadata: serde_json::from_str(row.try_get("metadata")?)?,
-            importance: row.try_get("importance")?,
-            category: row.try_get("category")?,
-            tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-        });
+        memories.push(memory_from_row(&row)?);
     }
 
     Ok(memories)

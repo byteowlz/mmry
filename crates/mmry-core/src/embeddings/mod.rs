@@ -11,6 +11,7 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokenizers::Tokenizer;
 
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
@@ -187,6 +188,7 @@ pub struct EmbeddingService {
     enabled: bool,
     model_name: String,
     model: OnceCell<SharedModel>,
+    tokenizer: OnceCell<Arc<Tokenizer>>,
 }
 
 impl EmbeddingService {
@@ -198,6 +200,7 @@ impl EmbeddingService {
                 enabled: false,
                 model_name: String::new(),
                 model: OnceCell::new(),
+                tokenizer: OnceCell::new(),
             });
         }
 
@@ -207,6 +210,7 @@ impl EmbeddingService {
                 enabled: false,
                 model_name: String::new(),
                 model: OnceCell::new(),
+                tokenizer: OnceCell::new(),
             });
         }
 
@@ -214,7 +218,39 @@ impl EmbeddingService {
             enabled: true,
             model_name: config.model.clone(),
             model: OnceCell::new(),
+            tokenizer: OnceCell::new(),
         })
+    }
+
+    /// Get the tokenizer for this embedding model
+    pub async fn get_tokenizer(&self) -> Result<Arc<Tokenizer>> {
+        if !self.enabled {
+            return Err(Error::Embedding("Embedding service disabled".into()));
+        }
+
+        if let Some(tokenizer) = self.tokenizer.get() {
+            return Ok(Arc::clone(tokenizer));
+        }
+
+        // Ensure model is loaded first (it downloads the tokenizer)
+        self.ensure_model().await?;
+
+        // Try to load tokenizer from the fastembed cache
+        let cache_dir = ensure_fastembed_cache_dir()?;
+        let model_dir = cache_dir.join("models").join(&self.model_name);
+        let tokenizer_path = model_dir.join("tokenizer.json");
+
+        if tokenizer_path.exists() {
+            let tokenizer = Tokenizer::from_file(&tokenizer_path)
+                .map_err(|e| Error::Embedding(format!("Failed to load tokenizer: {e}")))?;
+            let tokenizer = Arc::new(tokenizer);
+            let _ = self.tokenizer.set(Arc::clone(&tokenizer));
+            Ok(tokenizer)
+        } else {
+            Err(Error::Embedding(
+                "Tokenizer not found for model".into(),
+            ))
+        }
     }
 
     pub fn is_enabled(&self) -> bool {

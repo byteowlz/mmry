@@ -21,4 +21,19 @@ pub enum AppMode {
     DeleteMultiple(Vec<uuid::Uuid>),
     Help,
     Sort,
+    WhichKey(WhichKeyContext),
+    CategoryInput(CategoryInputContext, String),
+    CategorySelect(usize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WhichKeyContext {
+    Type,
+    Importance,
+    Category,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CategoryInputContext {
+    New,
 }

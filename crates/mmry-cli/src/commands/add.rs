@@ -3,6 +3,7 @@ use std::io::Read;
 use std::io::{self};
 use std::sync::Arc;
 
+use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
@@ -99,28 +100,127 @@ pub async fn handle(
         memory.importance = importance.clamp(1, 10);
     }
 
-    if embeddings.is_enabled() {
-        if let Some(vector) = embeddings.embed(&memory.content).await? {
-            memory.embedding = Some(vector);
+    // Check if chunking is needed
+    let chunker = if config.chunking.enabled {
+        // Try to get tokenizer for accurate token counting
+        let tokenizer = if embeddings.is_enabled() {
+            embeddings.get_tokenizer().await.ok()
+        } else {
+            None
+        };
+
+        if let Some(tok) = tokenizer {
+            Chunker::with_tokenizer(config.chunking.clone(), tok)
+        } else {
+            Chunker::new(config.chunking.clone())
         }
-    }
-
-    if sparse_embeddings.is_enabled() {
-        if let Some(sparse_vec) = sparse_embeddings.embed(&memory.content).await? {
-            memory.sparse_embedding = Some(sparse_vec.into());
-        }
-    }
-
-    // Insert memory
-    operations::insert_memory(db.pool(), &memory).await?;
-
-    if cmd.json {
-        let json = serialize_memory(&memory, cmd.full)?;
-        println!("{json}");
     } else {
-        println!("✓ Added memory: {}", memory.id);
-        println!("  Type: {:?}", memory.memory_type);
-        println!("  Content: {}", memory.content);
+        Chunker::new(config.chunking.clone())
+    };
+
+    if chunker.needs_chunking(&memory.content) {
+        // Memory needs to be chunked
+        let text_chunks = chunker.chunk_text(&memory.content)?;
+        let total_chunks = text_chunks.len();
+
+        if !cmd.json {
+            println!(
+                "Content is long, chunking into {} pieces using {:?} method",
+                total_chunks,
+                text_chunks.first().map(|c| &c.method).unwrap_or(&mmry_core::memory::ChunkMethod::None)
+            );
+        }
+
+        // Create memory chunks
+        let mut chunk_memories = chunker.create_memory_chunks(&memory, text_chunks);
+
+        // Update parent memory to mark it as chunked
+        memory.total_chunks = Some(total_chunks as i32);
+        memory.chunk_method = chunk_memories.first().and_then(|c| c.chunk_method.clone());
+
+        // Embed and insert all chunks
+        for chunk in &mut chunk_memories {
+            // Generate content with metadata for embedding if configured
+            let embed_text = if config.chunking.embed_metadata {
+                let metadata_text = chunker.generate_metadata_text(chunk);
+                if !metadata_text.is_empty() {
+                    format!("{}\n\n{}", metadata_text, chunk.content)
+                } else {
+                    chunk.content.clone()
+                }
+            } else {
+                chunk.content.clone()
+            };
+
+            // Generate embeddings
+            if embeddings.is_enabled() {
+                if let Some(vector) = embeddings.embed(&embed_text).await? {
+                    chunk.embedding = Some(vector);
+                }
+            }
+
+            if sparse_embeddings.is_enabled() {
+                if let Some(sparse_vec) = sparse_embeddings.embed(&embed_text).await? {
+                    chunk.sparse_embedding = Some(sparse_vec.into());
+                }
+            }
+
+            // Insert chunk
+            operations::insert_memory(db.pool(), chunk).await?;
+        }
+
+        // Insert parent memory (without embedding, chunks have the embeddings)
+        operations::insert_memory(db.pool(), &memory).await?;
+
+        if cmd.json {
+            // Return all chunks
+            let json = if cmd.full {
+                serde_json::to_string_pretty(&chunk_memories)?
+            } else {
+                let values: Vec<serde_json::Value> = chunk_memories
+                    .iter()
+                    .map(|m| {
+                        let mut v = serde_json::to_value(m).unwrap();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.remove("embedding");
+                            obj.remove("sparse_embedding");
+                        }
+                        v
+                    })
+                    .collect();
+                serde_json::to_string_pretty(&values)?
+            };
+            println!("{json}");
+        } else {
+            println!("✓ Added chunked memory: {} ({} chunks)", memory.id, total_chunks);
+            println!("  Type: {:?}", memory.memory_type);
+            println!("  Content preview: {}...", memory.content.chars().take(100).collect::<String>());
+        }
+    } else {
+        // Memory doesn't need chunking, process normally
+        if embeddings.is_enabled() {
+            if let Some(vector) = embeddings.embed(&memory.content).await? {
+                memory.embedding = Some(vector);
+            }
+        }
+
+        if sparse_embeddings.is_enabled() {
+            if let Some(sparse_vec) = sparse_embeddings.embed(&memory.content).await? {
+                memory.sparse_embedding = Some(sparse_vec.into());
+            }
+        }
+
+        // Insert memory
+        operations::insert_memory(db.pool(), &memory).await?;
+
+        if cmd.json {
+            let json = serialize_memory(&memory, cmd.full)?;
+            println!("{json}");
+        } else {
+            println!("✓ Added memory: {}", memory.id);
+            println!("  Type: {:?}", memory.memory_type);
+            println!("  Content: {}", memory.content);
+        }
     }
 
     Ok(())

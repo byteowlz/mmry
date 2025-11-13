@@ -14,12 +14,59 @@ use zerocopy::IntoBytes;
 
 use crate::config::SearchConfig;
 use crate::config::SearchMode;
+use crate::database::operations;
 use crate::embeddings::EmbeddingService;
 use crate::memory::Memory;
 use crate::reranker::RerankerService;
 use crate::sparse_embeddings::SparseEmbeddingService;
 use crate::sparse_embeddings::StoredSparseEmbedding;
 use crate::Result;
+
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub memory: Memory,
+    pub score: f32,
+    pub matched_chunk_indices: Vec<usize>,
+}
+
+/// Helper function to parse a Memory from a database row  
+fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
+    let embedding_bytes: Option<Vec<u8>> = row.try_get("embedding").ok();
+    let embedding_vec = embedding_bytes
+        .and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
+
+    let sparse_embedding_bytes: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
+    let sparse_embedding_vec = sparse_embedding_bytes
+        .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
+
+    let parent_id: Option<String> = row.try_get("parent_id").ok().flatten();
+    let parent_id = parent_id.and_then(|s| Uuid::parse_str(&s).ok());
+
+    let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
+    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok());
+
+    Ok(Memory {
+        id: Uuid::parse_str(row.try_get("id")?).unwrap(),
+        memory_type: serde_json::from_str(row.try_get("type")?)?,
+        content: row.try_get("content")?,
+        embedding: embedding_vec,
+        sparse_embedding: sparse_embedding_vec,
+        metadata: serde_json::from_str(row.try_get("metadata")?)?,
+        importance: row.try_get("importance")?,
+        category: row.try_get("category")?,
+        tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
+        created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        parent_id,
+        chunk_index: row.try_get("chunk_index").ok(),
+        total_chunks: row.try_get("total_chunks").ok(),
+        chunk_method,
+    })
+}
 
 const MIN_SCORE_THRESHOLD: f32 = 0.15;
 const MIN_FUZZY_CONFIDENCE: f32 = 0.82;
@@ -313,10 +360,88 @@ impl SearchService {
             scored_results.truncate(limit as usize);
         }
 
-        Ok(scored_results
+        let memories: Vec<Memory> = scored_results
             .into_iter()
             .map(|(_, memory)| memory)
-            .collect())
+            .collect();
+
+        // Aggregate chunks into parent memories
+        let aggregated = self.aggregate_chunks(memories).await?;
+
+        Ok(aggregated)
+    }
+
+    /// Aggregate chunk memories into their parent memories
+    /// When chunks match a search, replace them with their parent memory
+    /// Returns memories with metadata about which chunks matched
+    async fn aggregate_chunks(&self, memories: Vec<Memory>) -> Result<Vec<Memory>> {
+        let mut parent_map: HashMap<Uuid, Memory> = HashMap::new();
+        let mut chunk_indices_map: HashMap<Uuid, Vec<i32>> = HashMap::new();
+        let mut non_chunk_memories: Vec<Memory> = Vec::new();
+        let mut result_order: Vec<Uuid> = Vec::new();
+
+        // First pass: separate chunks from non-chunks and track chunk indices
+        for memory in memories {
+            if let Some(parent_id) = memory.parent_id {
+                // This is a chunk - track which chunk index matched
+                if let Some(chunk_index) = memory.chunk_index {
+                    chunk_indices_map
+                        .entry(parent_id)
+                        .or_insert_with(Vec::new)
+                        .push(chunk_index);
+                }
+                
+                // Track order - use parent ID
+                if !result_order.contains(&parent_id) {
+                    result_order.push(parent_id);
+                }
+            } else {
+                // This is either a parent or a standalone memory
+                let id = memory.id;
+                if memory.is_parent() {
+                    parent_map.insert(id, memory);
+                    if !result_order.contains(&id) {
+                        result_order.push(id);
+                    }
+                } else {
+                    non_chunk_memories.push(memory);
+                }
+            }
+        }
+
+        // Second pass: load parent memories for chunks
+        for (parent_id, _indices) in &chunk_indices_map {
+            if !parent_map.contains_key(parent_id) {
+                // Load parent from database
+                if let Some(parent) = operations::get_memory(&self.pool, *parent_id).await? {
+                    parent_map.insert(*parent_id, parent);
+                }
+            }
+        }
+
+        // Third pass: build final result maintaining search order
+        let mut result = Vec::new();
+        let mut seen_ids = HashSet::new();
+
+        for id in result_order {
+            if seen_ids.insert(id) {
+                if let Some(parent) = parent_map.get(&id) {
+                    result.push(parent.clone());
+                    // Note: chunk indices tracking is available in chunk_indices_map
+                    // but Memory struct doesn't have a field to store this metadata yet
+                    // For now, the aggregation works and we can add highlighting later
+                }
+            }
+        }
+
+        // Add non-chunk memories that weren't already added
+        for memory in non_chunk_memories {
+            if seen_ids.insert(memory.id) {
+                result.push(memory);
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn search(
@@ -458,7 +583,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at FROM memories WHERE id IN (",
+                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");
@@ -470,31 +595,7 @@ impl SearchService {
 
             let rows = builder.build().fetch_all(&self.pool).await?;
             for row in rows {
-                let embedding_bytes: Option<Vec<u8>> = row.try_get("embedding").ok();
-                let embedding_vec = embedding_bytes
-                    .and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
-
-                let sparse_embedding_bytes: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
-                let sparse_embedding_vec = sparse_embedding_bytes
-                    .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
-
-                memories.push(Memory {
-                    id: Uuid::parse_str(row.try_get("id")?).unwrap(),
-                    memory_type: serde_json::from_str(row.try_get("type")?)?,
-                    content: row.try_get("content")?,
-                    embedding: embedding_vec,
-                    sparse_embedding: sparse_embedding_vec,
-                    metadata: serde_json::from_str(row.try_get("metadata")?)?,
-                    importance: row.try_get("importance")?,
-                    category: row.try_get("category")?,
-                    tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
-                    created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
-                    updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
-                });
+                memories.push(memory_from_row(&row)?);
             }
         }
 

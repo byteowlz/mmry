@@ -177,6 +177,10 @@ pub fn parse_edited_memory(content: &str, original_id: Option<Uuid>) -> Result<M
         updated_at: chrono::Utc::now(),
         category,
         tags,
+        parent_id: None,
+        chunk_index: None,
+        total_chunks: None,
+        chunk_method: None,
     })
 }
 

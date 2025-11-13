@@ -52,7 +52,11 @@ pub fn draw(f: &mut Frame, _app: &App) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from("  Space      Toggle filter on/off (greyed = disabled)"),
-        Line::from("  i          Isolate: disable all except selected"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Note: In Middle/Right panes, 'i' opens importance menu",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "Memory Operations:",
@@ -62,6 +66,14 @@ pub fn draw(f: &mut Frame, _app: &App) {
         Line::from("  e          Edit selected memory in external editor"),
         Line::from("  a          Add new memory"),
         Line::from("  r          Refresh memory list"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Quick Edit Commands:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  t          Change memory type (e=Episodic, s=Semantic, p=Procedural)"),
+        Line::from("  i          Change importance (0-9=Set, i=Increase, d=Decrease)"),
+        Line::from("  c          Change category (n=New, s=Select from list)"),
         Line::from(""),
         Line::from(Span::styled(
             "Search & Filter:",

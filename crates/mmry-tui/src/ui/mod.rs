@@ -4,6 +4,7 @@ mod left_pane;
 mod middle_pane;
 mod right_pane;
 mod status_bar;
+mod whichkey;
 
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
@@ -43,6 +44,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         AppMode::DeleteMultiple(ids) => draw_delete_multiple_confirmation(f, ids.len()),
         AppMode::Sort => draw_sort_menu(f, app),
         AppMode::Search(_) => command_palette::draw(f, app),
+        AppMode::WhichKey(context) => whichkey::draw(f, context),
+        AppMode::CategoryInput(_, ref input) => whichkey::draw_category_input(f, input),
+        AppMode::CategorySelect(idx) => whichkey::draw_category_select(f, &app.categories, *idx),
         _ => {}
     }
 }

@@ -47,6 +47,7 @@ pub struct Config {
     pub sparse_embeddings: SparseEmbeddingsConfig,
     pub search: SearchConfig,
     pub memory: MemoryConfig,
+    pub chunking: ChunkingConfig,
     pub entities: EntitiesConfig,
     pub cleanup: CleanupConfig,
     pub integrations: IntegrationsConfig,
@@ -101,6 +102,20 @@ pub struct MemoryConfig {
     pub auto_dedupe: bool,
     pub dedupe_threshold: f32,
     pub importance_auto_score: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkingConfig {
+    pub enabled: bool,
+    pub max_chunk_tokens: usize,
+    pub min_chunk_tokens: usize,
+    pub max_tokens_hard_limit: usize,
+    pub overlap_tokens: usize,
+    pub paragraph_separator: String,
+    pub embed_metadata: bool,
+    pub metadata_weight: f32,
+    pub dedupe_chunks: bool,
+    pub dedupe_chunk_threshold: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +180,18 @@ impl Default for Config {
                 auto_dedupe: true,
                 dedupe_threshold: 0.95,
                 importance_auto_score: true,
+            },
+            chunking: ChunkingConfig {
+                enabled: true,
+                max_chunk_tokens: 200, // Safe for default model (all-MiniLM-L6-v2: 256 tokens)
+                min_chunk_tokens: 50,
+                max_tokens_hard_limit: 8192, // Support long-context models (BGE-M3, Nomic, ModernBERT)
+                overlap_tokens: 25,
+                paragraph_separator: "\n\n".to_string(),
+                embed_metadata: true,
+                metadata_weight: 0.1,
+                dedupe_chunks: false,
+                dedupe_chunk_threshold: 0.98,
             },
             entities: EntitiesConfig {
                 extract_enabled: true,

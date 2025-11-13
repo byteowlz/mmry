@@ -18,6 +18,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         AppMode::DeleteMultiple(_) => "DELETE",
         AppMode::Help => "HELP",
         AppMode::Sort => "SORT",
+        AppMode::WhichKey(_) => "COMMAND",
+        AppMode::CategoryInput(_, _) => "INPUT",
+        AppMode::CategorySelect(_) => "SELECT",
     };
 
     let mode_color = match &app.mode {
@@ -27,6 +30,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         AppMode::DeleteMultiple(_) => Color::Red,
         AppMode::Help => Color::Cyan,
         AppMode::Sort => Color::Green,
+        AppMode::WhichKey(_) => Color::Magenta,
+        AppMode::CategoryInput(_, _) => Color::Yellow,
+        AppMode::CategorySelect(_) => Color::Green,
     };
 
     let mut spans = vec![

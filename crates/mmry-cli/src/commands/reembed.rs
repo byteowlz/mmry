@@ -64,11 +64,16 @@ pub async fn handle(
 
     println!("Found {} memories", memories.len());
 
-    // Count what needs updating
+    // Count what needs updating (skip parent memories)
     let mut dense_update_count = 0;
     let mut sparse_update_count = 0;
 
     for memory in &memories {
+        // Skip parent memories - they don't get embeddings (only their chunks do)
+        if memory.is_parent() && memory.parent_id.is_none() {
+            continue;
+        }
+        
         if regenerate_dense && embeddings.is_enabled() && (cmd.force || memory.embedding.is_none())
         {
             dense_update_count += 1;
@@ -108,6 +113,12 @@ pub async fn handle(
     for (idx, mut memory) in memories.into_iter().enumerate() {
         let mut updated = false;
 
+        // Skip parent memories - they don't get embeddings (only their chunks do)
+        if memory.is_parent() && memory.parent_id.is_none() {
+            // This is a parent memory, skip embedding generation
+            continue;
+        }
+
         // Generate dense embedding if needed
         if regenerate_dense && embeddings.is_enabled() && (cmd.force || memory.embedding.is_none())
         {
@@ -129,14 +140,22 @@ pub async fn handle(
         }
 
         if updated {
-            operations::update_memory_embeddings(
+            match operations::update_memory_embeddings(
                 db.pool(),
                 &memory.id,
                 memory.embedding.as_ref(),
                 memory.sparse_embedding.as_ref(),
             )
-            .await?;
-            updated_count += 1;
+            .await
+            {
+                Ok(_) => {
+                    updated_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to update memory {}: {}", memory.id, e);
+                    // Continue processing other memories
+                }
+            }
 
             if (idx + 1) % 10 == 0 || idx + 1 == total {
                 println!("  Progress: {}/{} memories processed", idx + 1, total);

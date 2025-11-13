@@ -1,3 +1,4 @@
+pub mod chunking;
 pub mod config;
 pub mod database;
 pub mod embeddings;

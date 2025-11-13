@@ -26,6 +26,8 @@ sqlite-vec = { workspace = true }
 zerocopy = { workspace = true }
 libsqlite3-sys = "0.30"
 shellexpand = "3.1"
+unicode-segmentation = "1.12"
+tokenizers = { workspace = true }
 ort = { version = "=2.0.0-rc.10", default-features = false, optional = true }
 
 [features]
