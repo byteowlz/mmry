@@ -90,19 +90,31 @@ async fn async_main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Handle commands that don't need config
-    match cli.command {
-        Commands::Init(cmd) => return commands::init::handle(cmd).await,
-        Commands::Models(cmd) => return commands::models::handle(cmd).await,
-        Commands::Rerankers(cmd) => return commands::rerankers::handle(cmd).await,
-        Commands::Service(cmd) => return commands::service::handle(cmd).await,
-        _ => {}
-    }
+    let mut command = cli.command;
 
     // Load config
     tracing::debug!("Loading config");
     let config = Config::load()?;
     tracing::debug!("Config loaded");
+
+    // Handle commands that don't need database initialization
+    command = match command {
+        Commands::Init(cmd) => return commands::init::handle(cmd).await,
+        Commands::Models(cmd) => return commands::models::handle(cmd).await,
+        Commands::Rerankers(cmd) => return commands::rerankers::handle(cmd).await,
+        Commands::Service(cmd) => return commands::service::handle(cmd).await,
+        other => other,
+    };
+
+    // Try service-backed search before starting local services
+    if config.service.enabled {
+        if let Commands::Search(cmd) = &command {
+            match commands::search::handle_remote(cmd.clone(), &config).await {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::warn!("Service search failed, falling back to local: {}", e),
+            }
+        }
+    }
 
     // Initialize database
     tracing::debug!("Initializing database");
@@ -121,7 +133,7 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::debug!("All services created");
 
     // Execute command
-    let result = match cli.command {
+    let result = match command {
         Commands::Add(cmd) => {
             commands::add::handle(
                 cmd,

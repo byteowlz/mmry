@@ -25,6 +25,9 @@ enum ServiceCommands {
 
     /// Enable auto-start on system boot
     Enable,
+
+    /// Reload the service after config changes (stop then start)
+    Reload,
 }
 
 pub async fn handle(cmd: ServiceCmd) -> Result<()> {
@@ -66,6 +69,43 @@ pub async fn handle(cmd: ServiceCmd) -> Result<()> {
                 }
                 Err(e) => {
                     println!("✗ {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        ServiceCommands::Reload => {
+            println!("Reloading mmry service...");
+            match manager.stop() {
+                Ok(()) => {
+                    println!("✓ Service stopped");
+                }
+                Err(e) => {
+                    println!("✗ Failed to stop service: {e}");
+                    std::process::exit(1);
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+            match manager.start(false) {
+                Ok(()) => {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    match manager.status() {
+                        ServiceStatus::Running { pid } => {
+                            println!("✓ Service reloaded (PID: {pid})");
+                            if let Ok(port) = manager.read_port() {
+                                println!("  Listening on: 127.0.0.1:{port}");
+                            }
+                        }
+                        _ => {
+                            println!("✗ Service did not come back up after reload");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("✗ Failed to start service after reload: {e}");
                     std::process::exit(1);
                 }
             }

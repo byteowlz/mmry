@@ -89,6 +89,9 @@ mmry includes an optional background service that keeps the embedding model load
 # Start the service
 mmry service start
 
+# Reload after changing config
+mmry service reload
+
 # Check status
 mmry service status
 
@@ -115,6 +118,7 @@ idle_timeout_seconds = 300  # Unload models after 5 minutes idle
 ```
 
 Reranking now only runs by default for semantic or hybrid searches; use `--rerank` to force reranking for other modes if you need it.
+When service mode is enabled, `mmry search` now delegates the entire search (DB + embeddings + sparse + rerank) to the daemon for fast, warm runs; the CLI falls back to local search if the daemon is unavailable.
 
 The CLI exits directly once a command finishes to sidestep an upstream fastembed/ONNX shutdown bug; the OS reclaims any leaked service resources.
 

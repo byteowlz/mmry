@@ -6,8 +6,10 @@ use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
+use mmry_core::service::client::DaemonClient;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -33,7 +35,7 @@ impl From<CliSearchMode> for SearchMode {
     }
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 pub struct SearchCmd {
     /// Search query
     pub query: String,
@@ -72,22 +74,7 @@ pub async fn handle(
     sparse_embeddings: Arc<SparseEmbeddingService>,
     reranker: Arc<RerankerService>,
 ) -> anyhow::Result<()> {
-    let resolved_mode = cmd.mode.map(SearchMode::from).unwrap_or(config.search.mode);
-
-    let limit = cmd.limit.unwrap_or(config.search.default_limit as i64);
-    let mode_override = Some(resolved_mode);
-
-    let rerank_override = if cmd.rerank {
-        Some(true)
-    } else if cmd.no_rerank {
-        Some(false)
-    } else {
-        None
-    };
-    let rerank = rerank_override.unwrap_or(match resolved_mode {
-        SearchMode::Semantic | SearchMode::Hybrid => config.search.rerank_enabled,
-        _ => false,
-    });
+    let (resolved_mode, limit, rerank) = resolve_search_opts(&cmd, config);
 
     let results = {
         let search_service = SearchService::new(
@@ -102,19 +89,66 @@ pub async fn handle(
                 &cmd.query,
                 cmd.category.as_deref(),
                 limit,
-                mode_override,
+                Some(resolved_mode),
                 Some(rerank),
             )
             .await?
     };
 
+    render_results(&results, resolved_mode, &cmd)?;
+
+    Ok(())
+}
+
+pub async fn handle_remote(cmd: SearchCmd, config: &Config) -> anyhow::Result<()> {
+    let (resolved_mode, limit, rerank) = resolve_search_opts(&cmd, config);
+    let mut client = DaemonClient::new()?;
+    let results = client
+        .search(
+            &cmd.query,
+            cmd.category.as_deref(),
+            limit,
+            resolved_mode,
+            rerank,
+        )
+        .await?;
+
+    render_results(&results, resolved_mode, &cmd)?;
+
+    Ok(())
+}
+
+fn resolve_search_opts(cmd: &SearchCmd, config: &Config) -> (SearchMode, i64, bool) {
+    let resolved_mode = cmd
+        .mode
+        .clone()
+        .map(SearchMode::from)
+        .unwrap_or(config.search.mode);
+
+    let limit = cmd.limit.unwrap_or(config.search.default_limit as i64);
+    let rerank_override = if cmd.rerank {
+        Some(true)
+    } else if cmd.no_rerank {
+        Some(false)
+    } else {
+        None
+    };
+    let rerank = rerank_override.unwrap_or_else(|| match resolved_mode {
+        SearchMode::Semantic | SearchMode::Hybrid => config.search.rerank_enabled,
+        _ => false,
+    });
+
+    (resolved_mode, limit, rerank)
+}
+
+fn render_results(results: &[Memory], mode: SearchMode, cmd: &SearchCmd) -> anyhow::Result<()> {
     if cmd.json {
         if cmd.full {
-            let json = serde_json::to_string_pretty(&results)?;
+            let json = serde_json::to_string_pretty(results)?;
             println!("{json}");
         } else {
             let mut values: Vec<serde_json::Value> = Vec::new();
-            for memory in &results {
+            for memory in results {
                 let mut value = serde_json::to_value(memory)?;
                 if let Some(obj) = value.as_object_mut() {
                     obj.remove("embedding");
@@ -133,7 +167,7 @@ pub async fn handle(
         return Ok(());
     }
 
-    let mode_str = format!("{resolved_mode:?}");
+    let mode_str = format!("{mode:?}");
     println!("Found {} memories (mode: {}):\n", results.len(), mode_str);
 
     for (i, memory) in results.iter().enumerate() {

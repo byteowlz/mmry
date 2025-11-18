@@ -1,5 +1,9 @@
 use mmry_core::config::Config;
+use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingService;
+use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::reranker::RerankerService;
+use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -8,20 +12,38 @@ use tokio::sync::Mutex;
 pub struct ServiceState {
     pub embedding_service: Arc<Mutex<Option<EmbeddingService>>>,
     pub config: Config,
+    pub db: Arc<Database>,
+    pub embeddings_wrapper: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
+    pub sparse_embeddings: Arc<SparseEmbeddingService>,
+    pub reranker: Arc<RerankerService>,
     pub start_time: Instant,
     pub requests_served: Arc<Mutex<u64>>,
     pub last_activity: Arc<Mutex<Instant>>,
 }
 
 impl ServiceState {
-    pub fn new(config: Config) -> Self {
-        Self {
+    pub async fn new(config: Config) -> mmry_core::Result<Self> {
+        let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+
+        // Disable daemon usage inside the daemon itself to avoid recursion
+        let mut local_config = config.clone();
+        local_config.service.enabled = false;
+
+        let embeddings_wrapper = EmbeddingServiceWrapper::new(&local_config)?;
+        let sparse_embeddings = SparseEmbeddingService::new(&config.sparse_embeddings)?;
+        let reranker = RerankerService::from_config(&config.search)?;
+
+        Ok(Self {
             embedding_service: Arc::new(Mutex::new(None)),
             config,
+            db: Arc::new(db),
+            embeddings_wrapper: Arc::new(tokio::sync::Mutex::new(embeddings_wrapper)),
+            sparse_embeddings: Arc::new(sparse_embeddings),
+            reranker: Arc::new(reranker),
             start_time: Instant::now(),
             requests_served: Arc::new(Mutex::new(0)),
             last_activity: Arc::new(Mutex::new(Instant::now())),
-        }
+        })
     }
 
     pub async fn get_embedding_service(&self) -> Arc<Mutex<Option<EmbeddingService>>> {
@@ -75,5 +97,9 @@ impl ServiceState {
 
     pub fn uptime(&self) -> Duration {
         self.start_time.elapsed()
+    }
+
+    pub fn search_config(&self) -> mmry_core::config::SearchConfig {
+        self.config.search.clone()
     }
 }

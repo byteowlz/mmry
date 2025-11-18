@@ -1,6 +1,8 @@
 use crate::state::ServiceState;
 use anyhow::Result;
 use mmry_core::config::Config;
+use mmry_core::memory::Memory;
+use mmry_core::search::SearchService;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -153,10 +155,55 @@ impl EmbeddingService for EmbeddingServiceImpl {
 
         Ok(Response::new(PingResponse { timestamp }))
     }
+
+    async fn search(
+        &self,
+        request: Request<SearchRequest>,
+    ) -> Result<Response<SearchResponse>, Status> {
+        self.state.record_activity().await;
+        let req = request.into_inner();
+
+        let mode = match req.mode {
+            0 => mmry_core::config::SearchMode::Hybrid,
+            1 => mmry_core::config::SearchMode::Keyword,
+            2 => mmry_core::config::SearchMode::Fuzzy,
+            3 => mmry_core::config::SearchMode::Semantic,
+            4 => mmry_core::config::SearchMode::Bm25,
+            5 => mmry_core::config::SearchMode::SparseEmbedding,
+            _ => mmry_core::config::SearchMode::Hybrid,
+        };
+
+        let search_service = SearchService::new(
+            self.state.db.pool().clone(),
+            self.state.search_config(),
+            Arc::clone(&self.state.embeddings_wrapper),
+            Arc::clone(&self.state.sparse_embeddings),
+            Arc::clone(&self.state.reranker),
+        );
+
+        let memories = search_service
+            .search_with_options(
+                &req.query,
+                if req.category.is_empty() {
+                    None
+                } else {
+                    Some(req.category.as_str())
+                },
+                req.limit,
+                Some(mode),
+                Some(req.rerank),
+            )
+            .await
+            .map_err(|e| Status::internal(format!("Search failed: {}", e)))?;
+
+        let results = memories.into_iter().map(memory_to_proto).collect();
+
+        Ok(Response::new(SearchResponse { memories: results }))
+    }
 }
 
 pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -> Result<()> {
-    let state = Arc::new(ServiceState::new(config.clone()));
+    let state = Arc::new(ServiceState::new(config.clone()).await?);
 
     // Bind to random available port on localhost
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
@@ -193,6 +240,35 @@ pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -
     std::fs::remove_file(&port_file).ok();
 
     Ok(())
+}
+
+fn memory_to_proto(memory: Memory) -> MemoryResult {
+    MemoryResult {
+        id: memory.id.to_string(),
+        memory_type: format!("{:?}", memory.memory_type).to_lowercase(),
+        content: memory.content,
+        embedding: memory.embedding.unwrap_or_default(),
+        sparse_embedding: memory.sparse_embedding.map(|e| SparseEmbeddingData {
+            indices: e.indices.into_iter().map(|i| i as u32).collect(),
+            values: e.values,
+        }),
+        metadata_json: memory.metadata.to_string(),
+        importance: memory.importance,
+        created_at: memory.created_at.to_rfc3339(),
+        updated_at: memory.updated_at.to_rfc3339(),
+        category: memory.category,
+        tags: memory.tags,
+        parent_id: memory
+            .parent_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        chunk_index: memory.chunk_index.unwrap_or(-1),
+        total_chunks: memory.total_chunks.unwrap_or(-1),
+        chunk_method: memory
+            .chunk_method
+            .map(|m| format!("{:?}", m).to_lowercase())
+            .unwrap_or_default(),
+    }
 }
 
 async fn idle_timeout_task(state: Arc<ServiceState>, timeout_seconds: u64) {
