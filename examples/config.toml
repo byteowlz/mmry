@@ -141,3 +141,16 @@ interactive = true
 min_task_length = 10
 # Minimum note length to import
 min_note_length = 20
+
+[service]
+# Enable background service for faster embeddings (keeps model loaded)
+# When enabled, embedding requests use the daemon service instead of loading
+# the model on every invocation, reducing latency from seconds to milliseconds
+enabled = false
+# Automatically start service if not running
+auto_start = true
+# Unload models after N seconds of inactivity (0 = never unload)
+# This saves memory when the service is idle
+idle_timeout_seconds = 300
+# Preload embedding model on service startup
+preload_models = true

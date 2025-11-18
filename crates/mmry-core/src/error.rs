@@ -29,6 +29,12 @@ pub enum Error {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    #[error("Service error: {0}")]
+    Service(String),
+
+    #[error("Sparse embedding error: {0}")]
+    SparseEmbedding(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

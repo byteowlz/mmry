@@ -6,4 +6,5 @@ pub mod reembed;
 pub mod rerankers;
 pub mod rm;
 pub mod search;
+pub mod service;
 pub mod stats;

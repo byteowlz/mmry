@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mmry-core", "crates/mmry-cli", "crates/mmry-mcp", "crates/mmry-tui"]
+members = ["crates/mmry-core", "crates/mmry-cli", "crates/mmry-mcp", "crates/mmry-tui", "crates/mmry-service"]
 resolver = "2"
 
 [workspace.package]
@@ -47,3 +47,4 @@ sqlite-vec = "0.1.7-alpha.2"
 zerocopy = "0.8.27"
 tempfile = "3.10"
 tokenizers = "0.22"
+libc = "0.2"

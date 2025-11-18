@@ -118,7 +118,7 @@ impl Database {
             sqlx::query("ALTER TABLE memories ADD COLUMN chunk_method TEXT")
                 .execute(pool)
                 .await?;
-            
+
             // Add indices for chunking
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_id)")
                 .execute(pool)
@@ -126,7 +126,7 @@ impl Database {
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_chunk_order ON memories(parent_id, chunk_index) WHERE parent_id IS NOT NULL")
                 .execute(pool)
                 .await?;
-            
+
             tracing::info!("Chunking columns and indices added");
         }
 
@@ -246,13 +246,13 @@ pub(crate) async fn upsert_vector_embedding(
     // Virtual tables (vec0) don't support INSERT OR REPLACE reliably
     // So we need to delete first, then insert
     let id_str = id.to_string();
-    
+
     // Delete existing entry if it exists (ignore errors if not found)
     let _ = sqlx::query("DELETE FROM memory_embeddings WHERE memory_id = ?")
         .bind(&id_str)
         .execute(pool)
         .await;
-    
+
     // Insert new entry
     sqlx::query(
         r#"

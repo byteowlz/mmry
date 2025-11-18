@@ -4,7 +4,7 @@ use std::sync::Arc;
 use mmry_core::config::Config;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
-use mmry_core::embeddings::EmbeddingService;
+use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 
 #[derive(Parser)]
@@ -29,7 +29,7 @@ pub async fn handle(
     cmd: ReembedCmd,
     _config: &Config,
     db: &Database,
-    embeddings: Arc<EmbeddingService>,
+    embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
 ) -> anyhow::Result<()> {
     // Validate options
@@ -40,7 +40,8 @@ pub async fn handle(
     let regenerate_dense = !cmd.sparse_only;
     let regenerate_sparse = !cmd.dense_only;
 
-    if regenerate_dense && !embeddings.is_enabled() {
+    let embeddings_enabled = embeddings.lock().await.is_enabled();
+    if regenerate_dense && !embeddings_enabled {
         eprintln!("Warning: Dense embeddings are disabled in config, skipping dense embeddings");
     }
 
@@ -73,9 +74,8 @@ pub async fn handle(
         if memory.is_parent() && memory.parent_id.is_none() {
             continue;
         }
-        
-        if regenerate_dense && embeddings.is_enabled() && (cmd.force || memory.embedding.is_none())
-        {
+
+        if regenerate_dense && embeddings_enabled && (cmd.force || memory.embedding.is_none()) {
             dense_update_count += 1;
         }
         if regenerate_sparse
@@ -120,9 +120,9 @@ pub async fn handle(
         }
 
         // Generate dense embedding if needed
-        if regenerate_dense && embeddings.is_enabled() && (cmd.force || memory.embedding.is_none())
-        {
-            if let Some(embedding) = embeddings.embed(&memory.content).await? {
+        if regenerate_dense && embeddings_enabled && (cmd.force || memory.embedding.is_none()) {
+            let mut emb = embeddings.lock().await;
+            if let Some(embedding) = emb.embed(&memory.content).await? {
                 memory.embedding = Some(embedding);
                 updated = true;
             }

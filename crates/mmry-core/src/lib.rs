@@ -9,6 +9,9 @@ pub mod reranker;
 pub mod search;
 pub mod sparse_embeddings;
 
+#[cfg(feature = "service")]
+pub mod service;
+
 pub use error::Error;
 pub use error::Result;
 

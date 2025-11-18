@@ -6,7 +6,6 @@ use fastembed::SparseInitOptions;
 use fastembed::SparseModel;
 use fastembed::SparseTextEmbedding;
 use once_cell::sync::OnceCell;
-use std::mem;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -108,16 +107,7 @@ impl SparseEmbeddingService {
     }
 }
 
-impl Drop for SparseEmbeddingService {
-    fn drop(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        if let Some(model) = self.model.get() {
-            mem::forget(Arc::clone(model));
-        }
-    }
-}
+// Drop implementation removed - let Arc handle cleanup naturally
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredSparseEmbedding {

@@ -123,14 +123,4 @@ impl RerankerService {
     }
 }
 
-impl Drop for RerankerService {
-    fn drop(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        if let Some(model) = self.reranker.get() {
-            let leaked = Arc::clone(model);
-            std::mem::forget(leaked);
-        }
-    }
-}
+// Drop implementation removed - let Arc handle cleanup naturally

@@ -100,7 +100,6 @@ impl Selection {
         self.offset = 0;
         self.selected_indices.clear();
     }
-
 }
 
 impl Default for Selection {

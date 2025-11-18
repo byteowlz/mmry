@@ -1,3 +1,7 @@
+mod wrapper;
+
+pub use wrapper::EmbeddingServiceWrapper;
+
 use crate::config::EmbeddingsConfig;
 use crate::Error;
 use crate::Result;
@@ -7,11 +11,10 @@ use fastembed::TextEmbedding;
 use once_cell::sync::OnceCell;
 use std::env;
 use std::fs;
-use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokenizers::Tokenizer;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
@@ -247,9 +250,7 @@ impl EmbeddingService {
             let _ = self.tokenizer.set(Arc::clone(&tokenizer));
             Ok(tokenizer)
         } else {
-            Err(Error::Embedding(
-                "Tokenizer not found for model".into(),
-            ))
+            Err(Error::Embedding("Tokenizer not found for model".into()))
         }
     }
 
@@ -326,13 +327,4 @@ pub(crate) fn ensure_fastembed_cache_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
-impl Drop for EmbeddingService {
-    fn drop(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        if let Some(model) = self.model.get() {
-            mem::forget(Arc::clone(model));
-        }
-    }
-}
+// Drop implementation removed - let Arc handle cleanup naturally

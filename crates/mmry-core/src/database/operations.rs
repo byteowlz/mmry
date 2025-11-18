@@ -9,8 +9,7 @@ use uuid::Uuid;
 /// Helper function to parse a Memory from a database row
 fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
-    let embedding_vec =
-        embedding.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
+    let embedding_vec = embedding.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
 
     let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
     let sparse_embedding_vec = sparse_embedding
@@ -56,11 +55,15 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
         .as_ref()
         .and_then(|e| serde_json::to_vec(e).ok());
 
-    let chunk_method_str = memory.chunk_method.as_ref().map(|cm| {
-        serde_json::to_string(cm)
-            .ok()
-            .map(|s| s.trim_matches('"').to_string())
-    }).flatten();
+    let chunk_method_str = memory
+        .chunk_method
+        .as_ref()
+        .map(|cm| {
+            serde_json::to_string(cm)
+                .ok()
+                .map(|s| s.trim_matches('"').to_string())
+        })
+        .flatten();
 
     sqlx::query(
         r#"

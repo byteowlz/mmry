@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package mmry.embeddings;
+
+service EmbeddingService {
+  // Embed a single text
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+  
+  // Embed multiple texts in batch
+  rpc EmbedBatch(EmbedBatchRequest) returns (EmbedBatchResponse);
+  
+  // Get token count for text
+  rpc GetTokenCount(TokenCountRequest) returns (TokenCountResponse);
+  
+  // Health check
+  rpc Health(HealthRequest) returns (HealthResponse);
+  
+  // Graceful shutdown
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+  
+  // Ping to keep service alive
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message EmbedRequest {
+  string text = 1;
+}
+
+message EmbedResponse {
+  repeated float embedding = 1;
+}
+
+message EmbedBatchRequest {
+  repeated string texts = 1;
+}
+
+message EmbedBatchResponse {
+  repeated Embedding embeddings = 1;
+}
+
+message Embedding {
+  repeated float values = 1;
+}
+
+message TokenCountRequest {
+  string text = 1;
+}
+
+message TokenCountResponse {
+  uint32 token_count = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string status = 2;
+  uint64 uptime_seconds = 3;
+  uint64 requests_served = 4;
+  uint64 last_activity_seconds = 5;
+  bool model_loaded = 6;
+}
+
+message ShutdownRequest {}
+
+message ShutdownResponse {
+  bool success = 1;
+}
+
+message PingRequest {}
+
+message PingResponse {
+  uint64 timestamp = 1;
+}

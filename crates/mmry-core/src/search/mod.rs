@@ -15,7 +15,7 @@ use zerocopy::IntoBytes;
 use crate::config::SearchConfig;
 use crate::config::SearchMode;
 use crate::database::operations;
-use crate::embeddings::EmbeddingService;
+use crate::embeddings::EmbeddingServiceWrapper;
 use crate::memory::Memory;
 use crate::reranker::RerankerService;
 use crate::sparse_embeddings::SparseEmbeddingService;
@@ -32,8 +32,8 @@ pub struct SearchResult {
 /// Helper function to parse a Memory from a database row  
 fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let embedding_bytes: Option<Vec<u8>> = row.try_get("embedding").ok();
-    let embedding_vec = embedding_bytes
-        .and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
+    let embedding_vec =
+        embedding_bytes.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
 
     let sparse_embedding_bytes: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
     let sparse_embedding_vec = sparse_embedding_bytes
@@ -79,7 +79,7 @@ const SQLITE_MAX_BIND_PARAMS: usize = 999;
 pub struct SearchService {
     pool: SqlitePool,
     config: SearchConfig,
-    embeddings: Arc<EmbeddingService>,
+    embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     reranker: Arc<RerankerService>,
 }
@@ -88,7 +88,7 @@ impl SearchService {
     pub fn new(
         pool: SqlitePool,
         config: SearchConfig,
-        embeddings: Arc<EmbeddingService>,
+        embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
         sparse_embeddings: Arc<SparseEmbeddingService>,
         reranker: Arc<RerankerService>,
     ) -> Self {
@@ -187,12 +187,11 @@ impl SearchService {
             (HashMap::new(), 0, 0.0)
         };
 
+        let embeddings_enabled = self.embeddings.lock().await.is_enabled();
         for mut memory in memories.drain(..) {
-            if query_embedding.is_some()
-                && memory.embedding.is_none()
-                && self.embeddings.is_enabled()
-            {
-                if let Some(vector) = self.embeddings.embed(&memory.content).await? {
+            if query_embedding.is_some() && memory.embedding.is_none() && embeddings_enabled {
+                let mut emb = self.embeddings.lock().await;
+                if let Some(vector) = emb.embed(&memory.content).await? {
                     memory.embedding = Some(vector);
                 }
             }
@@ -390,7 +389,7 @@ impl SearchService {
                         .or_insert_with(Vec::new)
                         .push(chunk_index);
                 }
-                
+
                 // Track order - use parent ID
                 if !result_order.contains(&parent_id) {
                     result_order.push(parent_id);
@@ -462,13 +461,23 @@ impl SearchService {
         mode: Option<SearchMode>,
         rerank: Option<bool>,
     ) -> Result<Vec<Memory>> {
-        let query_embedding = if self.embeddings.is_enabled() {
-            self.embeddings.embed(query).await?
+        let mode = mode.unwrap_or(self.config.mode);
+        let use_vectors = matches!(mode, SearchMode::Semantic | SearchMode::Hybrid);
+        let use_sparse = matches!(mode, SearchMode::SparseEmbedding)
+            || (matches!(mode, SearchMode::Hybrid) && self.config.sparse_embedding_weight > 0.0);
+
+        let query_embedding = if use_vectors {
+            let mut emb = self.embeddings.lock().await;
+            if emb.is_enabled() {
+                emb.embed(query).await?
+            } else {
+                None
+            }
         } else {
             None
         };
 
-        let query_sparse_embedding = if self.sparse_embeddings.is_enabled() {
+        let query_sparse_embedding = if use_sparse && self.sparse_embeddings.is_enabled() {
             self.sparse_embeddings.embed(query).await?.map(|e| e.into())
         } else {
             None
@@ -480,7 +489,7 @@ impl SearchService {
             limit,
             query_embedding,
             query_sparse_embedding,
-            mode,
+            Some(mode),
             rerank,
         )
         .await

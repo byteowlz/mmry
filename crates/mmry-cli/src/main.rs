@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use mmry_core::config::Config;
 use mmry_core::database::Database;
-use mmry_core::embeddings::EmbeddingService;
+use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::reranker::RerankerService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use tracing_subscriber::layer::SubscriberExt;
@@ -52,10 +52,32 @@ enum Commands {
 
     /// Initialize mmry (create config and database)
     Init(commands::init::InitCmd),
+
+    /// Manage mmry service (daemon)
+    Service(commands::service::ServiceCmd),
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() {
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    let result = runtime.block_on(async_main());
+
+    // Forget the runtime to avoid cleanup
+    std::mem::forget(runtime);
+
+    let exit_code = match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    };
+
+    // Exit immediately without running destructors to avoid fastembed/ort cleanup crashes
+    // The OS will clean up resources
+    unsafe { libc::_exit(exit_code) }
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Setup logging
@@ -73,19 +95,30 @@ async fn main() -> anyhow::Result<()> {
         Commands::Init(cmd) => return commands::init::handle(cmd).await,
         Commands::Models(cmd) => return commands::models::handle(cmd).await,
         Commands::Rerankers(cmd) => return commands::rerankers::handle(cmd).await,
+        Commands::Service(cmd) => return commands::service::handle(cmd).await,
         _ => {}
     }
 
     // Load config
+    tracing::debug!("Loading config");
     let config = Config::load()?;
+    tracing::debug!("Config loaded");
 
     // Initialize database
+    tracing::debug!("Initializing database");
     let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+    tracing::debug!("Database initialized");
 
-    // Prepare shared services
-    let embeddings = Arc::new(EmbeddingService::new(&config.embeddings)?);
+    // Prepare shared services - use wrapper that can leverage daemon if enabled
+    tracing::debug!("Creating embedding wrapper");
+    let embeddings = Arc::new(tokio::sync::Mutex::new(EmbeddingServiceWrapper::new(
+        &config,
+    )?));
+    tracing::debug!("Creating sparse embeddings");
     let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
+    tracing::debug!("Creating reranker");
     let reranker = Arc::new(RerankerService::from_config(&config.search)?);
+    tracing::debug!("All services created");
 
     // Execute command
     let result = match cli.command {
@@ -123,17 +156,18 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
-        Commands::Models(_) | Commands::Rerankers(_) | Commands::Init(_) => unreachable!(),
+        Commands::Models(_) | Commands::Rerankers(_) | Commands::Init(_) | Commands::Service(_) => {
+            unreachable!()
+        }
     };
 
     // Close database
     db.close().await;
 
-    match result {
-        Ok(()) => unsafe { libc::_exit(0) },
-        Err(e) => {
-            eprintln!("Error: {e}");
-            unsafe { libc::_exit(1) };
-        }
-    }
+    // Avoid running destructors that can trigger fastembed/ort shutdown crash
+    std::mem::forget(embeddings);
+    std::mem::forget(sparse_embeddings);
+    std::mem::forget(reranker);
+
+    result
 }

@@ -1,5 +1,6 @@
 use crate::config::ChunkingConfig;
-use crate::memory::{ChunkMethod, Memory};
+use crate::memory::ChunkMethod;
+use crate::memory::Memory;
 use crate::Result;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
@@ -40,7 +41,7 @@ impl Chunker {
                 return encoding.len();
             }
         }
-        
+
         // Fallback to word count (rough approximation)
         // Most tokenizers produce ~1.3x tokens per word on average
         let word_count = text.split_whitespace().count();
@@ -96,7 +97,10 @@ impl Chunker {
 
     /// Split by paragraphs with configurable separator
     fn chunk_by_paragraphs(&self, text: &str, separator: &str) -> Result<Vec<TextChunk>> {
-        let paragraphs: Vec<&str> = text.split(separator).filter(|p| !p.trim().is_empty()).collect();
+        let paragraphs: Vec<&str> = text
+            .split(separator)
+            .filter(|p| !p.trim().is_empty())
+            .collect();
 
         if paragraphs.is_empty() {
             return Ok(Vec::new());
@@ -280,10 +284,10 @@ impl Chunker {
 
         let overlap_tokens = self.config.overlap_tokens;
         let mut result = Vec::new();
-        
+
         for i in 0..chunks.len() {
             let mut content = chunks[i].content.clone();
-            
+
             // Add overlap from previous chunk
             if i > 0 {
                 let prev_words: Vec<&str> = chunks[i - 1].content.split_whitespace().collect();
@@ -294,7 +298,7 @@ impl Chunker {
                     content = format!("{} {}", overlap, content);
                 }
             }
-            
+
             result.push(TextChunk {
                 content,
                 method: chunks[i].method.clone(),
@@ -384,7 +388,7 @@ mod tests {
         let config = test_config();
         let chunker = Chunker::new(config);
         let text = "Short text";
-        
+
         assert!(!chunker.needs_chunking(text));
         let chunks = chunker.chunk_text(text).unwrap();
         assert_eq!(chunks.len(), 1);
@@ -396,7 +400,7 @@ mod tests {
         let config = test_config();
         let chunker = Chunker::new(config);
         let text = "First paragraph with some words.\n\nSecond paragraph with more words.\n\nThird paragraph here.";
-        
+
         let chunks = chunker.chunk_text(text).unwrap();
         assert!(chunks.len() > 1);
         assert_eq!(chunks[0].method, ChunkMethod::Paragraph);
@@ -408,7 +412,7 @@ mod tests {
         let chunker = Chunker::new(config);
         // Very long paragraph that will fail paragraph chunking
         let text = "First sentence here. Second sentence with words. Third sentence also present. Fourth sentence too. Fifth sentence added.";
-        
+
         let chunks = chunker.chunk_text(text).unwrap();
         assert!(chunks.len() > 0);
     }
@@ -417,14 +421,14 @@ mod tests {
     fn test_metadata_text_generation() {
         let config = test_config();
         let chunker = Chunker::new(config);
-        
+
         let mut memory = Memory::new(
             MemoryType::Semantic,
             "test content".to_string(),
             "work".to_string(),
         );
         memory.tags = vec!["important".to_string(), "project".to_string()];
-        
+
         let metadata_text = chunker.generate_metadata_text(&memory);
         assert!(metadata_text.contains("Semantic"));
         assert!(metadata_text.contains("work"));

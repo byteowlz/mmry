@@ -81,6 +81,43 @@ mmry ls --json | jq 'map(select(.importance > 7))'
 echo '{"content": "From JSON"}' | mmry add -
 ```
 
+## Service Mode (Fast Embeddings)
+
+mmry includes an optional background service that keeps the embedding model loaded in memory for near-instant embeddings:
+
+```bash
+# Start the service
+mmry service start
+
+# Check status
+mmry service status
+
+# Stop the service
+mmry service stop
+
+# Run in foreground (for debugging)
+mmry service run
+```
+
+**Why use service mode?**
+- First embedding: ~2-3 seconds (cold start, loading model)
+- With service: ~10-50 milliseconds (model stays loaded)
+- Automatically unloads after 5 minutes of inactivity to save memory
+- Works on Windows, macOS, and Linux (uses TCP localhost)
+
+Enable in `~/.config/mmry/config.toml`:
+
+```toml
+[service]
+enabled = true
+auto_start = true  # Automatically start service when needed
+idle_timeout_seconds = 300  # Unload models after 5 minutes idle
+```
+
+Reranking now only runs by default for semantic or hybrid searches; use `--rerank` to force reranking for other modes if you need it.
+
+The CLI exits directly once a command finishes to sidestep an upstream fastembed/ONNX shutdown bug; the OS reclaims any leaked service resources.
+
 ## How It Works
 
 mmry stores everything in SQLite with vector extensions for similarity search. It uses [fastembed](https://github.com/Anush008/fastembed-rs) to run embedding models locally via ONNX Runtime - no external APIs needed.

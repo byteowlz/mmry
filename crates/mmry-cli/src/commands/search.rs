@@ -5,7 +5,7 @@ use std::sync::Arc;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::Database;
-use mmry_core::embeddings::EmbeddingService;
+use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
@@ -68,20 +68,26 @@ pub async fn handle(
     cmd: SearchCmd,
     config: &Config,
     db: &Database,
-    embeddings: Arc<EmbeddingService>,
+    embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     reranker: Arc<RerankerService>,
 ) -> anyhow::Result<()> {
-    let limit = cmd.limit.unwrap_or(config.search.default_limit as i64);
-    let search_mode = cmd.mode.map(|m| m.into());
+    let resolved_mode = cmd.mode.map(SearchMode::from).unwrap_or(config.search.mode);
 
-    let rerank = if cmd.rerank {
+    let limit = cmd.limit.unwrap_or(config.search.default_limit as i64);
+    let mode_override = Some(resolved_mode);
+
+    let rerank_override = if cmd.rerank {
         Some(true)
     } else if cmd.no_rerank {
         Some(false)
     } else {
         None
     };
+    let rerank = rerank_override.unwrap_or(match resolved_mode {
+        SearchMode::Semantic | SearchMode::Hybrid => config.search.rerank_enabled,
+        _ => false,
+    });
 
     let results = {
         let search_service = SearchService::new(
@@ -96,8 +102,8 @@ pub async fn handle(
                 &cmd.query,
                 cmd.category.as_deref(),
                 limit,
-                search_mode,
-                rerank,
+                mode_override,
+                Some(rerank),
             )
             .await?
     };
@@ -127,8 +133,7 @@ pub async fn handle(
         return Ok(());
     }
 
-    let mode_str =
-        search_mode.map_or_else(|| format!("{:?}", config.search.mode), |m| format!("{m:?}"));
+    let mode_str = format!("{resolved_mode:?}");
     println!("Found {} memories (mode: {}):\n", results.len(), mode_str);
 
     for (i, memory) in results.iter().enumerate() {

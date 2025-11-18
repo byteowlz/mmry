@@ -18,20 +18,23 @@ read -rp "Enter choice [1-10]: " choice
 
 FEATURE_FLAG=()
 case "${choice:-1}" in
-    2) FEATURE_FLAG=(--features ort-coreml) ;;
-    3) FEATURE_FLAG=(--features ort-cuda) ;;
-    4) FEATURE_FLAG=(--features ort-directml) ;;
-    5) FEATURE_FLAG=(--features ort-openvino) ;;
-    6) FEATURE_FLAG=(--features ort-tensorrt) ;;
-    7) FEATURE_FLAG=(--features ort-rocm) ;;
-    8) FEATURE_FLAG=(--features ort-nnapi) ;;
-    9) FEATURE_FLAG=(--features ort-xnnpack) ;;
-    10) FEATURE_FLAG=(--features ort-load-dynamic) ;;
-    *) FEATURE_FLAG=() ;;
+2) FEATURE_FLAG=(--features ort-coreml) ;;
+3) FEATURE_FLAG=(--features ort-cuda) ;;
+4) FEATURE_FLAG=(--features ort-directml) ;;
+5) FEATURE_FLAG=(--features ort-openvino) ;;
+6) FEATURE_FLAG=(--features ort-tensorrt) ;;
+7) FEATURE_FLAG=(--features ort-rocm) ;;
+8) FEATURE_FLAG=(--features ort-nnapi) ;;
+9) FEATURE_FLAG=(--features ort-xnnpack) ;;
+10) FEATURE_FLAG=(--features ort-load-dynamic) ;;
+*) FEATURE_FLAG=() ;;
 esac
 
 echo "Building workspace..."
 cargo build --release "${FEATURE_FLAG[@]}"
+
+echo "Installing mmry service..."
+cargo install --path "${ROOT_DIR}/crates/mmry-service" --force "${FEATURE_FLAG[@]}"
 
 echo "Installing mmry CLI..."
 cargo install --path "${ROOT_DIR}/crates/mmry-cli" --force "${FEATURE_FLAG[@]}"

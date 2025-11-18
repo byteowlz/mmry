@@ -1,5 +1,5 @@
 [package]
-name = "mmry-cli"
+name = "mmry-service"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,39 +7,34 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "mmry"
+name = "mmry-service"
 path = "src/main.rs"
 
 [dependencies]
-mmry-core = { path = "../mmry-core", features = ["service"] }
+mmry-core = { path = "../mmry-core" }
 
 tokio = { workspace = true }
-libc = { workspace = true }
 anyhow = { workspace = true }
-clap = { workspace = true }
-clap_complete = { workspace = true }
+thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
-dirs = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-uuid = { workspace = true }
-sqlx = { workspace = true }
+dirs = { workspace = true }
 
-# TUI dependencies (for future interactive mode)
-ratatui = "0.28"
-crossterm = "0.28"
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+tokio-stream = { version = "0.1", features = ["net"] }
 
-# Interactive selection
-dialoguer = "0.11"
+# Process management
+sysinfo = "0.32"
 
-[dev-dependencies]
-tempfile = { workspace = true }
+[build-dependencies]
+tonic-build = "0.12"
 
 [features]
-default = ["service"]
-service = ["mmry-core/service"]
+default = []
 ort-coreml = ["mmry-core/ort-coreml"]
 ort-cuda = ["mmry-core/ort-cuda"]
 ort-directml = ["mmry-core/ort-directml"]

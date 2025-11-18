@@ -30,37 +30,21 @@ pub fn draw(f: &mut Frame, context: &WhichKeyContext) {
     let (title, items) = match context {
         WhichKeyContext::Type => (
             "Type",
-            vec![
-                ("e", "Episodic"),
-                ("s", "Semantic"),
-                ("p", "Procedural"),
-            ],
+            vec![("e", "Episodic"), ("s", "Semantic"), ("p", "Procedural")],
         ),
         WhichKeyContext::Importance => (
             "Importance",
-            vec![
-                ("0-9", "Set"),
-                ("i", "Increase"),
-                ("d", "Decrease"),
-            ],
+            vec![("0-9", "Set"), ("i", "Increase"), ("d", "Decrease")],
         ),
-        WhichKeyContext::Category => (
-            "Category",
-            vec![
-                ("n", "New"),
-                ("s", "Select"),
-            ],
-        ),
+        WhichKeyContext::Category => ("Category", vec![("n", "New"), ("s", "Select")]),
     };
 
-    let mut spans = vec![
-        Span::styled(
-            format!("{} ", title),
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut spans = vec![Span::styled(
+        format!("{} ", title),
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+    )];
 
     for (i, (key, desc)) in items.iter().enumerate() {
         if i > 0 {
@@ -72,10 +56,7 @@ pub fn draw(f: &mut Frame, context: &WhichKeyContext) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            *desc,
-            Style::default().fg(Color::White),
-        ));
+        spans.push(Span::styled(*desc, Style::default().fg(Color::White)));
     }
 
     let line = Line::from(spans);
@@ -102,9 +83,7 @@ pub fn draw_category_input(f: &mut Frame, input: &str) {
         .border_style(Style::default().fg(Color::Blue));
 
     let text = format!("{}\n\nPress Enter to confirm, ESC to cancel", input);
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .style(Style::default());
+    let paragraph = Paragraph::new(text).block(block).style(Style::default());
 
     f.render_widget(paragraph, popup_area);
 }
@@ -141,7 +120,11 @@ pub fn draw_category_select(f: &mut Frame, categories: &[String], selected_index
     f.render_widget(list, popup_area);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    r: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

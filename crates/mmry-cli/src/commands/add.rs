@@ -7,7 +7,7 @@ use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
-use mmry_core::embeddings::EmbeddingService;
+use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
@@ -44,7 +44,7 @@ pub async fn handle(
     cmd: AddCmd,
     config: &Config,
     db: &Database,
-    embeddings: Arc<EmbeddingService>,
+    embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
 ) -> anyhow::Result<()> {
     // Read content from stdin if "-"
@@ -102,18 +102,8 @@ pub async fn handle(
 
     // Check if chunking is needed
     let chunker = if config.chunking.enabled {
-        // Try to get tokenizer for accurate token counting
-        let tokenizer = if embeddings.is_enabled() {
-            embeddings.get_tokenizer().await.ok()
-        } else {
-            None
-        };
-
-        if let Some(tok) = tokenizer {
-            Chunker::with_tokenizer(config.chunking.clone(), tok)
-        } else {
-            Chunker::new(config.chunking.clone())
-        }
+        // Note: We can't get tokenizer from wrapper, so always use character-based chunking
+        Chunker::new(config.chunking.clone())
     } else {
         Chunker::new(config.chunking.clone())
     };
@@ -127,7 +117,10 @@ pub async fn handle(
             println!(
                 "Content is long, chunking into {} pieces using {:?} method",
                 total_chunks,
-                text_chunks.first().map(|c| &c.method).unwrap_or(&mmry_core::memory::ChunkMethod::None)
+                text_chunks
+                    .first()
+                    .map(|c| &c.method)
+                    .unwrap_or(&mmry_core::memory::ChunkMethod::None)
             );
         }
 
@@ -153,9 +146,12 @@ pub async fn handle(
             };
 
             // Generate embeddings
-            if embeddings.is_enabled() {
-                if let Some(vector) = embeddings.embed(&embed_text).await? {
-                    chunk.embedding = Some(vector);
+            {
+                let mut emb = embeddings.lock().await;
+                if emb.is_enabled() {
+                    if let Some(vector) = emb.embed(&embed_text).await? {
+                        chunk.embedding = Some(vector);
+                    }
                 }
             }
 
@@ -192,15 +188,24 @@ pub async fn handle(
             };
             println!("{json}");
         } else {
-            println!("✓ Added chunked memory: {} ({} chunks)", memory.id, total_chunks);
+            println!(
+                "✓ Added chunked memory: {} ({} chunks)",
+                memory.id, total_chunks
+            );
             println!("  Type: {:?}", memory.memory_type);
-            println!("  Content preview: {}...", memory.content.chars().take(100).collect::<String>());
+            println!(
+                "  Content preview: {}...",
+                memory.content.chars().take(100).collect::<String>()
+            );
         }
     } else {
         // Memory doesn't need chunking, process normally
-        if embeddings.is_enabled() {
-            if let Some(vector) = embeddings.embed(&memory.content).await? {
-                memory.embedding = Some(vector);
+        {
+            let mut emb = embeddings.lock().await;
+            if emb.is_enabled() {
+                if let Some(vector) = emb.embed(&memory.content).await? {
+                    memory.embedding = Some(vector);
+                }
             }
         }
 
@@ -226,121 +231,12 @@ pub async fn handle(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mmry_core::config::Config;
-    use mmry_core::database::operations;
-    use mmry_core::database::Database;
-    use mmry_core::embeddings::EmbeddingService;
-    use mmry_core::sparse_embeddings::SparseEmbeddingService;
-    use std::sync::Arc;
-    use tempfile::tempdir;
-
-    async fn setup_context() -> anyhow::Result<(
-        tempfile::TempDir,
-        Config,
-        Database,
-        Arc<EmbeddingService>,
-        Arc<SparseEmbeddingService>,
-    )> {
-        let temp = tempdir()?;
-        let mut config = Config::default();
-        config.database.path = temp.path().join("memories.db");
-        config.embeddings.enabled = false;
-        config.embeddings.dimension = 3;
-        config.sparse_embeddings.enabled = false;
-
-        let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
-        let embeddings = Arc::new(EmbeddingService::new(&config.embeddings)?);
-        let sparse = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
-
-        Ok((temp, config, db, embeddings, sparse))
-    }
-
-    #[tokio::test]
-    async fn add_command_persists_plain_text_memory() -> anyhow::Result<()> {
-        let (_temp, config, db, embeddings, sparse_embeddings) = setup_context().await?;
-
-        let cmd = AddCmd {
-            content: "remember the milk".to_string(),
-            memory_type: None,
-            category: None,
-            tags: None,
-            importance: None,
-            json: false,
-            full: false,
-        };
-
-        handle(
-            cmd,
-            &config,
-            &db,
-            Arc::clone(&embeddings),
-            Arc::clone(&sparse_embeddings),
-        )
-        .await?;
-
-        let stored = operations::list_memories(db.pool(), None, 10).await?;
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].content, "remember the milk");
-
-        db.close().await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn add_command_accepts_json_arrays() -> anyhow::Result<()> {
-        let (_temp, config, db, embeddings, sparse_embeddings) = setup_context().await?;
-
-        let json_payload = r#"
-        [
-            {"content": "First memory", "category": "work"},
-            {"content": "Second memory", "importance": 9}
-        ]
-        "#
-        .trim()
-        .to_string();
-
-        let cmd = AddCmd {
-            content: json_payload,
-            memory_type: None,
-            category: None,
-            tags: None,
-            importance: None,
-            json: true,
-            full: false,
-        };
-
-        handle(
-            cmd,
-            &config,
-            &db,
-            Arc::clone(&embeddings),
-            Arc::clone(&sparse_embeddings),
-        )
-        .await?;
-
-        let stored = operations::list_memories(db.pool(), None, 10).await?;
-        assert_eq!(stored.len(), 2);
-        assert!(stored
-            .iter()
-            .any(|m| m.category == "work" && m.content == "First memory"));
-        assert!(stored
-            .iter()
-            .any(|m| m.importance == 9 && m.content == "Second memory"));
-
-        db.close().await;
-        Ok(())
-    }
-}
-
 async fn handle_json_input(
     json_value: serde_json::Value,
     cmd: AddCmd,
     config: &Config,
     db: &Database,
-    embeddings: Arc<EmbeddingService>,
+    embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
 ) -> anyhow::Result<()> {
     // Handle array of objects
@@ -400,7 +296,7 @@ async fn process_json_memory(
     json_value: &serde_json::Value,
     cmd: &AddCmd,
     config: &Config,
-    embeddings: &Arc<EmbeddingService>,
+    embeddings: &Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: &Arc<SparseEmbeddingService>,
 ) -> anyhow::Result<Memory> {
     let obj = json_value
@@ -480,9 +376,12 @@ async fn process_json_memory(
     }
 
     // Generate embeddings
-    if embeddings.is_enabled() {
-        if let Some(vector) = embeddings.embed(&memory.content).await? {
-            memory.embedding = Some(vector);
+    {
+        let mut emb = embeddings.lock().await;
+        if emb.is_enabled() {
+            if let Some(vector) = emb.embed(&memory.content).await? {
+                memory.embedding = Some(vector);
+            }
         }
     }
 
@@ -529,4 +428,115 @@ fn classify_memory(content: &str) -> MemoryType {
 
     // Default to episodic
     MemoryType::Episodic
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mmry_core::config::Config;
+    use mmry_core::database::operations;
+    use mmry_core::database::Database;
+    use mmry_core::embeddings::EmbeddingServiceWrapper;
+    use mmry_core::sparse_embeddings::SparseEmbeddingService;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    async fn setup_context() -> anyhow::Result<(
+        tempfile::TempDir,
+        Config,
+        Database,
+        Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
+        Arc<SparseEmbeddingService>,
+    )> {
+        let temp = tempdir()?;
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.embeddings.enabled = false;
+        config.embeddings.dimension = 3;
+        config.sparse_embeddings.enabled = false;
+
+        let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+        let embeddings = Arc::new(tokio::sync::Mutex::new(EmbeddingServiceWrapper::new(
+            &config,
+        )?));
+        let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
+
+        Ok((temp, config, db, embeddings, sparse_embeddings))
+    }
+
+    #[tokio::test]
+    async fn add_command_persists_plain_text_memory() -> anyhow::Result<()> {
+        let (_temp, config, db, embeddings, sparse_embeddings) = setup_context().await?;
+
+        let cmd = AddCmd {
+            content: "remember the milk".to_string(),
+            memory_type: None,
+            category: None,
+            tags: None,
+            importance: None,
+            json: false,
+            full: false,
+        };
+
+        handle(
+            cmd,
+            &config,
+            &db,
+            Arc::clone(&embeddings),
+            Arc::clone(&sparse_embeddings),
+        )
+        .await?;
+
+        let stored = operations::list_memories(db.pool(), None, 10).await?;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].content, "remember the milk");
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_command_accepts_json_arrays() -> anyhow::Result<()> {
+        let (_temp, config, db, embeddings, sparse_embeddings) = setup_context().await?;
+
+        let json_payload = r#"
+        [
+            {"content": "First memory", "category": "work"},
+            {"content": "Second memory", "importance": 9}
+        ]
+        "#
+        .trim()
+        .to_string();
+
+        let cmd = AddCmd {
+            content: json_payload,
+            memory_type: None,
+            category: None,
+            tags: None,
+            importance: None,
+            json: true,
+            full: false,
+        };
+
+        handle(
+            cmd,
+            &config,
+            &db,
+            Arc::clone(&embeddings),
+            Arc::clone(&sparse_embeddings),
+        )
+        .await?;
+
+        let stored = operations::list_memories(db.pool(), None, 10).await?;
+        assert_eq!(stored.len(), 2);
+        assert!(stored
+            .iter()
+            .any(|m| m.category == "work" && m.content == "First memory"));
+        assert!(stored
+            .iter()
+            .any(|m| m.importance == 9 && m.content == "Second memory"));
+
+        db.close().await;
+        Ok(())
+    }
 }

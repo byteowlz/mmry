@@ -9,7 +9,7 @@ use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
-use mmry_core::embeddings::EmbeddingService;
+use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::io::{self};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::editor;
@@ -90,7 +91,7 @@ impl App {
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
         let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
-        let embeddings = Arc::new(EmbeddingService::new(&config.embeddings)?);
+        let embeddings = Arc::new(Mutex::new(EmbeddingServiceWrapper::new(&config)?));
         let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
         let reranker = Arc::new(RerankerService::from_config(&config.search)?);
         let search_service = SearchService::new(
@@ -376,8 +377,6 @@ impl App {
                     self.toggle_filter_item();
                 }
             }
-
-
 
             KeyAction::SelectAll => {
                 if self.active_pane == Pane::Middle {
@@ -966,45 +965,47 @@ impl App {
                 KeyAction::Escape => {
                     self.mode = AppMode::Normal;
                 }
-                KeyAction::Char(c) => {
-                    match (&context, c) {
-                        (WhichKeyContext::Type, 'e') => {
-                            self.update_selected_memory_type(MemoryType::Episodic).await?;
-                            self.mode = AppMode::Normal;
-                        }
-                        (WhichKeyContext::Type, 's') => {
-                            self.update_selected_memory_type(MemoryType::Semantic).await?;
-                            self.mode = AppMode::Normal;
-                        }
-                        (WhichKeyContext::Type, 'p') => {
-                            self.update_selected_memory_type(MemoryType::Procedural).await?;
-                            self.mode = AppMode::Normal;
-                        }
-                        (WhichKeyContext::Importance, '0'..='9') => {
-                            let importance = c.to_digit(10).unwrap() as i32;
-                            self.update_selected_memory_importance(importance).await?;
-                            self.mode = AppMode::Normal;
-                        }
-                        (WhichKeyContext::Importance, 'i') => {
-                            self.change_selected_memory_importance(1).await?;
-                            self.mode = AppMode::Normal;
-                        }
-                        (WhichKeyContext::Importance, 'd') => {
-                            self.change_selected_memory_importance(-1).await?;
-                            self.mode = AppMode::Normal;
-                        }
-                        (WhichKeyContext::Category, 'n') => {
-                            use crate::state::CategoryInputContext;
-                            self.mode = AppMode::CategoryInput(CategoryInputContext::New, String::new());
-                        }
-                        (WhichKeyContext::Category, 's') => {
-                            self.mode = AppMode::CategorySelect(0);
-                        }
-                        _ => {
-                            self.mode = AppMode::Normal;
-                        }
+                KeyAction::Char(c) => match (&context, c) {
+                    (WhichKeyContext::Type, 'e') => {
+                        self.update_selected_memory_type(MemoryType::Episodic)
+                            .await?;
+                        self.mode = AppMode::Normal;
                     }
-                }
+                    (WhichKeyContext::Type, 's') => {
+                        self.update_selected_memory_type(MemoryType::Semantic)
+                            .await?;
+                        self.mode = AppMode::Normal;
+                    }
+                    (WhichKeyContext::Type, 'p') => {
+                        self.update_selected_memory_type(MemoryType::Procedural)
+                            .await?;
+                        self.mode = AppMode::Normal;
+                    }
+                    (WhichKeyContext::Importance, '0'..='9') => {
+                        let importance = c.to_digit(10).unwrap() as i32;
+                        self.update_selected_memory_importance(importance).await?;
+                        self.mode = AppMode::Normal;
+                    }
+                    (WhichKeyContext::Importance, 'i') => {
+                        self.change_selected_memory_importance(1).await?;
+                        self.mode = AppMode::Normal;
+                    }
+                    (WhichKeyContext::Importance, 'd') => {
+                        self.change_selected_memory_importance(-1).await?;
+                        self.mode = AppMode::Normal;
+                    }
+                    (WhichKeyContext::Category, 'n') => {
+                        use crate::state::CategoryInputContext;
+                        self.mode =
+                            AppMode::CategoryInput(CategoryInputContext::New, String::new());
+                    }
+                    (WhichKeyContext::Category, 's') => {
+                        self.mode = AppMode::CategorySelect(0);
+                    }
+                    _ => {
+                        self.mode = AppMode::Normal;
+                    }
+                },
                 _ => {}
             }
         }
@@ -1063,7 +1064,10 @@ impl App {
         Ok(true)
     }
 
-    async fn update_selected_memory_type(&mut self, memory_type: mmry_core::memory::MemoryType) -> Result<()> {
+    async fn update_selected_memory_type(
+        &mut self,
+        memory_type: mmry_core::memory::MemoryType,
+    ) -> Result<()> {
         if let Some(memory) = self.selected_memory() {
             let id = memory.id;
             let mut updated = memory.clone();
@@ -1131,7 +1135,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{WhichKeyContext, CategoryInputContext};
+    use crate::state::CategoryInputContext;
+    use crate::state::WhichKeyContext;
     use mmry_core::memory::MemoryType;
 
     struct TestContext {
@@ -1141,10 +1146,10 @@ mod tests {
     async fn create_test_app() -> Result<(App, TestContext)> {
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("test.db");
-        
+
         let mut config = Config::load().unwrap_or_else(|_| Config::default());
         config.database.path = db_path.clone();
-        
+
         let db = Database::init(&db_path, config.embeddings.dimension).await?;
         let embeddings = Arc::new(EmbeddingService::new(&config.embeddings)?);
         let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
@@ -1186,8 +1191,17 @@ mod tests {
         Ok((app, context))
     }
 
-    async fn create_test_memory(app: &App, memory_type: MemoryType, importance: i32, category: &str) -> Result<Memory> {
-        let memory = Memory::new(memory_type, "Test content".to_string(), category.to_string());
+    async fn create_test_memory(
+        app: &App,
+        memory_type: MemoryType,
+        importance: i32,
+        category: &str,
+    ) -> Result<Memory> {
+        let memory = Memory::new(
+            memory_type,
+            "Test content".to_string(),
+            category.to_string(),
+        );
         let mut memory = memory;
         memory.importance = importance;
         operations::insert_memory(app.db.pool(), &memory).await?;
@@ -1198,20 +1212,20 @@ mod tests {
     async fn test_handle_whichkey_mode_type_episodic() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Semantic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Type);
         let result = app.handle_key_action(KeyAction::Char('e')).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Episodic);
-        
+
         Ok(())
     }
 
@@ -1219,20 +1233,20 @@ mod tests {
     async fn test_handle_whichkey_mode_type_semantic() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Type);
         let result = app.handle_key_action(KeyAction::Char('s')).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Semantic);
-        
+
         Ok(())
     }
 
@@ -1240,20 +1254,20 @@ mod tests {
     async fn test_handle_whichkey_mode_type_procedural() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Type);
         let result = app.handle_key_action(KeyAction::Char('p')).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Procedural);
-        
+
         Ok(())
     }
 
@@ -1261,20 +1275,20 @@ mod tests {
     async fn test_handle_whichkey_mode_importance_set() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Importance);
         let result = app.handle_key_action(KeyAction::Char('7')).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 7);
-        
+
         Ok(())
     }
 
@@ -1282,20 +1296,20 @@ mod tests {
     async fn test_handle_whichkey_mode_importance_increase() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Importance);
         let result = app.handle_key_action(KeyAction::Char('i')).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 6);
-        
+
         Ok(())
     }
 
@@ -1303,20 +1317,20 @@ mod tests {
     async fn test_handle_whichkey_mode_importance_decrease() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Importance);
         let result = app.handle_key_action(KeyAction::Char('d')).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 4);
-        
+
         Ok(())
     }
 
@@ -1324,19 +1338,19 @@ mod tests {
     async fn test_handle_whichkey_mode_importance_clamps_at_max() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 9, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Importance);
         let result = app.handle_key_action(KeyAction::Char('i')).await?;
-        
+
         assert!(result);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 9);
-        
+
         Ok(())
     }
 
@@ -1344,93 +1358,93 @@ mod tests {
     async fn test_handle_whichkey_mode_importance_clamps_at_min() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 0, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Importance);
         let result = app.handle_key_action(KeyAction::Char('d')).await?;
-        
+
         assert!(result);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 0);
-        
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_handle_whichkey_mode_category_new() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Category);
         let result = app.handle_key_action(KeyAction::Char('n')).await?;
-        
+
         assert!(result);
         assert!(matches!(app.mode, AppMode::CategoryInput(_, _)));
-        
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_handle_whichkey_mode_category_select() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Category);
         let result = app.handle_key_action(KeyAction::Char('s')).await?;
-        
+
         assert!(result);
         assert!(matches!(app.mode, AppMode::CategorySelect(_)));
-        
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_handle_whichkey_mode_escape() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
-        
+
         app.mode = AppMode::WhichKey(WhichKeyContext::Type);
         let result = app.handle_key_action(KeyAction::Escape).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_handle_category_input_mode_char() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
-        
+
         app.mode = AppMode::CategoryInput(CategoryInputContext::New, String::new());
         app.handle_key_action(KeyAction::Char('t')).await?;
         app.handle_key_action(KeyAction::Char('e')).await?;
         app.handle_key_action(KeyAction::Char('s')).await?;
         app.handle_key_action(KeyAction::Char('t')).await?;
-        
+
         if let AppMode::CategoryInput(_, ref input) = app.mode {
             assert_eq!(input, "test");
         } else {
             panic!("Expected CategoryInput mode");
         }
-        
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_handle_category_input_mode_backspace() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
-        
+
         app.mode = AppMode::CategoryInput(CategoryInputContext::New, "test".to_string());
         app.handle_key_action(KeyAction::Backspace).await?;
-        
+
         if let AppMode::CategoryInput(_, ref input) = app.mode {
             assert_eq!(input, "tes");
         } else {
             panic!("Expected CategoryInput mode");
         }
-        
+
         Ok(())
     }
 
@@ -1438,33 +1452,33 @@ mod tests {
     async fn test_handle_category_input_mode_confirm() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "old_category").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.mode = AppMode::CategoryInput(CategoryInputContext::New, "new_category".to_string());
         let result = app.handle_key_action(KeyAction::Select).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "new_category");
-        
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_handle_category_input_mode_escape() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
-        
+
         app.mode = AppMode::CategoryInput(CategoryInputContext::New, "test".to_string());
         let result = app.handle_key_action(KeyAction::Escape).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         Ok(())
     }
 
@@ -1472,24 +1486,24 @@ mod tests {
     async fn test_handle_category_select_mode_navigation() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         app.categories = vec!["cat1".to_string(), "cat2".to_string(), "cat3".to_string()];
-        
+
         app.mode = AppMode::CategorySelect(0);
         app.handle_key_action(KeyAction::Down).await?;
-        
+
         if let AppMode::CategorySelect(idx) = app.mode {
             assert_eq!(idx, 1);
         } else {
             panic!("Expected CategorySelect mode");
         }
-        
+
         app.handle_key_action(KeyAction::Up).await?;
-        
+
         if let AppMode::CategorySelect(idx) = app.mode {
             assert_eq!(idx, 0);
         } else {
             panic!("Expected CategorySelect mode");
         }
-        
+
         Ok(())
     }
 
@@ -1497,34 +1511,34 @@ mod tests {
     async fn test_handle_category_select_mode_select() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "old_category").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
         app.categories = vec!["cat1".to_string(), "cat2".to_string()];
-        
+
         app.mode = AppMode::CategorySelect(1);
         let result = app.handle_key_action(KeyAction::Select).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "cat2");
-        
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_handle_category_select_mode_escape() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
-        
+
         app.mode = AppMode::CategorySelect(0);
         let result = app.handle_key_action(KeyAction::Escape).await?;
-        
+
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
-        
+
         Ok(())
     }
 
@@ -1532,16 +1546,17 @@ mod tests {
     async fn test_update_selected_memory_type() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
-        app.update_selected_memory_type(MemoryType::Semantic).await?;
-        
+
+        app.update_selected_memory_type(MemoryType::Semantic)
+            .await?;
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Semantic);
-        
+
         Ok(())
     }
 
@@ -1549,16 +1564,16 @@ mod tests {
     async fn test_update_selected_memory_importance() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.update_selected_memory_importance(8).await?;
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 8);
-        
+
         Ok(())
     }
 
@@ -1566,16 +1581,16 @@ mod tests {
     async fn test_change_selected_memory_importance() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "test").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.change_selected_memory_importance(2).await?;
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 7);
-        
+
         Ok(())
     }
 
@@ -1583,16 +1598,16 @@ mod tests {
     async fn test_update_selected_memory_category() -> Result<()> {
         let (mut app, _ctx) = create_test_app().await?;
         let memory = create_test_memory(&app, MemoryType::Episodic, 5, "old_category").await?;
-        
+
         app.memories.push(memory.clone());
         app.middle_selection.index = 0;
-        
+
         app.update_selected_memory_category("new_category").await?;
-        
+
         let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "new_category");
-        
+
         Ok(())
     }
 }

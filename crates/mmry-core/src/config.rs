@@ -51,6 +51,8 @@ pub struct Config {
     pub entities: EntitiesConfig,
     pub cleanup: CleanupConfig,
     pub integrations: IntegrationsConfig,
+    #[serde(default)]
+    pub service: ServiceConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +149,26 @@ pub struct LstIntegrationConfig {
     pub min_note_length: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServiceConfig {
+    pub enabled: bool,
+    pub auto_start: bool,
+    pub idle_timeout_seconds: u64,
+    pub preload_models: bool,
+}
+
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_start: true,
+            idle_timeout_seconds: 300,
+            preload_models: true,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         let data_dir = std::env::var("XDG_DATA_HOME")
@@ -218,6 +240,12 @@ impl Default for Config {
                     min_task_length: 10,
                     min_note_length: 20,
                 },
+            },
+            service: ServiceConfig {
+                enabled: false, // Disabled by default, users can enable it
+                auto_start: true,
+                idle_timeout_seconds: 300, // 5 minutes
+                preload_models: true,
             },
         }
     }
