@@ -2,7 +2,7 @@
 
 # mmry
 
-A local-first memory system for humans and AI agents. Store any text and find it again with multiple search strategies, pipe it anywhere with JSON. Everything runs locally. No API keys, no cloud services, your data stays on your own machine.
+A local-first memory system for humans and AI agents. Store any text and find it again with multiple search strategies, pipe it anywhere with JSON. Everything runs locally. No API keys, no cloud services, all data stays on your own machine.
 
 ## Quick Start
 
@@ -103,6 +103,7 @@ mmry service run
 ```
 
 **Why use service mode?**
+
 - First embedding: ~2-3 seconds (cold start, loading model)
 - With service: ~10-50 milliseconds (model stays loaded)
 - Automatically unloads after 5 minutes of inactivity to save memory
@@ -139,21 +140,28 @@ You can tweak the weights of each strategy in the config, or just use hybrid mod
 ## Installation
 
 ```bash
-# Recommended: Interactive installer (builds CLI + TUI with optional hardware acceleration)
+# Clone the repository
 git clone https://github.com/tommyfalkowski/mmry
 cd mmry
+
+# Option 1: Using just (recommended if you have it installed)
 just install-all
+
+# Option 2: Run the install script directly
+# macOS/Linux:
+./scripts/install-mmry.sh
+
+# Windows (PowerShell):
+powershell -ExecutionPolicy Bypass -File scripts\install-mmry.ps1
 
 # From source (CLI only)
 cargo install --git https://github.com/tommyfalkowski/mmry mmry-cli
 
 # Manual build
-git clone https://github.com/tommyfalkowski/mmry
-cd mmry
 cargo build --release
 ```
 
-The `just install-all` script builds and installs both mmry-cli and mmry-tui with your choice of ONNX Runtime acceleration:
+The install script builds and installs mmry-cli, mmry-tui, and mmry-service with your choice of ONNX Runtime acceleration:
 
 - none (default) - CPU-only, works everywhere
 - ort-coreml - Apple Neural Engine acceleration (macOS)
