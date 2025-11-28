@@ -7,6 +7,7 @@ use std::sync::Arc;
 use mmry_core::config::Config;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::ner::NerService;
 use mmry_core::reranker::RerankerService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use tracing_subscriber::layer::SubscriberExt;
@@ -43,6 +44,9 @@ enum Commands {
 
     /// Regenerate embeddings for existing memories
     Reembed(commands::reembed::ReembedCmd),
+
+    /// Extract entities from existing memories and build knowledge graph
+    Reextract(commands::reextract::ReextractCmd),
 
     /// List available embedding models
     Models(commands::models::ModelsCmd),
@@ -130,6 +134,8 @@ async fn async_main() -> anyhow::Result<()> {
     let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
     tracing::debug!("Creating reranker");
     let reranker = Arc::new(RerankerService::from_config(&config.search)?);
+    tracing::debug!("Creating NER service");
+    let ner = Arc::new(NerService::new(&config.ner)?);
     tracing::debug!("All services created");
 
     // Execute command
@@ -141,6 +147,7 @@ async fn async_main() -> anyhow::Result<()> {
                 &db,
                 Arc::clone(&embeddings),
                 Arc::clone(&sparse_embeddings),
+                Arc::clone(&ner),
             )
             .await
         }
@@ -168,6 +175,9 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await
         }
+        Commands::Reextract(cmd) => {
+            commands::reextract::handle(cmd, &config, &db, Arc::clone(&ner)).await
+        }
         Commands::Models(_) | Commands::Rerankers(_) | Commands::Init(_) | Commands::Service(_) => {
             unreachable!()
         }
@@ -180,6 +190,7 @@ async fn async_main() -> anyhow::Result<()> {
     std::mem::forget(embeddings);
     std::mem::forget(sparse_embeddings);
     std::mem::forget(reranker);
+    std::mem::forget(ner);
 
     result
 }

@@ -68,10 +68,7 @@ fn draw_delete_confirmation(f: &mut Frame, id: uuid::Uuid) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
 
-    let text = format!(
-        "Delete memory {}?\n\nPress 'y' to confirm, ESC to cancel",
-        id
-    );
+    let text = format!("Delete memory {id}?\n\nPress 'y' to confirm, ESC to cancel");
     let paragraph = Paragraph::new(text).block(block).style(Style::default());
 
     f.render_widget(paragraph, area);
@@ -94,10 +91,7 @@ fn draw_delete_multiple_confirmation(f: &mut Frame, count: usize) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
 
-    let text = format!(
-        "Delete {} selected memories?\n\nPress 'y' to confirm, ESC to cancel",
-        count
-    );
+    let text = format!("Delete {count} selected memories?\n\nPress 'y' to confirm, ESC to cancel");
     let paragraph = Paragraph::new(text).block(block).style(Style::default());
 
     f.render_widget(paragraph, area);

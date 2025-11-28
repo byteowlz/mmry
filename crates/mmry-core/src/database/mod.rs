@@ -1,3 +1,4 @@
+pub mod graph_ops;
 pub mod operations;
 pub mod schema;
 

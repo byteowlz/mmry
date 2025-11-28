@@ -119,6 +119,20 @@ auto_link = true
 # Entity types to extract
 types = ["person", "place", "organization", "project", "technology"]
 
+[ner]
+# Enable ML-based Named Entity Recognition for entity extraction
+# Requires the 'ner' feature to be compiled in (enabled by default)
+# When enabled, NER extracts entities (PER, LOC, ORG, MISC) and builds a knowledge graph
+# Set to false to disable entity extraction
+enabled = true
+# NER model to use (HuggingFace repo name)
+# Available models:
+#   - "onnx-community/distilbert-NER-ONNX" (recommended, 66M params, F1: 0.92)
+#   - "onnx-community/TinyBERT-finetuned-NER-ONNX" (faster, 14M params, F1: 0.86)
+model = "onnx-community/distilbert-NER-ONNX"
+# Minimum confidence threshold for accepting entities (0.0-1.0)
+confidence_threshold = 0.7
+
 [cleanup]
 # Automatically prune old/low-importance memories
 auto_prune = false

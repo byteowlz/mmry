@@ -49,6 +49,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     pub chunking: ChunkingConfig,
     pub entities: EntitiesConfig,
+    #[serde(default)]
+    pub ner: NerConfig,
     pub cleanup: CleanupConfig,
     pub integrations: IntegrationsConfig,
     #[serde(default)]
@@ -128,6 +130,16 @@ pub struct EntitiesConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NerConfig {
+    /// Enable NER-based entity extraction
+    pub enabled: bool,
+    /// Model to use (HuggingFace repo name)
+    pub model: String,
+    /// Minimum confidence threshold for accepting entities (0.0 - 1.0)
+    pub confidence_threshold: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupConfig {
     pub auto_prune: bool,
     pub prune_threshold_days: u32,
@@ -165,6 +177,16 @@ impl Default for ServiceConfig {
             auto_start: true,
             idle_timeout_seconds: 300,
             preload_models: true,
+        }
+    }
+}
+
+impl Default for NerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true, // Enabled by default when ner feature is compiled in
+            model: "onnx-community/distilbert-NER-ONNX".to_string(),
+            confidence_threshold: 0.7,
         }
     }
 }
@@ -226,6 +248,7 @@ impl Default for Config {
                     "technology".to_string(),
                 ],
             },
+            ner: NerConfig::default(),
             cleanup: CleanupConfig {
                 auto_prune: false,
                 prune_threshold_days: 365,

@@ -133,7 +133,7 @@ fn resolve_search_opts(cmd: &SearchCmd, config: &Config) -> (SearchMode, i64, bo
     } else {
         None
     };
-    let rerank = rerank_override.unwrap_or_else(|| match resolved_mode {
+    let rerank = rerank_override.unwrap_or(match resolved_mode {
         SearchMode::Semantic | SearchMode::Hybrid => config.search.rerank_enabled,
         _ => false,
     });

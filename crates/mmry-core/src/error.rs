@@ -35,6 +35,9 @@ pub enum Error {
     #[error("Sparse embedding error: {0}")]
     SparseEmbedding(String),
 
+    #[error("NER error: {0}")]
+    Ner(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

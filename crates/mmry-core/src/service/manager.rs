@@ -37,7 +37,7 @@ impl ServiceManager {
         content
             .trim()
             .parse()
-            .map_err(|e| crate::Error::Service(format!("Invalid PID: {}", e)))
+            .map_err(|e| crate::Error::Service(format!("Invalid PID: {e}")))
     }
 
     pub fn read_port(&self) -> Result<u16> {
@@ -45,7 +45,7 @@ impl ServiceManager {
         content
             .trim()
             .parse()
-            .map_err(|e| crate::Error::Service(format!("Invalid port: {}", e)))
+            .map_err(|e| crate::Error::Service(format!("Invalid port: {e}")))
     }
 
     pub fn start(&self, foreground: bool) -> Result<()> {
@@ -123,7 +123,6 @@ impl ServiceManager {
         // Send termination signal
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             Command::new("kill").arg(pid.to_string()).status()?;
         }
 

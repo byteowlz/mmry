@@ -3,6 +3,7 @@ pub mod init;
 pub mod ls;
 pub mod models;
 pub mod reembed;
+pub mod reextract;
 pub mod rerankers;
 pub mod rm;
 pub mod search;

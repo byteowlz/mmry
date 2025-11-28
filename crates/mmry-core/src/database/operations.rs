@@ -19,7 +19,7 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let parent_id = parent_id.and_then(|s| Uuid::parse_str(&s).ok());
 
     let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
-    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok());
+    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok());
 
     Ok(Memory {
         id: Uuid::parse_str(row.try_get("id")?).unwrap(),
@@ -55,15 +55,11 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
         .as_ref()
         .and_then(|e| serde_json::to_vec(e).ok());
 
-    let chunk_method_str = memory
-        .chunk_method
-        .as_ref()
-        .map(|cm| {
-            serde_json::to_string(cm)
-                .ok()
-                .map(|s| s.trim_matches('"').to_string())
-        })
-        .flatten();
+    let chunk_method_str = memory.chunk_method.as_ref().and_then(|cm| {
+        serde_json::to_string(cm)
+            .ok()
+            .map(|s| s.trim_matches('"').to_string())
+    });
 
     sqlx::query(
         r#"

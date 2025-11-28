@@ -5,11 +5,17 @@ use std::sync::Arc;
 
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
+use mmry_core::database::graph_ops;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::graph::Entity;
+use mmry_core::graph::MemoryEntityLink;
+use mmry_core::graph::RelationType;
+use mmry_core::graph::Relationship;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
+use mmry_core::ner::NerService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 
 #[derive(Parser)]
@@ -46,6 +52,7 @@ pub async fn handle(
     db: &Database,
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
+    ner: Arc<NerService>,
 ) -> anyhow::Result<()> {
     // Read content from stdin if "-"
     let input = if cmd.content == "-" {
@@ -63,7 +70,16 @@ pub async fn handle(
     // Try to parse as JSON first
     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&input) {
         // Handle JSON input
-        return handle_json_input(json_value, cmd, config, db, embeddings, sparse_embeddings).await;
+        return handle_json_input(
+            json_value,
+            cmd,
+            config,
+            db,
+            embeddings,
+            sparse_embeddings,
+            ner,
+        )
+        .await;
     }
 
     // Plain text input
@@ -218,17 +234,79 @@ pub async fn handle(
         // Insert memory
         operations::insert_memory(db.pool(), &memory).await?;
 
+        // Extract entities and build graph
+        let entity_count = extract_and_link_entities(db, &ner, &memory, cmd.json).await?;
+
         if cmd.json {
             let json = serialize_memory(&memory, cmd.full)?;
             println!("{json}");
         } else {
-            println!("✓ Added memory: {}", memory.id);
+            println!("+ Added memory: {}", memory.id);
             println!("  Type: {:?}", memory.memory_type);
             println!("  Content: {}", memory.content);
+            if entity_count > 0 {
+                println!("  Entities: {entity_count} extracted");
+            }
         }
     }
 
     Ok(())
+}
+
+/// Extract entities from memory content and link them to the memory
+async fn extract_and_link_entities(
+    db: &Database,
+    ner: &Arc<NerService>,
+    memory: &Memory,
+    quiet: bool,
+) -> anyhow::Result<usize> {
+    if !ner.is_enabled() {
+        return Ok(0);
+    }
+
+    // Extract unique entities from the memory content
+    let extracted = ner.extract_unique(&memory.content).await?;
+
+    if extracted.is_empty() {
+        return Ok(0);
+    }
+
+    let mut entity_ids = Vec::new();
+
+    // Create or get existing entities and link to memory
+    for (name, (entity_type, confidence)) in &extracted {
+        let entity = Entity::new(name.clone(), *entity_type);
+        let entity_id = graph_ops::upsert_entity(db.pool(), &entity).await?;
+        entity_ids.push(entity_id);
+
+        // Link entity to memory
+        let link = MemoryEntityLink::new(memory.id, entity_id, *confidence);
+        graph_ops::link_memory_entity(db.pool(), &link).await?;
+
+        if !quiet {
+            tracing::debug!(
+                entity = %name,
+                entity_type = %entity_type,
+                confidence = %confidence,
+                "Extracted entity"
+            );
+        }
+    }
+
+    // Create co-occurrence relationships between entities found in the same memory
+    if entity_ids.len() > 1 {
+        for i in 0..entity_ids.len() {
+            for j in (i + 1)..entity_ids.len() {
+                let relationship =
+                    Relationship::new(entity_ids[i], entity_ids[j], RelationType::CoOccurs)
+                        .with_strength(0.1); // Low initial strength, builds up with repeated co-occurrence
+
+                graph_ops::upsert_relationship(db.pool(), &relationship).await?;
+            }
+        }
+    }
+
+    Ok(extracted.len())
 }
 
 async fn handle_json_input(
@@ -238,6 +316,7 @@ async fn handle_json_input(
     db: &Database,
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
+    ner: Arc<NerService>,
 ) -> anyhow::Result<()> {
     // Handle array of objects
     if let Some(array) = json_value.as_array() {
@@ -246,6 +325,8 @@ async fn handle_json_input(
             let memory =
                 process_json_memory(item, &cmd, config, &embeddings, &sparse_embeddings).await?;
             operations::insert_memory(db.pool(), &memory).await?;
+            // Extract entities for each memory
+            extract_and_link_entities(db, &ner, &memory, true).await?;
             results.push(memory);
         }
 
@@ -279,6 +360,8 @@ async fn handle_json_input(
     let memory =
         process_json_memory(&json_value, &cmd, config, &embeddings, &sparse_embeddings).await?;
     operations::insert_memory(db.pool(), &memory).await?;
+    // Extract entities
+    extract_and_link_entities(db, &ner, &memory, cmd.json).await?;
 
     if cmd.json {
         let json = serialize_memory(&memory, cmd.full)?;
@@ -437,6 +520,7 @@ mod tests {
     use mmry_core::database::operations;
     use mmry_core::database::Database;
     use mmry_core::embeddings::EmbeddingServiceWrapper;
+    use mmry_core::ner::NerService;
     use mmry_core::sparse_embeddings::SparseEmbeddingService;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -447,6 +531,7 @@ mod tests {
         Database,
         Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
         Arc<SparseEmbeddingService>,
+        Arc<NerService>,
     )> {
         let temp = tempdir()?;
         let mut config = Config::default();
@@ -454,19 +539,21 @@ mod tests {
         config.embeddings.enabled = false;
         config.embeddings.dimension = 3;
         config.sparse_embeddings.enabled = false;
+        config.ner.enabled = false; // Disabled for tests
 
         let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
         let embeddings = Arc::new(tokio::sync::Mutex::new(EmbeddingServiceWrapper::new(
             &config,
         )?));
         let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
+        let ner = Arc::new(NerService::new(&config.ner)?);
 
-        Ok((temp, config, db, embeddings, sparse_embeddings))
+        Ok((temp, config, db, embeddings, sparse_embeddings, ner))
     }
 
     #[tokio::test]
     async fn add_command_persists_plain_text_memory() -> anyhow::Result<()> {
-        let (_temp, config, db, embeddings, sparse_embeddings) = setup_context().await?;
+        let (_temp, config, db, embeddings, sparse_embeddings, ner) = setup_context().await?;
 
         let cmd = AddCmd {
             content: "remember the milk".to_string(),
@@ -484,6 +571,7 @@ mod tests {
             &db,
             Arc::clone(&embeddings),
             Arc::clone(&sparse_embeddings),
+            Arc::clone(&ner),
         )
         .await?;
 
@@ -497,7 +585,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_command_accepts_json_arrays() -> anyhow::Result<()> {
-        let (_temp, config, db, embeddings, sparse_embeddings) = setup_context().await?;
+        let (_temp, config, db, embeddings, sparse_embeddings, ner) = setup_context().await?;
 
         let json_payload = r#"
         [
@@ -524,6 +612,7 @@ mod tests {
             &db,
             Arc::clone(&embeddings),
             Arc::clone(&sparse_embeddings),
+            Arc::clone(&ner),
         )
         .await?;
 

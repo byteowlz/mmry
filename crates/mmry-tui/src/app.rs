@@ -7,9 +7,11 @@ use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
+use mmry_core::database::graph_ops;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::graph::Entity;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
@@ -29,6 +31,7 @@ use crate::state::sort::SortMode;
 use crate::state::AppMode;
 use crate::state::FilterState;
 use crate::state::Pane;
+use crate::state::RightPaneView;
 use crate::state::Selection;
 use crate::state::SortState;
 
@@ -74,6 +77,7 @@ pub struct App {
 
     pub mode: AppMode,
     pub active_pane: Pane,
+    pub right_pane_view: RightPaneView,
 
     pub left_selection: Selection,
     pub middle_selection: Selection,
@@ -85,6 +89,11 @@ pub struct App {
     pub g_prefix: bool,
     pub status_message: Option<String>,
     pub needs_redraw: bool,
+
+    /// Cached entities for the currently selected memory
+    pub selected_memory_entities: Vec<Entity>,
+    /// ID of the memory whose entities are cached
+    cached_entity_memory_id: Option<Uuid>,
 }
 
 impl App {
@@ -114,6 +123,7 @@ impl App {
             tags: Vec::new(),
             mode: AppMode::Normal,
             active_pane: Pane::Middle,
+            right_pane_view: RightPaneView::default(),
             left_selection: Selection::new(),
             middle_selection: Selection::new(),
             right_scroll: 0,
@@ -122,6 +132,8 @@ impl App {
             g_prefix: false,
             status_message: None,
             needs_redraw: false,
+            selected_memory_entities: Vec::new(),
+            cached_entity_memory_id: None,
         };
 
         app.search_mode_index = app.index_for_mode(app.config.search.mode);
@@ -161,6 +173,24 @@ impl App {
         self.filtered_memories()
             .get(self.middle_selection.index)
             .copied()
+    }
+
+    /// Fetch entities for the currently selected memory (if not already cached)
+    pub async fn fetch_selected_memory_entities(&mut self) -> Result<()> {
+        if let Some(memory) = self.selected_memory() {
+            let memory_id = memory.id;
+
+            // Only fetch if we haven't cached this memory's entities
+            if self.cached_entity_memory_id != Some(memory_id) {
+                self.selected_memory_entities =
+                    graph_ops::get_memory_entities(self.db.pool(), memory_id).await?;
+                self.cached_entity_memory_id = Some(memory_id);
+            }
+        } else {
+            self.selected_memory_entities.clear();
+            self.cached_entity_memory_id = None;
+        }
+        Ok(())
     }
 
     pub fn filtered_memories(&self) -> Vec<&Memory> {
@@ -209,9 +239,8 @@ impl App {
         // + MEMORY TYPES header (1) + Episodic/Semantic/Procedural (3) + separator (1)
         // + CATEGORIES header (1) + categories (N) + separator (1)
         // + TAGS header (1) + tags (up to 10)
-        let count =
-            1 + 3 + 1 + 1 + 3 + 1 + 1 + self.categories.len() + 1 + 1 + self.tags.len().min(10);
-        count
+
+        1 + 3 + 1 + 1 + 3 + 1 + 1 + self.categories.len() + 1 + 1 + self.tags.len().min(10)
     }
 
     pub fn get_selected_left_item(&self) -> Option<LeftPaneItem> {
@@ -297,10 +326,26 @@ impl App {
         match event {
             AppEvent::Key(key) => {
                 let action = parse_key_event(key);
-                return self.handle_key_action(action).await;
+                let result = self.handle_key_action(action).await;
+
+                // After key handling, check if we need to update entity cache
+                if self.right_pane_view == RightPaneView::Graph {
+                    self.fetch_selected_memory_entities().await?;
+                }
+
+                return result;
             }
             AppEvent::Resize(_, _) => {}
-            AppEvent::Tick => {}
+            AppEvent::Tick => {
+                // On tick, fetch entities if in graph view and cache is stale
+                if self.right_pane_view == RightPaneView::Graph {
+                    if let Some(memory) = self.selected_memory() {
+                        if self.cached_entity_memory_id != Some(memory.id) {
+                            self.fetch_selected_memory_entities().await?;
+                        }
+                    }
+                }
+            }
         }
         Ok(true)
     }
@@ -382,7 +427,7 @@ impl App {
                 if self.active_pane == Pane::Middle {
                     let count = self.filtered_memories().len();
                     self.middle_selection.select_all(count);
-                    self.status_message = Some(format!("Selected all {} memories", count));
+                    self.status_message = Some(format!("Selected all {count} memories"));
                 }
             }
 
@@ -441,6 +486,21 @@ impl App {
             KeyAction::Char('c') => {
                 use crate::state::WhichKeyContext;
                 self.mode = AppMode::WhichKey(WhichKeyContext::Category);
+            }
+
+            KeyAction::Char('v') => {
+                // Toggle right pane view between Preview and Graph
+                self.right_pane_view = match self.right_pane_view {
+                    RightPaneView::Preview => RightPaneView::Graph,
+                    RightPaneView::Graph => RightPaneView::Preview,
+                };
+                self.status_message = Some(format!(
+                    "View: {}",
+                    match self.right_pane_view {
+                        RightPaneView::Preview => "Preview",
+                        RightPaneView::Graph => "Graph",
+                    }
+                ));
             }
 
             _ => {
@@ -1078,7 +1138,7 @@ impl App {
             operations::insert_memory(self.db.pool(), &updated).await?;
 
             self.refresh_memories().await?;
-            self.status_message = Some(format!("Updated memory type to {:?}", memory_type));
+            self.status_message = Some(format!("Updated memory type to {memory_type:?}"));
         }
         Ok(())
     }
@@ -1094,7 +1154,7 @@ impl App {
             operations::insert_memory(self.db.pool(), &updated).await?;
 
             self.refresh_memories().await?;
-            self.status_message = Some(format!("Updated importance to {}", importance));
+            self.status_message = Some(format!("Updated importance to {importance}"));
         }
         Ok(())
     }
@@ -1126,7 +1186,7 @@ impl App {
             operations::insert_memory(self.db.pool(), &updated).await?;
 
             self.refresh_memories().await?;
-            self.status_message = Some(format!("Updated category to {}", category));
+            self.status_message = Some(format!("Updated category to {category}"));
         }
         Ok(())
     }
@@ -1151,7 +1211,10 @@ mod tests {
         config.database.path = db_path.clone();
 
         let db = Database::init(&db_path, config.embeddings.dimension).await?;
-        let embeddings = Arc::new(EmbeddingService::new(&config.embeddings)?);
+        config.embeddings.enabled = false;
+        let embeddings = Arc::new(tokio::sync::Mutex::new(EmbeddingServiceWrapper::new(
+            &config,
+        )?));
         let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
         let reranker = Arc::new(RerankerService::from_config(&config.search)?);
         let search_service = SearchService::new(
@@ -1174,6 +1237,7 @@ mod tests {
             tags: Vec::new(),
             mode: AppMode::Normal,
             active_pane: Pane::Middle,
+            right_pane_view: RightPaneView::default(),
             left_selection: Selection::new(),
             middle_selection: Selection::new(),
             right_scroll: 0,
@@ -1182,6 +1246,8 @@ mod tests {
             g_prefix: false,
             status_message: None,
             needs_redraw: false,
+            selected_memory_entities: Vec::new(),
+            cached_entity_memory_id: None,
         };
 
         let context = TestContext {

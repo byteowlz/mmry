@@ -42,14 +42,14 @@ impl DaemonClient {
 
         // Read port
         let port = self.manager.read_port()?;
-        let addr = format!("http://127.0.0.1:{}", port);
+        let addr = format!("http://127.0.0.1:{port}");
 
         // Connect to service
         let channel = Channel::from_shared(addr)
-            .map_err(|e| crate::Error::Service(format!("Invalid service address: {}", e)))?
+            .map_err(|e| crate::Error::Service(format!("Invalid service address: {e}")))?
             .connect()
             .await
-            .map_err(|e| crate::Error::Service(format!("Failed to connect: {}", e)))?;
+            .map_err(|e| crate::Error::Service(format!("Failed to connect: {e}")))?;
 
         self.client = Some(EmbeddingServiceClient::new(channel));
         Ok(())
@@ -71,7 +71,7 @@ impl DaemonClient {
         let response = client
             .embed(request)
             .await
-            .map_err(|e| crate::Error::Service(format!("Embed request failed: {}", e)))?;
+            .map_err(|e| crate::Error::Service(format!("Embed request failed: {e}")))?;
 
         let embedding = response.into_inner().embedding;
 
@@ -134,7 +134,7 @@ impl DaemonClient {
         let response = client
             .search(tonic::Request::new(request))
             .await
-            .map_err(|e| crate::Error::Service(format!("Search request failed: {}", e)))?;
+            .map_err(|e| crate::Error::Service(format!("Search request failed: {e}")))?;
 
         let proto = response.into_inner();
         proto.memories.into_iter().map(memory_from_proto).collect()
@@ -159,8 +159,7 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         "procedural" => MemoryType::Procedural,
         other => {
             return Err(crate::Error::Service(format!(
-                "Unknown memory type in response: {}",
-                other
+                "Unknown memory type in response: {other}"
             )))
         }
     };
@@ -170,7 +169,7 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
             None
         } else {
             Some(Uuid::parse_str(&mem.parent_id).map_err(|e| {
-                crate::Error::Service(format!("Invalid parent_id in response: {}", e))
+                crate::Error::Service(format!("Invalid parent_id in response: {e}"))
             })?)
         };
 
@@ -184,8 +183,7 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
             "word" => Some(ChunkMethod::Word),
             other => {
                 return Err(crate::Error::Service(format!(
-                    "Unknown chunk_method in response: {}",
-                    other
+                    "Unknown chunk_method in response: {other}"
                 )))
             }
         }
@@ -204,7 +202,7 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
 
     Ok(Memory {
         id: Uuid::parse_str(&mem.id)
-            .map_err(|e| crate::Error::Service(format!("Invalid memory id: {}", e)))?,
+            .map_err(|e| crate::Error::Service(format!("Invalid memory id: {e}")))?,
         memory_type,
         content: mem.content,
         embedding: if mem.embedding.is_empty() {
@@ -217,10 +215,10 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
             .unwrap_or_else(|_| serde_json::json!({})),
         importance: mem.importance,
         created_at: chrono::DateTime::parse_from_rfc3339(&mem.created_at)
-            .map_err(|e| crate::Error::Service(format!("Invalid created_at: {}", e)))?
+            .map_err(|e| crate::Error::Service(format!("Invalid created_at: {e}")))?
             .with_timezone(&chrono::Utc),
         updated_at: chrono::DateTime::parse_from_rfc3339(&mem.updated_at)
-            .map_err(|e| crate::Error::Service(format!("Invalid updated_at: {}", e)))?
+            .map_err(|e| crate::Error::Service(format!("Invalid updated_at: {e}")))?
             .with_timezone(&chrono::Utc),
         category: mem.category,
         tags: mem.tags,

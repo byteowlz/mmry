@@ -121,9 +121,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             )
         }
     } else if filtered_count < total {
-        format!(" Memories ({}/{}) ", filtered_count, total)
+        format!(" Memories ({filtered_count}/{total}) ")
     } else {
-        format!(" Memories ({}) ", total)
+        format!(" Memories ({total}) ")
     };
 
     let list = List::new(items)

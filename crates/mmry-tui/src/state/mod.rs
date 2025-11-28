@@ -13,6 +13,16 @@ pub enum Pane {
     Right,
 }
 
+/// View mode for the right pane
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightPaneView {
+    /// Show memory details/preview
+    #[default]
+    Preview,
+    /// Show entity graph for the selected memory
+    Graph,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
     Normal,

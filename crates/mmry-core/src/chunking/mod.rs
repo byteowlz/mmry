@@ -132,7 +132,7 @@ impl Chunker {
             let potential_chunk = if current_chunk.is_empty() {
                 paragraph.to_string()
             } else {
-                format!("{}{}{}", current_chunk, separator, paragraph)
+                format!("{current_chunk}{separator}{paragraph}")
             };
 
             let potential_tokens = self.count_tokens(&potential_chunk);
@@ -202,7 +202,7 @@ impl Chunker {
             let potential_chunk = if current_chunk.is_empty() {
                 sentence.to_string()
             } else {
-                format!("{} {}", current_chunk, sentence)
+                format!("{current_chunk} {sentence}")
             };
 
             let potential_tokens = self.count_tokens(&potential_chunk);
@@ -295,7 +295,7 @@ impl Chunker {
                 if overlap_count > 0 {
                     let overlap_start = prev_words.len().saturating_sub(overlap_count);
                     let overlap = prev_words[overlap_start..].join(" ");
-                    content = format!("{} {}", overlap, content);
+                    content = format!("{overlap} {content}");
                 }
             }
 
@@ -414,7 +414,7 @@ mod tests {
         let text = "First sentence here. Second sentence with words. Third sentence also present. Fourth sentence too. Fifth sentence added.";
 
         let chunks = chunker.chunk_text(text).unwrap();
-        assert!(chunks.len() > 0);
+        assert!(!chunks.is_empty());
     }
 
     #[test]

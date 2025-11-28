@@ -43,7 +43,7 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let parent_id = parent_id.and_then(|s| Uuid::parse_str(&s).ok());
 
     let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
-    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok());
+    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok());
 
     Ok(Memory {
         id: Uuid::parse_str(row.try_get("id")?).unwrap(),
@@ -386,7 +386,7 @@ impl SearchService {
                 if let Some(chunk_index) = memory.chunk_index {
                     chunk_indices_map
                         .entry(parent_id)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(chunk_index);
                 }
 
@@ -409,7 +409,7 @@ impl SearchService {
         }
 
         // Second pass: load parent memories for chunks
-        for (parent_id, _indices) in &chunk_indices_map {
+        for parent_id in chunk_indices_map.keys() {
             if !parent_map.contains_key(parent_id) {
                 // Load parent from database
                 if let Some(parent) = operations::get_memory(&self.pool, *parent_id).await? {
@@ -838,12 +838,13 @@ fn sparse_dot_product(a: &StoredSparseEmbedding, b: &StoredSparseEmbedding) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::EmbeddingsConfig;
+    use crate::config::Config;
     use crate::config::SearchConfig;
     use crate::config::SparseEmbeddingsConfig;
     use crate::database::operations;
     use crate::database::schema;
     use crate::database::Database;
+    use crate::embeddings::EmbeddingServiceWrapper;
     use crate::memory::Memory;
     use crate::memory::MemoryType;
     use crate::reranker::RerankerService;
@@ -854,15 +855,12 @@ mod tests {
 
     const TEST_DIMENSION: usize = 3;
 
-    fn disabled_embeddings() -> Arc<EmbeddingService> {
-        let config = EmbeddingsConfig {
-            enabled: false,
-            model: String::new(),
-            backend: String::new(),
-            dimension: 0,
-            batch_size: 0,
-        };
-        Arc::new(EmbeddingService::new(&config).expect("create embeddings"))
+    fn disabled_embeddings() -> Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>> {
+        let mut config = Config::default();
+        config.embeddings.enabled = false;
+        Arc::new(tokio::sync::Mutex::new(
+            EmbeddingServiceWrapper::new(&config).expect("create embeddings"),
+        ))
     }
 
     fn disabled_sparse_embeddings() -> Arc<SparseEmbeddingService> {

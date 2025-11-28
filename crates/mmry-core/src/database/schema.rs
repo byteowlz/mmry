@@ -13,7 +13,11 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     category TEXT DEFAULT 'default',
-    tags JSON DEFAULT '[]'
+    tags JSON DEFAULT '[]',
+    parent_id TEXT,
+    chunk_index INTEGER,
+    total_chunks INTEGER,
+    chunk_method TEXT
 );
 
 CREATE TABLE IF NOT EXISTS entities (

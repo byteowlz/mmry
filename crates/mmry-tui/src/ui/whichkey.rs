@@ -40,7 +40,7 @@ pub fn draw(f: &mut Frame, context: &WhichKeyContext) {
     };
 
     let mut spans = vec![Span::styled(
-        format!("{} ", title),
+        format!("{title} "),
         Style::default()
             .fg(Color::Blue)
             .add_modifier(Modifier::BOLD),
@@ -51,7 +51,7 @@ pub fn draw(f: &mut Frame, context: &WhichKeyContext) {
             spans.push(Span::raw(" | "));
         }
         spans.push(Span::styled(
-            format!("[{}] ", key),
+            format!("[{key}] "),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -82,7 +82,7 @@ pub fn draw_category_input(f: &mut Frame, input: &str) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
 
-    let text = format!("{}\n\nPress Enter to confirm, ESC to cancel", input);
+    let text = format!("{input}\n\nPress Enter to confirm, ESC to cancel");
     let paragraph = Paragraph::new(text).block(block).style(Style::default());
 
     f.render_widget(paragraph, popup_area);
@@ -106,7 +106,7 @@ pub fn draw_category_select(f: &mut Frame, categories: &[String], selected_index
                 Style::default()
             };
             let prefix = if i == selected_index { "> " } else { "  " };
-            Line::from(Span::styled(format!("{}{}", prefix, cat), style))
+            Line::from(Span::styled(format!("{prefix}{cat}"), style))
         })
         .collect();
 
