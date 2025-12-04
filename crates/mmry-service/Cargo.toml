@@ -26,6 +26,7 @@ dirs = { workspace = true }
 tonic = "0.12"
 prost = "0.13"
 tokio-stream = { version = "0.1", features = ["net"] }
+axum = { version = "0.7", features = ["json"] }
 
 # Process management
 sysinfo = "0.32"
@@ -35,12 +36,3 @@ tonic-build = "0.12"
 
 [features]
 default = []
-ort-coreml = ["mmry-core/ort-coreml"]
-ort-cuda = ["mmry-core/ort-cuda"]
-ort-directml = ["mmry-core/ort-directml"]
-ort-openvino = ["mmry-core/ort-openvino"]
-ort-tensorrt = ["mmry-core/ort-tensorrt"]
-ort-rocm = ["mmry-core/ort-rocm"]
-ort-nnapi = ["mmry-core/ort-nnapi"]
-ort-xnnpack = ["mmry-core/ort-xnnpack"]
-ort-load-dynamic = ["mmry-core/ort-load-dynamic"]

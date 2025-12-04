@@ -16,6 +16,12 @@ use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
+use mmry_core::stores::list_all_stores;
+use mmry_core::stores::list_stores;
+use mmry_core::stores::store_exists;
+use mmry_core::stores::validate_store_name;
+use mmry_core::stores::StoreInfo;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Write;
 use std::io::{self};
@@ -94,12 +100,28 @@ pub struct App {
     pub selected_memory_entities: Vec<Entity>,
     /// ID of the memory whose entities are cached
     cached_entity_memory_id: Option<Uuid>,
+
+    /// Current store name (empty string means "All Stores")
+    pub current_store: String,
+    /// Whether we're viewing all stores
+    pub viewing_all_stores: bool,
+    /// Map from memory ID to store name (used when viewing all stores)
+    pub memory_store_map: HashMap<Uuid, String>,
+    /// Available stores (cached)
+    pub available_stores: Vec<StoreInfo>,
+    /// Shared embedding service (kept across store switches)
+    embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
+    /// Shared sparse embedding service
+    sparse_embeddings: Arc<SparseEmbeddingService>,
+    /// Shared reranker service
+    reranker: Arc<RerankerService>,
 }
 
 impl App {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(store_name: Option<&str>) -> Result<Self> {
         let config = Config::load()?;
-        let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+        let current_store = store_name.unwrap_or(&config.stores.default).to_string();
+        let db = Database::init_store(&config, Some(&current_store)).await?;
         let embeddings = Arc::new(Mutex::new(EmbeddingServiceWrapper::new(&config)?));
         let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
         let reranker = Arc::new(RerankerService::from_config(&config.search)?);
@@ -110,6 +132,9 @@ impl App {
             Arc::clone(&sparse_embeddings),
             Arc::clone(&reranker),
         );
+
+        // Get available stores
+        let available_stores = list_stores(&config).unwrap_or_default();
 
         let mut app = Self {
             config,
@@ -134,6 +159,13 @@ impl App {
             needs_redraw: false,
             selected_memory_entities: Vec::new(),
             cached_entity_memory_id: None,
+            current_store,
+            viewing_all_stores: false,
+            memory_store_map: HashMap::new(),
+            available_stores,
+            embeddings,
+            sparse_embeddings,
+            reranker,
         };
 
         app.search_mode_index = app.index_for_mode(app.config.search.mode);
@@ -143,8 +175,137 @@ impl App {
         Ok(app)
     }
 
+    /// Switch to a different store
+    pub async fn switch_store(&mut self, store_name: &str) -> Result<()> {
+        // Close current database
+        // Note: We can't close self.db directly, so we'll just open a new one
+        // The old connection will be dropped when we reassign
+
+        let new_db = Database::init_store(&self.config, Some(store_name)).await?;
+
+        // Create new search service with new database
+        let new_search_service = SearchService::new(
+            new_db.pool().clone(),
+            self.config.search.clone(),
+            Arc::clone(&self.embeddings),
+            Arc::clone(&self.sparse_embeddings),
+            Arc::clone(&self.reranker),
+        );
+
+        self.db = new_db;
+        self.search_service = new_search_service;
+        self.current_store = store_name.to_string();
+        self.viewing_all_stores = false;
+        self.memory_store_map.clear();
+
+        // Refresh data
+        self.refresh_memories().await?;
+        self.middle_selection.reset();
+        self.filter_state.clear();
+        self.search_backup = None;
+        self.selected_memory_entities.clear();
+        self.cached_entity_memory_id = None;
+
+        // Refresh available stores list
+        self.available_stores = list_stores(&self.config).unwrap_or_default();
+
+        self.status_message = Some(format!("Switched to store: {store_name}"));
+
+        Ok(())
+    }
+
+    /// Switch to viewing all stores
+    pub async fn switch_to_all_stores(&mut self) -> Result<()> {
+        self.viewing_all_stores = true;
+        self.memory_store_map.clear();
+
+        // Load memories from all stores
+        let results = list_all_stores(&self.config, None, 1000).await?;
+
+        self.memories.clear();
+        for item in results {
+            self.memory_store_map.insert(item.memory.id, item.store);
+            self.memories.push(item.memory);
+        }
+
+        self.sort_state.sort_memories(&mut self.memories);
+        self.update_categories_and_tags();
+        self.middle_selection.reset();
+        self.filter_state.clear();
+        self.search_backup = None;
+        self.selected_memory_entities.clear();
+        self.cached_entity_memory_id = None;
+
+        // Refresh available stores list
+        self.available_stores = list_stores(&self.config).unwrap_or_default();
+
+        self.status_message = Some("Viewing all stores".to_string());
+
+        Ok(())
+    }
+
+    /// Create a new store
+    pub async fn create_store(&mut self, name: &str) -> Result<()> {
+        validate_store_name(name)?;
+
+        if store_exists(&self.config, name) {
+            self.status_message = Some(format!("Store '{name}' already exists"));
+            return Ok(());
+        }
+
+        // Create the store by initializing its database
+        let db = Database::init_store(&self.config, Some(name)).await?;
+        db.close().await;
+
+        // Refresh available stores list
+        self.available_stores = list_stores(&self.config).unwrap_or_default();
+
+        self.status_message = Some(format!("Created store '{name}'"));
+
+        Ok(())
+    }
+
+    /// Get the store name for a memory (when viewing all stores)
+    pub fn get_memory_store(&self, memory_id: Uuid) -> Option<&str> {
+        self.memory_store_map.get(&memory_id).map(|s| s.as_str())
+    }
+
+    /// Get index of current store in available_stores (0 = All Stores)
+    pub fn current_store_index(&self) -> usize {
+        if self.viewing_all_stores {
+            0
+        } else {
+            // +1 because index 0 is "All Stores"
+            self.available_stores
+                .iter()
+                .position(|s| s.name == self.current_store)
+                .map(|i| i + 1)
+                .unwrap_or(1)
+        }
+    }
+
+    /// Get display name for current store
+    pub fn current_store_display(&self) -> &str {
+        if self.viewing_all_stores {
+            "All Stores"
+        } else {
+            &self.current_store
+        }
+    }
+
     pub async fn refresh_memories(&mut self) -> Result<()> {
-        self.memories = operations::list_memories(self.db.pool(), None, 1000).await?;
+        if self.viewing_all_stores {
+            // Load from all stores
+            self.memory_store_map.clear();
+            let results = list_all_stores(&self.config, None, 1000).await?;
+            self.memories.clear();
+            for item in results {
+                self.memory_store_map.insert(item.memory.id, item.store);
+                self.memories.push(item.memory);
+            }
+        } else {
+            self.memories = operations::list_memories(self.db.pool(), None, 1000).await?;
+        }
         self.sort_state.sort_memories(&mut self.memories);
         self.update_categories_and_tags();
         self.search_backup = None;
@@ -361,6 +522,8 @@ impl App {
             AppMode::WhichKey(_) => self.handle_whichkey_mode(action).await,
             AppMode::CategoryInput(_, _) => self.handle_category_input_mode(action).await,
             AppMode::CategorySelect(_) => self.handle_category_select_mode(action).await,
+            AppMode::StoreSelect(_) => self.handle_store_select_mode(action).await,
+            AppMode::StoreCreate(_) => self.handle_store_create_mode(action).await,
         }
     }
 
@@ -501,6 +664,20 @@ impl App {
                         RightPaneView::Graph => "Graph",
                     }
                 ));
+            }
+
+            KeyAction::Char('S') => {
+                // Open store selection
+                self.available_stores = list_stores(&self.config).unwrap_or_default();
+                if self.available_stores.is_empty() {
+                    self.status_message = Some(
+                        "No stores available. Create one with: mmry stores create <name>"
+                            .to_string(),
+                    );
+                } else {
+                    let current_idx = self.current_store_index();
+                    self.mode = AppMode::StoreSelect(current_idx);
+                }
             }
 
             _ => {
@@ -1124,6 +1301,92 @@ impl App {
         Ok(true)
     }
 
+    async fn handle_store_select_mode(&mut self, action: KeyAction) -> Result<bool> {
+        // Extract the current index first to avoid borrow issues
+        let current_index = if let AppMode::StoreSelect(idx) = self.mode {
+            idx
+        } else {
+            return Ok(true);
+        };
+
+        // Total items: 1 (All Stores) + available_stores.len()
+        let total_items = 1 + self.available_stores.len();
+
+        match action {
+            KeyAction::Up | KeyAction::Char('k') => {
+                self.mode = AppMode::StoreSelect(current_index.saturating_sub(1));
+            }
+            KeyAction::Down | KeyAction::Char('j') => {
+                if current_index < total_items.saturating_sub(1) {
+                    self.mode = AppMode::StoreSelect(current_index + 1);
+                }
+            }
+            KeyAction::Select => {
+                self.mode = AppMode::Normal;
+                if current_index == 0 {
+                    // "All Stores" selected
+                    self.switch_to_all_stores().await?;
+                } else if let Some(store) = self.available_stores.get(current_index - 1) {
+                    let store_name = store.name.clone();
+                    self.switch_store(&store_name).await?;
+                }
+            }
+            KeyAction::Escape => {
+                self.mode = AppMode::Normal;
+            }
+            KeyAction::Char('n') => {
+                // Create new store
+                self.mode = AppMode::StoreCreate(String::new());
+            }
+            KeyAction::Char('0') => {
+                // 0 = All Stores
+                self.mode = AppMode::Normal;
+                self.switch_to_all_stores().await?;
+            }
+            KeyAction::Char('1'..='9') => {
+                if let KeyAction::Char(c) = action {
+                    let num = c.to_digit(10).unwrap() as usize;
+                    // num 1-9 maps to available_stores[0..8]
+                    if num <= self.available_stores.len() {
+                        let store_name = self.available_stores[num - 1].name.clone();
+                        self.mode = AppMode::Normal;
+                        self.switch_store(&store_name).await?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    async fn handle_store_create_mode(&mut self, action: KeyAction) -> Result<bool> {
+        if let AppMode::StoreCreate(ref mut input) = self.mode {
+            match action {
+                KeyAction::Char(c) => {
+                    // Only allow valid store name characters
+                    if c.is_alphanumeric() || c == '-' || c == '_' {
+                        input.push(c);
+                    }
+                }
+                KeyAction::Backspace => {
+                    input.pop();
+                }
+                KeyAction::Select => {
+                    let name = input.clone();
+                    self.mode = AppMode::Normal;
+                    if !name.is_empty() {
+                        self.create_store(&name).await?;
+                    }
+                }
+                KeyAction::Escape => {
+                    self.mode = AppMode::Normal;
+                }
+                _ => {}
+            }
+        }
+        Ok(true)
+    }
+
     async fn update_selected_memory_type(
         &mut self,
         memory_type: mmry_core::memory::MemoryType,
@@ -1205,16 +1468,14 @@ mod tests {
 
     async fn create_test_app() -> Result<(App, TestContext)> {
         let temp_dir = tempfile::tempdir()?;
-        let db_path = temp_dir.path().join("test.db");
 
         let mut config = Config::load().unwrap_or_else(|_| Config::default());
-        config.database.path = db_path.clone();
+        config.stores.directory = temp_dir.path().join("stores");
+        config.stores.default = "test".to_string();
 
-        let db = Database::init(&db_path, config.embeddings.dimension).await?;
+        let db = Database::init_store(&config, None).await?;
         config.embeddings.enabled = false;
-        let embeddings = Arc::new(tokio::sync::Mutex::new(EmbeddingServiceWrapper::new(
-            &config,
-        )?));
+        let embeddings = Arc::new(Mutex::new(EmbeddingServiceWrapper::new(&config)?));
         let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
         let reranker = Arc::new(RerankerService::from_config(&config.search)?);
         let search_service = SearchService::new(
@@ -1224,6 +1485,8 @@ mod tests {
             Arc::clone(&sparse_embeddings),
             Arc::clone(&reranker),
         );
+
+        let available_stores = list_stores(&config).unwrap_or_default();
 
         let app = App {
             config,
@@ -1248,6 +1511,13 @@ mod tests {
             needs_redraw: false,
             selected_memory_entities: Vec::new(),
             cached_entity_memory_id: None,
+            current_store: "test".to_string(),
+            viewing_all_stores: false,
+            memory_store_map: HashMap::new(),
+            available_stores,
+            embeddings,
+            sparse_embeddings,
+            reranker,
         };
 
         let context = TestContext {

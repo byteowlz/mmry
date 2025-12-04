@@ -10,6 +10,7 @@ pub mod ner;
 pub mod reranker;
 pub mod search;
 pub mod sparse_embeddings;
+pub mod stores;
 
 #[cfg(feature = "service")]
 pub mod service;

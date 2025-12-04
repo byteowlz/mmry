@@ -113,8 +113,8 @@ pub async fn handle(
             }
         }
 
-        // Extract entities
-        let extracted = ner.extract_unique(&memory.content).await?;
+        // Extract entities (uses labels from config)
+        let extracted = ner.extract_unique(&memory.content, None).await?;
 
         if extracted.is_empty() {
             continue;
@@ -126,8 +126,8 @@ pub async fn handle(
                 &memory.id.to_string()[..8],
                 extracted.len()
             );
-            for (name, (entity_type, confidence)) in &extracted {
-                println!("  - {name} ({entity_type}) [{confidence:.2}]");
+            for (name, (label, confidence)) in &extracted {
+                println!("  - {name} ({label}) [{confidence:.2}]");
             }
         }
 
@@ -139,8 +139,8 @@ pub async fn handle(
         // Create entities and links
         let mut entity_ids = Vec::new();
 
-        for (name, (entity_type, confidence)) in &extracted {
-            let entity = Entity::new(name.clone(), *entity_type);
+        for (name, (label, confidence)) in &extracted {
+            let entity = Entity::new(name.clone(), label.clone());
             let entity_id = graph_ops::upsert_entity(db.pool(), &entity).await?;
             entity_ids.push(entity_id);
 

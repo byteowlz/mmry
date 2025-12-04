@@ -34,6 +34,10 @@ pub enum AppMode {
     WhichKey(WhichKeyContext),
     CategoryInput(CategoryInputContext, String),
     CategorySelect(usize),
+    /// Store selection mode (index into available stores, 0 = "All Stores")
+    StoreSelect(usize),
+    /// Store creation mode (input buffer for new store name)
+    StoreCreate(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

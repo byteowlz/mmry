@@ -2,7 +2,6 @@ use crate::graph::Entity;
 use crate::graph::MemoryEntityLink;
 use crate::graph::RelationType;
 use crate::graph::Relationship;
-use crate::ner::EntityType;
 use crate::Result;
 use sqlx::Row;
 use sqlx::SqlitePool;
@@ -30,7 +29,7 @@ pub async fn upsert_entity(pool: &SqlitePool, entity: &Entity) -> Result<Uuid> {
             WHERE id = ?
             "#,
         )
-        .bind(entity.entity_type.as_str())
+        .bind(&entity.entity_type)
         .bind(entity.metadata.to_string())
         .bind(&id_str)
         .execute(pool)
@@ -47,7 +46,7 @@ pub async fn upsert_entity(pool: &SqlitePool, entity: &Entity) -> Result<Uuid> {
         )
         .bind(entity.id.to_string())
         .bind(&entity.name)
-        .bind(entity.entity_type.as_str())
+        .bind(&entity.entity_type)
         .bind(entity.metadata.to_string())
         .execute(pool)
         .await?;
@@ -95,7 +94,7 @@ pub async fn get_entity_by_name(pool: &SqlitePool, name: &str) -> Result<Option<
 /// List all entities, optionally filtered by type
 pub async fn list_entities(
     pool: &SqlitePool,
-    entity_type: Option<EntityType>,
+    entity_type: Option<&str>,
     limit: i64,
 ) -> Result<Vec<Entity>> {
     let rows = if let Some(et) = entity_type {
@@ -104,7 +103,7 @@ pub async fn list_entities(
             SELECT id, name, type, metadata FROM entities WHERE type = ? LIMIT ?
             "#,
         )
-        .bind(et.as_str())
+        .bind(et)
         .bind(limit)
         .fetch_all(pool)
         .await?
@@ -389,15 +388,7 @@ fn entity_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Entity> {
     let type_str: Option<String> = row.try_get("type").ok();
     let metadata_str: Option<String> = row.try_get("metadata").ok();
 
-    let entity_type = type_str
-        .as_deref()
-        .map(|s| match s.to_uppercase().as_str() {
-            "PER" => EntityType::Per,
-            "LOC" => EntityType::Loc,
-            "ORG" => EntityType::Org,
-            _ => EntityType::Misc,
-        })
-        .unwrap_or(EntityType::Misc);
+    let entity_type = type_str.unwrap_or_else(|| "unknown".to_string());
 
     let metadata = metadata_str
         .and_then(|s| serde_json::from_str(&s).ok())

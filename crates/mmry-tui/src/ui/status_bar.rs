@@ -21,6 +21,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         AppMode::WhichKey(_) => "COMMAND",
         AppMode::CategoryInput(_, _) => "INPUT",
         AppMode::CategorySelect(_) => "SELECT",
+        AppMode::StoreSelect(_) => "STORE",
+        AppMode::StoreCreate(_) => "NEW STORE",
     };
 
     let mode_color = match &app.mode {
@@ -33,6 +35,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         AppMode::WhichKey(_) => Color::Magenta,
         AppMode::CategoryInput(_, _) => Color::Yellow,
         AppMode::CategorySelect(_) => Color::Green,
+        AppMode::StoreSelect(_) => Color::Magenta,
+        AppMode::StoreCreate(_) => Color::Green,
     };
 
     let mut spans = vec![
@@ -40,6 +44,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(
             format!("[{mode_str}]"),
             Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("[{}]", app.current_store_display()),
+            Style::default().fg(Color::Magenta),
         ),
         Span::raw(" | "),
         Span::raw(format!("Memories: {} ", app.memories.len())),

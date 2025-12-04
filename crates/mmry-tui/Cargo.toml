@@ -11,6 +11,7 @@ publish.workspace = true
 mmry-core = { path = "../mmry-core" }
 ratatui = "0.28"
 crossterm = "0.28"
+clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -27,12 +28,3 @@ path = "src/main.rs"
 
 [features]
 default = []
-ort-coreml = ["mmry-core/ort-coreml"]
-ort-cuda = ["mmry-core/ort-cuda"]
-ort-directml = ["mmry-core/ort-directml"]
-ort-openvino = ["mmry-core/ort-openvino"]
-ort-tensorrt = ["mmry-core/ort-tensorrt"]
-ort-rocm = ["mmry-core/ort-rocm"]
-ort-nnapi = ["mmry-core/ort-nnapi"]
-ort-xnnpack = ["mmry-core/ort-xnnpack"]
-ort-load-dynamic = ["mmry-core/ort-load-dynamic"]

@@ -1,8 +1,19 @@
 use crate::state::ServiceState;
 use anyhow::Result;
+use axum::extract::State as AxumState;
+use axum::http::HeaderMap;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::Json;
+use axum::Router;
 use mmry_core::config::Config;
 use mmry_core::memory::Memory;
+use mmry_core::reranker::RerankScore;
 use mmry_core::search::SearchService;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +31,110 @@ pub mod embeddings {
 use embeddings::embedding_service_server::EmbeddingService;
 use embeddings::embedding_service_server::EmbeddingServiceServer;
 use embeddings::*;
+
+#[derive(Clone)]
+struct ExternalApiState {
+    state: Arc<ServiceState>,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingRequestPayload {
+    #[allow(dead_code)]
+    model: Option<String>,
+    input: EmbeddingInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EmbeddingInput {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+#[derive(Debug, Serialize)]
+struct EmbeddingResponsePayload {
+    object: &'static str,
+    data: Vec<EmbeddingData>,
+    model: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbeddingData {
+    object: &'static str,
+    embedding: Vec<f32>,
+    index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RerankRequestPayload {
+    query: String,
+    documents: Vec<String>,
+    #[serde(default)]
+    top_n: Option<usize>,
+    #[allow(dead_code)]
+    model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RerankResponsePayload {
+    results: Vec<RerankItem>,
+    model: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RerankItem {
+    index: usize,
+    document: Option<String>,
+    relevance_score: f32,
+}
+
+#[derive(Debug)]
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Missing or invalid API key".to_string(),
+        }
+    }
+
+    fn bad_request<M: Into<String>>(msg: M) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: msg.into(),
+        }
+    }
+
+    fn service_unavailable<M: Into<String>>(msg: M) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: msg.into(),
+        }
+    }
+
+    fn internal<M: Into<String>>(msg: M) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: msg.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let body = Json(json!({
+            "error": {
+                "message": self.message,
+            }
+        }));
+        (self.status, body).into_response()
+    }
+}
 
 pub struct EmbeddingServiceImpl {
     state: Arc<ServiceState>,
@@ -202,10 +317,138 @@ impl EmbeddingService for EmbeddingServiceImpl {
     }
 }
 
+fn normalize_api_key(key: &Option<String>) -> Option<String> {
+    key.as_ref()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
+fn enforce_api_key(required_key: &Option<String>, headers: &HeaderMap) -> Result<(), ApiError> {
+    if let Some(expected) = required_key {
+        let auth_header = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+
+        if let Some(token) = auth_header
+            .strip_prefix("Bearer ")
+            .or_else(|| auth_header.strip_prefix("bearer "))
+        {
+            if token == expected {
+                return Ok(());
+            }
+        }
+
+        return Err(ApiError::unauthorized());
+    }
+
+    Ok(())
+}
+
+async fn embeddings_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<EmbeddingRequestPayload>,
+) -> Result<Json<EmbeddingResponsePayload>, ApiError> {
+    enforce_api_key(&app_state.api_key, &headers)?;
+    app_state.state.record_activity().await;
+
+    let EmbeddingRequestPayload { model, input } = payload;
+
+    let inputs: Vec<String> = match input {
+        EmbeddingInput::Single(text) => vec![text],
+        EmbeddingInput::Multiple(list) => list,
+    };
+
+    if inputs.is_empty() {
+        return Err(ApiError::bad_request("input cannot be empty"));
+    }
+
+    let service_arc = app_state.state.get_embedding_service().await;
+    let service_guard = service_arc.lock().await;
+
+    let service = service_guard
+        .as_ref()
+        .ok_or_else(|| ApiError::service_unavailable("Embedding service not available"))?;
+
+    let mut data = Vec::with_capacity(inputs.len());
+    for (idx, text) in inputs.into_iter().enumerate() {
+        let embedding = service
+            .embed(&text)
+            .await
+            .map_err(|e| ApiError::internal(format!("Embedding failed: {e}")))?;
+
+        let values =
+            embedding.ok_or_else(|| ApiError::service_unavailable("Embeddings disabled"))?;
+
+        data.push(EmbeddingData {
+            object: "embedding",
+            embedding: values,
+            index: idx,
+        });
+    }
+
+    let model_name = model.unwrap_or_else(|| app_state.state.config.embeddings.model.clone());
+
+    Ok(Json(EmbeddingResponsePayload {
+        object: "list",
+        data,
+        model: model_name,
+    }))
+}
+
+async fn rerank_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<RerankRequestPayload>,
+) -> Result<Json<RerankResponsePayload>, ApiError> {
+    enforce_api_key(&app_state.api_key, &headers)?;
+    app_state.state.record_activity().await;
+
+    if payload.documents.is_empty() {
+        return Err(ApiError::bad_request("documents cannot be empty"));
+    }
+
+    let limit = payload
+        .top_n
+        .unwrap_or(payload.documents.len())
+        .min(payload.documents.len());
+
+    let results = app_state
+        .state
+        .reranker
+        .rerank_with_scores(&payload.query, &payload.documents)
+        .await
+        .map_err(|e| ApiError::internal(format!("Rerank failed: {e}")))?;
+
+    let reranked: Vec<RerankItem> = results
+        .into_iter()
+        .take(limit)
+        .map(|res: RerankScore| {
+            let document = payload.documents.get(res.index).cloned();
+            RerankItem {
+                index: res.index,
+                document,
+                relevance_score: res.score,
+            }
+        })
+        .collect();
+
+    let model_name = payload
+        .model
+        .or_else(|| app_state.state.config.search.rerank_model.clone())
+        .unwrap_or_else(|| "BAAI/bge-reranker-base".to_string());
+
+    Ok(Json(RerankResponsePayload {
+        results: reranked,
+        model: model_name,
+    }))
+}
+
 pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -> Result<()> {
     let state = Arc::new(ServiceState::new(config.clone()).await?);
 
-    // Bind to random available port on localhost
+    // Bind to random available port on localhost for gRPC
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
@@ -227,17 +470,52 @@ pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -
         });
     }
 
-    // Run server with graceful shutdown
-    Server::builder()
+    // Run servers with graceful shutdown
+    let grpc_server = Server::builder()
         .add_service(svc)
         .serve_with_incoming_shutdown(
             tokio_stream::wrappers::TcpListenerStream::new(listener),
             shutdown_signal(),
-        )
-        .await?;
+        );
 
-    // Cleanup port file on shutdown
+    if config.external_api.enable {
+        let http_state = Arc::clone(&state);
+        let http_config = config.external_api.clone();
+
+        tokio::try_join!(
+            async { grpc_server.await.map_err(anyhow::Error::new) },
+            run_http_api(http_state, http_config)
+        )?;
+    } else {
+        grpc_server.await?;
+    }
+
     std::fs::remove_file(&port_file).ok();
+
+    Ok(())
+}
+
+async fn run_http_api(
+    state: Arc<ServiceState>,
+    api_config: mmry_core::config::ExternalApiConfig,
+) -> Result<()> {
+    let api_key = normalize_api_key(&api_config.api_key);
+    let addr: std::net::SocketAddr = format!("{}:{}", api_config.host, api_config.port).parse()?;
+
+    let external_state = ExternalApiState { state, api_key };
+
+    let app = Router::new()
+        .route("/v1/embeddings", post(embeddings_handler))
+        .route("/v1/rerank", post(rerank_handler))
+        .with_state(external_state);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+    tracing::info!("External API listening on {}", local_addr);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
 }

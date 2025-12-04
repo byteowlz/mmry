@@ -11,6 +11,8 @@ use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::service::client::DaemonClient;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
+use mmry_core::stores::search_all_stores;
+use mmry_core::stores::MemoryWithStore;
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum CliSearchMode {
@@ -64,6 +66,9 @@ pub struct SearchCmd {
 
     #[arg(long, help = "Include full embeddings in JSON output")]
     pub full: bool,
+
+    #[arg(long, short = 'A', help = "Search across all stores")]
+    pub all_stores: bool,
 }
 
 pub async fn handle(
@@ -76,26 +81,43 @@ pub async fn handle(
 ) -> anyhow::Result<()> {
     let (resolved_mode, limit, rerank) = resolve_search_opts(&cmd, config);
 
-    let results = {
-        let search_service = SearchService::new(
-            db.pool().clone(),
-            config.search.clone(),
+    if cmd.all_stores {
+        let results = search_all_stores(
+            config,
+            &cmd.query,
+            cmd.category.as_deref(),
+            limit,
+            Some(resolved_mode),
+            Some(rerank),
             embeddings,
             sparse_embeddings,
             reranker,
-        );
-        search_service
-            .search_with_options(
-                &cmd.query,
-                cmd.category.as_deref(),
-                limit,
-                Some(resolved_mode),
-                Some(rerank),
-            )
-            .await?
-    };
+        )
+        .await?;
 
-    render_results(&results, resolved_mode, &cmd)?;
+        render_results_with_store(&results, resolved_mode, &cmd)?;
+    } else {
+        let results = {
+            let search_service = SearchService::new(
+                db.pool().clone(),
+                config.search.clone(),
+                embeddings,
+                sparse_embeddings,
+                reranker,
+            );
+            search_service
+                .search_with_options(
+                    &cmd.query,
+                    cmd.category.as_deref(),
+                    limit,
+                    Some(resolved_mode),
+                    Some(rerank),
+                )
+                .await?
+        };
+
+        render_results(&results, resolved_mode, &cmd)?;
+    }
 
     Ok(())
 }
@@ -174,6 +196,66 @@ fn render_results(results: &[Memory], mode: SearchMode, cmd: &SearchCmd) -> anyh
         println!("{}. [{}] {:?}", i + 1, memory.id, memory.memory_type);
         println!("   {}", memory.content);
         println!("   Created: {}", memory.created_at.format("%Y-%m-%d %H:%M"));
+        println!();
+    }
+
+    Ok(())
+}
+
+fn render_results_with_store(
+    results: &[MemoryWithStore],
+    mode: SearchMode,
+    cmd: &SearchCmd,
+) -> anyhow::Result<()> {
+    if cmd.json {
+        if cmd.full {
+            let json = serde_json::to_string_pretty(results)?;
+            println!("{json}");
+        } else {
+            let mut values: Vec<serde_json::Value> = Vec::new();
+            for item in results {
+                let mut value = serde_json::to_value(&item.memory)?;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.remove("embedding");
+                    obj.remove("sparse_embedding");
+                    obj.insert(
+                        "store".to_string(),
+                        serde_json::Value::String(item.store.clone()),
+                    );
+                }
+                values.push(value);
+            }
+            let json = serde_json::to_string_pretty(&values)?;
+            println!("{json}");
+        }
+        return Ok(());
+    }
+
+    if results.is_empty() {
+        println!("No memories found matching '{}'", cmd.query);
+        return Ok(());
+    }
+
+    let mode_str = format!("{mode:?}");
+    println!(
+        "Found {} memories across all stores (mode: {}):\n",
+        results.len(),
+        mode_str
+    );
+
+    for (i, item) in results.iter().enumerate() {
+        println!(
+            "{}. [{}] {:?} (store: {})",
+            i + 1,
+            item.memory.id,
+            item.memory.memory_type,
+            item.store
+        );
+        println!("   {}", item.memory.content);
+        println!(
+            "   Created: {}",
+            item.memory.created_at.format("%Y-%m-%d %H:%M")
+        );
         println!();
     }
 

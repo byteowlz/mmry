@@ -37,6 +37,16 @@ impl Database {
         Ok(Self { pool })
     }
 
+    /// Initialize a database for a specific store
+    pub async fn init_store(
+        config: &crate::config::Config,
+        store_name: Option<&str>,
+    ) -> crate::Result<Self> {
+        let store = store_name.unwrap_or(&config.stores.default);
+        let path = config.store_path(store);
+        Self::init(&path, config.embeddings.dimension).await
+    }
+
     async fn apply_schema_updates(pool: &SqlitePool) -> crate::Result<()> {
         // Check if sparse_embedding column exists, add if not
         let sparse_column_exists: bool = sqlx::query_scalar(

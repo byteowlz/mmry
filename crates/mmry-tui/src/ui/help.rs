@@ -90,6 +90,14 @@ pub fn draw(f: &mut Frame, _app: &App) {
         Line::from("  s          Open sort menu"),
         Line::from(""),
         Line::from(Span::styled(
+            "Stores:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  S          Switch store (select from list)"),
+        Line::from("             0 = All Stores, 1-9 = individual stores"),
+        Line::from("             n = Create new store (in store menu)"),
+        Line::from(""),
+        Line::from(Span::styled(
             "General:",
             Style::default().add_modifier(Modifier::BOLD),
         )),

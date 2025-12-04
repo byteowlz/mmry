@@ -23,6 +23,14 @@ struct Cli {
 
     #[arg(long, global = true, help = "Enable debug logging")]
     debug: bool,
+
+    #[arg(
+        short = 's',
+        long,
+        global = true,
+        help = "Store to use (defaults to config default)"
+    )]
+    store: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -59,6 +67,9 @@ enum Commands {
 
     /// Manage mmry service (daemon)
     Service(commands::service::ServiceCmd),
+
+    /// Manage memory stores
+    Stores(commands::stores::StoresCmd),
 }
 
 fn main() {
@@ -107,8 +118,15 @@ async fn async_main() -> anyhow::Result<()> {
         Commands::Models(cmd) => return commands::models::handle(cmd).await,
         Commands::Rerankers(cmd) => return commands::rerankers::handle(cmd).await,
         Commands::Service(cmd) => return commands::service::handle(cmd).await,
+        Commands::Stores(cmd) => return commands::stores::handle(cmd, &config).await,
         other => other,
     };
+
+    // Validate store name if provided
+    let store_name = cli.store.as_deref();
+    if let Some(name) = store_name {
+        mmry_core::stores::validate_store_name(name)?;
+    }
 
     // Try service-backed search before starting local services
     if config.service.enabled {
@@ -120,9 +138,9 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize database
-    tracing::debug!("Initializing database");
-    let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+    // Initialize database for the specified store
+    tracing::debug!("Initializing database for store: {:?}", store_name);
+    let db = Database::init_store(&config, store_name).await?;
     tracing::debug!("Database initialized");
 
     // Prepare shared services - use wrapper that can leverage daemon if enabled
@@ -178,7 +196,11 @@ async fn async_main() -> anyhow::Result<()> {
         Commands::Reextract(cmd) => {
             commands::reextract::handle(cmd, &config, &db, Arc::clone(&ner)).await
         }
-        Commands::Models(_) | Commands::Rerankers(_) | Commands::Init(_) | Commands::Service(_) => {
+        Commands::Models(_)
+        | Commands::Rerankers(_)
+        | Commands::Init(_)
+        | Commands::Service(_)
+        | Commands::Stores(_) => {
             unreachable!()
         }
     };

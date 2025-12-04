@@ -31,7 +31,7 @@ toml = "0.8"
 dirs = "5.0"
 
 # Embeddings (disabled for Phase 1, will enable in Phase 2)
-fastembed = "5.2"
+fastembed = "=5.2.0"
 
 # Fuzzy matching
 strsim = "0.11.1"
@@ -48,3 +48,4 @@ zerocopy = "0.8.27"
 tempfile = "3.10"
 tokenizers = "0.22"
 libc = "0.2"
+ort = "2.0.0-rc.10"

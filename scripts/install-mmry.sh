@@ -3,43 +3,89 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "Select an ORT feature to apply to both mmry binaries:"
-echo "  1) none (default)"
-echo "  2) ort-coreml"
-echo "  3) ort-cuda"
-echo "  4) ort-directml"
-echo "  5) ort-openvino"
-echo "  6) ort-tensorrt"
-echo "  7) ort-rocm"
-echo "  8) ort-nnapi"
-echo "  9) ort-xnnpack"
-echo " 10) ort-load-dynamic"
-read -rp "Enter choice [1-10]: " choice
+# Detect platform
+OS="$(uname -s)"
+ARCH="$(uname -m)"
 
-FEATURE_FLAG=()
-case "${choice:-1}" in
-2) FEATURE_FLAG=(--features ort-coreml) ;;
-3) FEATURE_FLAG=(--features ort-cuda) ;;
-4) FEATURE_FLAG=(--features ort-directml) ;;
-5) FEATURE_FLAG=(--features ort-openvino) ;;
-6) FEATURE_FLAG=(--features ort-tensorrt) ;;
-7) FEATURE_FLAG=(--features ort-rocm) ;;
-8) FEATURE_FLAG=(--features ort-nnapi) ;;
-9) FEATURE_FLAG=(--features ort-xnnpack) ;;
-10) FEATURE_FLAG=(--features ort-load-dynamic) ;;
-*) FEATURE_FLAG=() ;;
+echo "Detected platform: ${OS} (${ARCH})"
+echo ""
+
+# GPU acceleration options
+echo "Select GPU acceleration (improves embedding/reranking performance):"
+echo ""
+echo "  1) None (CPU only) - works everywhere"
+echo "  2) CUDA (NVIDIA GPU) - requires CUDA toolkit"
+echo "  3) CoreML (Apple Silicon) - macOS only, uses Neural Engine"
+echo "  4) DirectML (Windows GPU) - Windows only"
+echo ""
+
+# Default based on platform
+if [[ "${OS}" == "Darwin" && "${ARCH}" == "arm64" ]]; then
+    DEFAULT_CHOICE="3"
+    echo "Recommended for Apple Silicon: CoreML (3)"
+elif [[ "${OS}" == "Linux" ]] && command -v nvidia-smi &> /dev/null; then
+    DEFAULT_CHOICE="2"
+    echo "NVIDIA GPU detected, recommended: CUDA (2)"
+else
+    DEFAULT_CHOICE="1"
+    echo "Recommended: CPU only (1)"
+fi
+
+echo ""
+read -p "Enter choice [${DEFAULT_CHOICE}]: " CHOICE
+CHOICE="${CHOICE:-$DEFAULT_CHOICE}"
+
+# Set ORT environment variable based on choice
+case "${CHOICE}" in
+    1)
+        echo "Building with CPU-only support..."
+        unset ORT_USE_CUDA
+        unset ORT_USE_COREML
+        unset ORT_USE_DIRECTML
+        ;;
+    2)
+        echo "Building with CUDA support..."
+        export ORT_USE_CUDA=1
+        ;;
+    3)
+        if [[ "${OS}" != "Darwin" ]]; then
+            echo "Warning: CoreML is only available on macOS. Falling back to CPU."
+        else
+            echo "Building with CoreML support..."
+            export ORT_USE_COREML=1
+        fi
+        ;;
+    4)
+        echo "Building with DirectML support..."
+        export ORT_USE_DIRECTML=1
+        ;;
+    *)
+        echo "Invalid choice. Using CPU-only."
+        ;;
 esac
 
+echo ""
 echo "Building workspace..."
-cargo build --release "${FEATURE_FLAG[@]}"
+cargo build --release
 
+echo ""
 echo "Installing mmry service..."
-cargo install --path "${ROOT_DIR}/crates/mmry-service" --force "${FEATURE_FLAG[@]}"
+cargo install --path "${ROOT_DIR}/crates/mmry-service" --force
 
+echo ""
 echo "Installing mmry CLI..."
-cargo install --path "${ROOT_DIR}/crates/mmry-cli" --force "${FEATURE_FLAG[@]}"
+cargo install --path "${ROOT_DIR}/crates/mmry-cli" --force
 
+echo ""
 echo "Installing mmry TUI..."
-cargo install --path "${ROOT_DIR}/crates/mmry-tui" --force "${FEATURE_FLAG[@]}"
+cargo install --path "${ROOT_DIR}/crates/mmry-tui" --force
 
-echo "Installation complete. Binaries are available in \$HOME/.cargo/bin."
+echo ""
+echo "Installation complete!"
+echo "Binaries are available in \$HOME/.cargo/bin"
+echo ""
+echo "Quick start:"
+echo "  mmry init              # Initialize config and database"
+echo "  mmry add 'memory'      # Add a memory"
+echo "  mmry search 'query'    # Search memories"
+echo "  mmry-tui               # Launch the TUI"

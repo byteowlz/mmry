@@ -38,15 +38,5 @@ dialoguer = "0.11"
 tempfile = { workspace = true }
 
 [features]
-default = ["service", "ner"]
+default = ["service"]
 service = ["mmry-core/service"]
-ner = ["mmry-core/ner"]
-ort-coreml = ["mmry-core/ort-coreml", "ner"]
-ort-cuda = ["mmry-core/ort-cuda", "ner"]
-ort-directml = ["mmry-core/ort-directml", "ner"]
-ort-openvino = ["mmry-core/ort-openvino", "ner"]
-ort-tensorrt = ["mmry-core/ort-tensorrt", "ner"]
-ort-rocm = ["mmry-core/ort-rocm", "ner"]
-ort-nnapi = ["mmry-core/ort-nnapi", "ner"]
-ort-xnnpack = ["mmry-core/ort-xnnpack", "ner"]
-ort-load-dynamic = ["mmry-core/ort-load-dynamic", "ner"]

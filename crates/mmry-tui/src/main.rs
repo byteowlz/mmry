@@ -5,6 +5,7 @@ mod state;
 mod ui;
 
 use anyhow::Result;
+use clap::Parser;
 use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableMouseCapture;
 use crossterm::execute;
@@ -19,9 +20,25 @@ use std::io;
 use app::App;
 use events::EventHandler;
 
+#[derive(Parser)]
+#[command(name = "mmry-tui")]
+#[command(about = "TUI for mmry memory management", long_about = None)]
+#[command(version)]
+struct Cli {
+    #[arg(short = 's', long, help = "Store to use (defaults to config default)")]
+    store: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut app = App::new().await?;
+    let cli = Cli::parse();
+
+    // Validate store name if provided
+    if let Some(ref name) = cli.store {
+        mmry_core::stores::validate_store_name(name)?;
+    }
+
+    let mut app = App::new(cli.store.as_deref()).await?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

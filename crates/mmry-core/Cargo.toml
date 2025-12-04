@@ -28,11 +28,8 @@ libsqlite3-sys = "0.30"
 shellexpand = "3.1"
 unicode-segmentation = "1.12"
 tokenizers = { workspace = true }
-ort = { version = "=2.0.0-rc.10", default-features = false, optional = true }
-ndarray = { version = "0.16", optional = true }
 ureq = { version = "2.10", optional = true }
 
-# Service/daemon support
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
 sysinfo = { version = "0.32", optional = true }
@@ -40,16 +37,7 @@ sysinfo = { version = "0.32", optional = true }
 [features]
 default = ["service"]
 service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build"]
-ner = ["dep:ort", "dep:ndarray", "dep:ureq"]
-ort-coreml = ["dep:ort", "ort?/coreml"]
-ort-cuda = ["dep:ort", "ort?/cuda"]
-ort-directml = ["dep:ort", "ort?/directml"]
-ort-openvino = ["dep:ort", "ort?/openvino"]
-ort-tensorrt = ["dep:ort", "ort?/tensorrt"]
-ort-rocm = ["dep:ort", "ort?/rocm"]
-ort-nnapi = ["dep:ort", "ort?/nnapi"]
-ort-xnnpack = ["dep:ort", "ort?/xnnpack"]
-ort-load-dynamic = ["dep:ort", "ort?/load-dynamic"]
+ner = []
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

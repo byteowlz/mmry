@@ -264,8 +264,8 @@ async fn extract_and_link_entities(
         return Ok(0);
     }
 
-    // Extract unique entities from the memory content
-    let extracted = ner.extract_unique(&memory.content).await?;
+    // Extract unique entities from the memory content (uses labels from config)
+    let extracted = ner.extract_unique(&memory.content, None).await?;
 
     if extracted.is_empty() {
         return Ok(0);
@@ -274,8 +274,8 @@ async fn extract_and_link_entities(
     let mut entity_ids = Vec::new();
 
     // Create or get existing entities and link to memory
-    for (name, (entity_type, confidence)) in &extracted {
-        let entity = Entity::new(name.clone(), *entity_type);
+    for (name, (label, confidence)) in &extracted {
+        let entity = Entity::new(name.clone(), label.clone());
         let entity_id = graph_ops::upsert_entity(db.pool(), &entity).await?;
         entity_ids.push(entity_id);
 
@@ -286,7 +286,7 @@ async fn extract_and_link_entities(
         if !quiet {
             tracing::debug!(
                 entity = %name,
-                entity_type = %entity_type,
+                label = %label,
                 confidence = %confidence,
                 "Extracted entity"
             );

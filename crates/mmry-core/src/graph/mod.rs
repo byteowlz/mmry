@@ -4,8 +4,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::ner::EntityType;
-
 /// An entity in the knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
@@ -13,8 +11,8 @@ pub struct Entity {
     pub id: Uuid,
     /// Canonical name of the entity
     pub name: String,
-    /// Entity type (PER, LOC, ORG, MISC)
-    pub entity_type: EntityType,
+    /// Entity type/label (flexible string, e.g., "person", "company", "technology")
+    pub entity_type: String,
     /// Additional metadata (e.g., aliases, descriptions)
     pub metadata: serde_json::Value,
     /// When the entity was first seen
@@ -24,7 +22,7 @@ pub struct Entity {
 }
 
 impl Entity {
-    pub fn new(name: String, entity_type: EntityType) -> Self {
+    pub fn new(name: String, entity_type: String) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),

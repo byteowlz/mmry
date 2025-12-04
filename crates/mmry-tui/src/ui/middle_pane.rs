@@ -67,7 +67,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("  ")
             };
 
-            let line1 = Line::from(vec![
+            // Build the first line with optional store name
+            let mut line1_spans = vec![
                 selection_marker,
                 Span::styled(
                     format!("[{type_str}]"),
@@ -75,14 +76,31 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 Span::raw(" "),
                 Span::styled(date_str, Style::default().fg(Color::DarkGray)),
-                Span::raw(" | "),
-                Span::styled(&memory.category, Style::default().fg(Color::Green)),
-                Span::raw(" | "),
-                Span::styled(
-                    format!("★{}", memory.importance),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]);
+            ];
+
+            // Show store name when viewing all stores
+            if app.viewing_all_stores {
+                if let Some(store_name) = app.get_memory_store(memory.id) {
+                    line1_spans.push(Span::raw(" "));
+                    line1_spans.push(Span::styled(
+                        format!("@{store_name}"),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+            }
+
+            line1_spans.push(Span::raw(" | "));
+            line1_spans.push(Span::styled(
+                &memory.category,
+                Style::default().fg(Color::Green),
+            ));
+            line1_spans.push(Span::raw(" | "));
+            line1_spans.push(Span::styled(
+                format!("★{}", memory.importance),
+                Style::default().fg(Color::Yellow),
+            ));
+
+            let line1 = Line::from(line1_spans);
 
             let line2 = Line::from(vec![Span::raw("  "), Span::raw(content_preview)]);
 

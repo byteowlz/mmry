@@ -8,13 +8,22 @@
 #   - "$HOME/.local/share/mmry" works too
 
 [database]
-# Path to the SQLite database file
+# Path to the SQLite database file (legacy, prefer using stores)
 # You can use ~ or environment variables like $HOME or $XDG_DATA_HOME
 path = "~/.local/share/mmry/memories.db"
 # Backup database on startup
 backup_on_startup = true
 # Days to keep backup files
 backup_retention_days = 30
+
+[stores]
+# Directory where store databases are kept
+# Each store is a separate SQLite database file: <directory>/<store_name>.db
+directory = "~/.local/share/mmry/stores"
+# Default store to use when --store is not specified
+# Create stores with: mmry stores create <name>
+# List stores with: mmry stores list
+default = "default"
 
 [embeddings]
 # Enable embeddings for semantic search
@@ -168,3 +177,12 @@ auto_start = true
 idle_timeout_seconds = 300
 # Preload embedding model on service startup
 preload_models = true
+
+[external_api]
+# Expose HTTP endpoints for embeddings (/v1/embeddings) and reranking (/v1/rerank)
+enable = false
+# Bind address for the external API
+host = "127.0.0.1"
+port = 8081
+# Optional API key for requests (Authorization: Bearer <key>); leave empty to disable auth
+api_key = ""

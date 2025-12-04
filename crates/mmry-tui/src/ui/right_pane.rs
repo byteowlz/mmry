@@ -138,8 +138,6 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
-    use mmry_core::ner::EntityType;
-
     let is_active = app.active_pane == Pane::Right;
 
     let content = if let Some(memory) = app.selected_memory() {
@@ -168,16 +166,20 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
             )));
         } else {
             for entity in &app.selected_memory_entities {
-                let type_color = match entity.entity_type {
-                    EntityType::Per => Color::Magenta,
-                    EntityType::Loc => Color::Green,
-                    EntityType::Org => Color::Blue,
-                    EntityType::Misc => Color::Yellow,
+                // Color based on entity type string
+                let type_color = match entity.entity_type.to_lowercase().as_str() {
+                    "person" | "per" => Color::Magenta,
+                    "location" | "loc" => Color::Green,
+                    "organization" | "org" | "company" => Color::Blue,
+                    "technology" | "tech" => Color::Cyan,
+                    "project" => Color::Yellow,
+                    "date" | "time" | "event" => Color::LightRed,
+                    _ => Color::Gray,
                 };
 
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("  [{:4}] ", entity.entity_type.as_str()),
+                        format!("  [{:12}] ", entity.entity_type),
                         Style::default().fg(type_color),
                     ),
                     Span::styled(
@@ -215,16 +217,14 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(vec![
-            Span::styled(" PER ", Style::default().fg(Color::Magenta)),
-            Span::raw("Person  "),
-            Span::styled(" LOC ", Style::default().fg(Color::Green)),
-            Span::raw("Location"),
+            Span::styled(" person ", Style::default().fg(Color::Magenta)),
+            Span::styled(" location ", Style::default().fg(Color::Green)),
+            Span::styled(" org ", Style::default().fg(Color::Blue)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled(" ORG ", Style::default().fg(Color::Blue)),
-            Span::raw("Org     "),
-            Span::styled(" MISC", Style::default().fg(Color::Yellow)),
-            Span::raw(" Miscellaneous"),
+            Span::styled(" technology ", Style::default().fg(Color::Cyan)),
+            Span::styled(" project ", Style::default().fg(Color::Yellow)),
+            Span::styled(" other ", Style::default().fg(Color::Gray)),
         ]));
 
         lines

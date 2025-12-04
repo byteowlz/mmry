@@ -9,3 +9,4 @@ pub mod rm;
 pub mod search;
 pub mod service;
 pub mod stats;
+pub mod stores;

@@ -50,6 +50,12 @@ pub struct RerankerService {
     reranker: OnceCell<SharedReranker>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RerankScore {
+    pub index: usize,
+    pub score: f32,
+}
+
 impl RerankerService {
     pub fn from_config(config: &SearchConfig) -> Result<Self> {
         crate::embeddings::ensure_fastembed_cache_dir()?;
@@ -106,8 +112,19 @@ impl RerankerService {
     }
 
     pub async fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<usize>> {
+        let results = self.rerank_with_scores(query, documents).await?;
+        Ok(results.into_iter().map(|res| res.index).collect())
+    }
+
+    pub async fn rerank_with_scores(
+        &self,
+        query: &str,
+        documents: &[String],
+    ) -> Result<Vec<RerankScore>> {
         if !self.enabled || documents.len() <= 1 {
-            return Ok((0..documents.len()).collect());
+            return Ok((0..documents.len())
+                .map(|index| RerankScore { index, score: 0.0 })
+                .collect());
         }
 
         let model = self.ensure_model().await?;
@@ -119,7 +136,13 @@ impl RerankerService {
                 .map_err(|e| Error::Embedding(format!("Reranking failed: {e}")))?
         };
 
-        Ok(results.into_iter().map(|res| res.index).collect())
+        Ok(results
+            .into_iter()
+            .map(|res| RerankScore {
+                index: res.index,
+                score: res.score,
+            })
+            .collect())
     }
 }
 

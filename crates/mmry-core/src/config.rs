@@ -43,6 +43,8 @@ pub enum SearchMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub stores: StoresConfig,
     pub embeddings: EmbeddingsConfig,
     pub sparse_embeddings: SparseEmbeddingsConfig,
     pub search: SearchConfig,
@@ -55,6 +57,34 @@ pub struct Config {
     pub integrations: IntegrationsConfig,
     #[serde(default)]
     pub service: ServiceConfig,
+    #[serde(default)]
+    pub external_api: ExternalApiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoresConfig {
+    /// Directory where store databases are kept
+    pub directory: PathBuf,
+    /// Default store to use when --store is not specified
+    pub default: String,
+}
+
+impl Default for StoresConfig {
+    fn default() -> Self {
+        let data_dir = std::env::var("XDG_DATA_HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::data_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("mmry")
+            .join("stores");
+
+        Self {
+            directory: data_dir,
+            default: "default".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,10 +163,25 @@ pub struct EntitiesConfig {
 pub struct NerConfig {
     /// Enable NER-based entity extraction
     pub enabled: bool,
-    /// Model to use (HuggingFace repo name)
+    /// GLiNER model to use (HuggingFace repo name)
+    /// Recommended: "urchade/gliner_multi-v2.1" for multilingual
     pub model: String,
     /// Minimum confidence threshold for accepting entities (0.0 - 1.0)
     pub confidence_threshold: f32,
+    /// Entity labels to extract (GLiNER is zero-shot, so you can specify any labels)
+    /// Examples: ["person", "company", "technology", "project", "location"]
+    #[serde(default = "default_ner_labels")]
+    pub labels: Vec<String>,
+}
+
+fn default_ner_labels() -> Vec<String> {
+    vec![
+        "person".to_string(),
+        "organization".to_string(),
+        "location".to_string(),
+        "technology".to_string(),
+        "project".to_string(),
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +215,19 @@ pub struct ServiceConfig {
     pub preload_models: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExternalApiConfig {
+    /// Expose HTTP API for embeddings and reranking
+    pub enable: bool,
+    /// Host to bind the external API server
+    pub host: String,
+    /// Port for the external API server
+    pub port: u16,
+    /// Optional API key required for requests (Authorization: Bearer <key>)
+    pub api_key: Option<String>,
+}
+
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
@@ -181,12 +239,24 @@ impl Default for ServiceConfig {
     }
 }
 
+impl Default for ExternalApiConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            host: "127.0.0.1".to_string(),
+            port: 8081,
+            api_key: None,
+        }
+    }
+}
+
 impl Default for NerConfig {
     fn default() -> Self {
         Self {
             enabled: true, // Enabled by default when ner feature is compiled in
-            model: "onnx-community/distilbert-NER-ONNX".to_string(),
-            confidence_threshold: 0.7,
+            model: "urchade/gliner_multi-v2.1".to_string(), // Multilingual GLiNER
+            confidence_threshold: 0.5, // GLiNER works well with 0.5
+            labels: default_ner_labels(),
         }
     }
 }
@@ -206,6 +276,10 @@ impl Default for Config {
                 path: data_dir.join("memories.db"),
                 backup_on_startup: true,
                 backup_retention_days: 30,
+            },
+            stores: StoresConfig {
+                directory: data_dir.join("stores"),
+                default: "default".to_string(),
             },
             embeddings: EmbeddingsConfig {
                 enabled: true,
@@ -270,6 +344,7 @@ impl Default for Config {
                 idle_timeout_seconds: 300, // 5 minutes
                 preload_models: true,
             },
+            external_api: ExternalApiConfig::default(),
         }
     }
 }
@@ -326,10 +401,21 @@ impl Config {
     /// Expand tilde and environment variables in all path fields
     fn expand_paths(&mut self) {
         self.database.path = expand_path(&self.database.path);
+        self.stores.directory = expand_path(&self.stores.directory);
 
         if let Some(ref data_dir) = self.integrations.lst.data_dir {
             self.integrations.lst.data_dir = Some(expand_path(data_dir));
         }
+    }
+
+    /// Get the database path for a specific store
+    pub fn store_path(&self, store_name: &str) -> PathBuf {
+        self.stores.directory.join(format!("{store_name}.db"))
+    }
+
+    /// Get the database path for the default store
+    pub fn default_store_path(&self) -> PathBuf {
+        self.store_path(&self.stores.default)
     }
 
     pub fn save(&self) -> crate::Result<()> {
