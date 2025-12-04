@@ -252,6 +252,142 @@ pub async fn list_all_stores(
     Ok(all_results)
 }
 
+/// Move a memory from one store to another
+/// Returns the memory as it exists in the new store
+pub async fn move_memory_to_store(
+    config: &Config,
+    memory_id: uuid::Uuid,
+    from_store: &str,
+    to_store: &str,
+) -> crate::Result<Memory> {
+    if from_store == to_store {
+        return Err(crate::Error::Config(
+            "Source and destination stores are the same".to_string(),
+        ));
+    }
+
+    // Open source store and get the memory
+    let from_db = Database::init_store(config, Some(from_store)).await?;
+    let memory = crate::database::operations::get_memory(from_db.pool(), memory_id)
+        .await?
+        .ok_or_else(|| {
+            crate::Error::Config(format!(
+                "Memory {memory_id} not found in store '{from_store}'"
+            ))
+        })?;
+
+    // Open destination store and insert the memory
+    let to_db = Database::init_store(config, Some(to_store)).await?;
+    crate::database::operations::insert_memory(to_db.pool(), &memory).await?;
+
+    // Delete from source store
+    crate::database::operations::delete_memory(from_db.pool(), memory_id).await?;
+
+    // Close connections
+    from_db.close().await;
+    to_db.close().await;
+
+    Ok(memory)
+}
+
+/// Export format for memories
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportedMemory {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub memory_type: String,
+    pub content: String,
+    pub category: String,
+    pub tags: Vec<String>,
+    pub importance: i32,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+impl From<&Memory> for ExportedMemory {
+    fn from(memory: &Memory) -> Self {
+        Self {
+            id: memory.id.to_string(),
+            memory_type: format!("{:?}", memory.memory_type).to_lowercase(),
+            content: memory.content.clone(),
+            category: memory.category.clone(),
+            tags: memory.tags.clone(),
+            importance: memory.importance,
+            created_at: memory.created_at.to_rfc3339(),
+            updated_at: memory.updated_at.to_rfc3339(),
+            store: None,
+            metadata: memory.metadata.clone(),
+        }
+    }
+}
+
+/// Export result containing memories and metadata
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportResult {
+    pub exported_at: String,
+    pub store: String,
+    pub memory_count: usize,
+    pub memories: Vec<ExportedMemory>,
+}
+
+/// Export memories from a single store to JSON
+pub async fn export_store_to_json(
+    config: &Config,
+    store_name: &str,
+) -> crate::Result<ExportResult> {
+    let db = Database::init_store(config, Some(store_name)).await?;
+    let memories = crate::database::operations::list_memories(db.pool(), None, i64::MAX).await?;
+    db.close().await;
+
+    let exported: Vec<ExportedMemory> = memories.iter().map(ExportedMemory::from).collect();
+
+    Ok(ExportResult {
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        store: store_name.to_string(),
+        memory_count: exported.len(),
+        memories: exported,
+    })
+}
+
+/// Export memories from all stores to JSON
+pub async fn export_all_stores_to_json(config: &Config) -> crate::Result<ExportResult> {
+    let stores = list_stores(config)?;
+    let mut all_memories: Vec<ExportedMemory> = Vec::new();
+
+    for store_info in stores {
+        let db = Database::init_store(config, Some(&store_info.name)).await?;
+        let memories =
+            crate::database::operations::list_memories(db.pool(), None, i64::MAX).await?;
+        db.close().await;
+
+        for memory in memories {
+            let mut exported = ExportedMemory::from(&memory);
+            exported.store = Some(store_info.name.clone());
+            all_memories.push(exported);
+        }
+    }
+
+    // Sort by created_at descending
+    all_memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    Ok(ExportResult {
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        store: "all".to_string(),
+        memory_count: all_memories.len(),
+        memories: all_memories,
+    })
+}
+
+/// Write export result to a file
+pub fn write_export_to_file(export: &ExportResult, path: &std::path::Path) -> crate::Result<()> {
+    let json = serde_json::to_string_pretty(export)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

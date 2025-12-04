@@ -50,6 +50,9 @@ enum Commands {
     /// Show statistics
     Stats(commands::stats::StatsCmd),
 
+    /// Export memories to JSON file
+    Export(commands::export::ExportCmd),
+
     /// Regenerate embeddings for existing memories
     Reembed(commands::reembed::ReembedCmd),
 
@@ -119,6 +122,9 @@ async fn async_main() -> anyhow::Result<()> {
         Commands::Rerankers(cmd) => return commands::rerankers::handle(cmd).await,
         Commands::Service(cmd) => return commands::service::handle(cmd).await,
         Commands::Stores(cmd) => return commands::stores::handle(cmd, &config).await,
+        Commands::Export(cmd) => {
+            return commands::export::handle(cmd, &config, cli.store.as_deref()).await
+        }
         other => other,
     };
 
@@ -200,7 +206,8 @@ async fn async_main() -> anyhow::Result<()> {
         | Commands::Rerankers(_)
         | Commands::Init(_)
         | Commands::Service(_)
-        | Commands::Stores(_) => {
+        | Commands::Stores(_)
+        | Commands::Export(_) => {
             unreachable!()
         }
     };

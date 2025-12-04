@@ -16,10 +16,14 @@ use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
+use mmry_core::stores::export_all_stores_to_json;
+use mmry_core::stores::export_store_to_json;
 use mmry_core::stores::list_all_stores;
 use mmry_core::stores::list_stores;
+use mmry_core::stores::move_memory_to_store;
 use mmry_core::stores::store_exists;
 use mmry_core::stores::validate_store_name;
+use mmry_core::stores::write_export_to_file;
 use mmry_core::stores::StoreInfo;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -524,6 +528,8 @@ impl App {
             AppMode::CategorySelect(_) => self.handle_category_select_mode(action).await,
             AppMode::StoreSelect(_) => self.handle_store_select_mode(action).await,
             AppMode::StoreCreate(_) => self.handle_store_create_mode(action).await,
+            AppMode::MoveToStore(_, _) => self.handle_move_to_store_mode(action).await,
+            AppMode::Export(_) => self.handle_export_mode(action).await,
         }
     }
 
@@ -678,6 +684,33 @@ impl App {
                     let current_idx = self.current_store_index();
                     self.mode = AppMode::StoreSelect(current_idx);
                 }
+            }
+
+            KeyAction::Char('m') => {
+                // Move memory to another store
+                if self.viewing_all_stores {
+                    self.status_message =
+                        Some("Cannot move memories while viewing all stores".to_string());
+                } else {
+                    // Get memory ID first to avoid borrow issues
+                    let memory_id = self.selected_memory().map(|m| m.id);
+                    if let Some(memory_id) = memory_id {
+                        self.available_stores = list_stores(&self.config).unwrap_or_default();
+                        if self.available_stores.len() < 2 {
+                            self.status_message =
+                                Some("Need at least 2 stores to move memories".to_string());
+                        } else {
+                            self.mode = AppMode::MoveToStore(memory_id, 0);
+                        }
+                    } else {
+                        self.status_message = Some("No memory selected".to_string());
+                    }
+                }
+            }
+
+            KeyAction::Char('E') => {
+                // Export memories
+                self.mode = AppMode::Export(false);
             }
 
             _ => {
@@ -1383,6 +1416,158 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        Ok(true)
+    }
+
+    async fn handle_move_to_store_mode(&mut self, action: KeyAction) -> Result<bool> {
+        // Extract current state to avoid borrow issues
+        let (memory_id, current_index) = if let AppMode::MoveToStore(id, idx) = self.mode {
+            (id, idx)
+        } else {
+            return Ok(true);
+        };
+
+        // Filter out current store from available stores
+        let other_stores: Vec<&StoreInfo> = self
+            .available_stores
+            .iter()
+            .filter(|s| s.name != self.current_store)
+            .collect();
+
+        if other_stores.is_empty() {
+            self.mode = AppMode::Normal;
+            self.status_message = Some("No other stores to move to".to_string());
+            return Ok(true);
+        }
+
+        match action {
+            KeyAction::Up | KeyAction::Char('k') => {
+                self.mode = AppMode::MoveToStore(memory_id, current_index.saturating_sub(1));
+            }
+            KeyAction::Down | KeyAction::Char('j') => {
+                if current_index < other_stores.len().saturating_sub(1) {
+                    self.mode = AppMode::MoveToStore(memory_id, current_index + 1);
+                }
+            }
+            KeyAction::Select => {
+                if let Some(target_store) = other_stores.get(current_index) {
+                    let target_name = target_store.name.clone();
+                    let source_name = self.current_store.clone();
+                    self.mode = AppMode::Normal;
+
+                    match move_memory_to_store(&self.config, memory_id, &source_name, &target_name)
+                        .await
+                    {
+                        Ok(_) => {
+                            self.refresh_memories().await?;
+                            self.status_message =
+                                Some(format!("Moved memory to store '{target_name}'"));
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to move memory: {e}"));
+                        }
+                    }
+                } else {
+                    self.mode = AppMode::Normal;
+                }
+            }
+            KeyAction::Escape => {
+                self.mode = AppMode::Normal;
+            }
+            KeyAction::Char('1'..='9') => {
+                if let KeyAction::Char(c) = action {
+                    let num = c.to_digit(10).unwrap() as usize - 1;
+                    if num < other_stores.len() {
+                        let target_name = other_stores[num].name.clone();
+                        let source_name = self.current_store.clone();
+                        self.mode = AppMode::Normal;
+
+                        match move_memory_to_store(
+                            &self.config,
+                            memory_id,
+                            &source_name,
+                            &target_name,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                self.refresh_memories().await?;
+                                self.status_message =
+                                    Some(format!("Moved memory to store '{target_name}'"));
+                            }
+                            Err(e) => {
+                                self.status_message = Some(format!("Failed to move memory: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    async fn handle_export_mode(&mut self, action: KeyAction) -> Result<bool> {
+        // Extract current state
+        let export_all = if let AppMode::Export(all) = self.mode {
+            all
+        } else {
+            return Ok(true);
+        };
+
+        match action {
+            KeyAction::Char('a') | KeyAction::Char('A') => {
+                // Toggle export all stores
+                self.mode = AppMode::Export(true);
+            }
+            KeyAction::Char('c') | KeyAction::Char('C') => {
+                // Toggle export current store only
+                self.mode = AppMode::Export(false);
+            }
+            KeyAction::Select => {
+                self.mode = AppMode::Normal;
+
+                // Generate filename with timestamp
+                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                let filename = if export_all {
+                    format!("mmry_export_all_{timestamp}.json")
+                } else {
+                    format!("mmry_export_{}_{timestamp}.json", self.current_store)
+                };
+
+                // Export to current directory
+                let path = std::path::PathBuf::from(&filename);
+
+                let result = if export_all {
+                    export_all_stores_to_json(&self.config).await
+                } else {
+                    export_store_to_json(&self.config, &self.current_store).await
+                };
+
+                match result {
+                    Ok(export) => {
+                        let count = export.memory_count;
+                        match write_export_to_file(&export, &path) {
+                            Ok(()) => {
+                                self.status_message =
+                                    Some(format!("Exported {count} memories to {filename}"));
+                            }
+                            Err(e) => {
+                                self.status_message =
+                                    Some(format!("Failed to write export file: {e}"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to export: {e}"));
+                    }
+                }
+            }
+            KeyAction::Escape => {
+                self.mode = AppMode::Normal;
+            }
+            _ => {}
         }
         Ok(true)
     }

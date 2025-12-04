@@ -23,6 +23,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         AppMode::CategorySelect(_) => "SELECT",
         AppMode::StoreSelect(_) => "STORE",
         AppMode::StoreCreate(_) => "NEW STORE",
+        AppMode::MoveToStore(_, _) => "MOVE",
+        AppMode::Export(_) => "EXPORT",
     };
 
     let mode_color = match &app.mode {
@@ -37,6 +39,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         AppMode::CategorySelect(_) => Color::Green,
         AppMode::StoreSelect(_) => Color::Magenta,
         AppMode::StoreCreate(_) => Color::Green,
+        AppMode::MoveToStore(_, _) => Color::Yellow,
+        AppMode::Export(_) => Color::Cyan,
     };
 
     let mut spans = vec![

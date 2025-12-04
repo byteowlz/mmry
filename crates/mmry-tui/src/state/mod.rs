@@ -38,6 +38,10 @@ pub enum AppMode {
     StoreSelect(usize),
     /// Store creation mode (input buffer for new store name)
     StoreCreate(String),
+    /// Move memory to another store (memory_id, selected store index)
+    MoveToStore(uuid::Uuid, usize),
+    /// Export memories mode (whether to export all stores)
+    Export(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]

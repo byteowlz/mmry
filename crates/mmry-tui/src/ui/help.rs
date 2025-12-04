@@ -96,6 +96,8 @@ pub fn draw(f: &mut Frame, _app: &App) {
         Line::from("  S          Switch store (select from list)"),
         Line::from("             0 = All Stores, 1-9 = individual stores"),
         Line::from("             n = Create new store (in store menu)"),
+        Line::from("  m          Move selected memory to another store"),
+        Line::from("  E          Export memories to JSON file"),
         Line::from(""),
         Line::from(Span::styled(
             "General:",

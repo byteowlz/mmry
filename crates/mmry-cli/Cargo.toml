@@ -16,6 +16,7 @@ mmry-core = { path = "../mmry-core", features = ["service"] }
 tokio = { workspace = true }
 libc = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 serde = { workspace = true }

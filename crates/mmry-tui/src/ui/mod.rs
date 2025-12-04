@@ -49,6 +49,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         AppMode::CategorySelect(idx) => whichkey::draw_category_select(f, &app.categories, *idx),
         AppMode::StoreSelect(idx) => draw_store_select(f, app, *idx),
         AppMode::StoreCreate(ref input) => draw_store_create(f, input),
+        AppMode::MoveToStore(_, idx) => draw_move_to_store(f, app, *idx),
+        AppMode::Export(all) => draw_export_dialog(f, app, *all),
         _ => {}
     }
 }
@@ -399,6 +401,151 @@ fn draw_store_create(f: &mut Frame, input: &str) {
             .title(" Create New Store ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green)),
+    );
+
+    f.render_widget(paragraph, area);
+}
+
+fn draw_move_to_store(f: &mut Frame, app: &App, selected_idx: usize) {
+    use mmry_core::stores::format_size;
+    use ratatui::style::Color;
+    use ratatui::style::Modifier;
+    use ratatui::style::Style;
+    use ratatui::text::Line;
+    use ratatui::text::Span;
+    use ratatui::widgets::Block;
+    use ratatui::widgets::Borders;
+    use ratatui::widgets::Clear;
+    use ratatui::widgets::List;
+    use ratatui::widgets::ListItem;
+
+    let area = centered_rect(50, 40, f.area());
+
+    f.render_widget(Clear, area);
+
+    // Filter out current store
+    let other_stores: Vec<&mmry_core::stores::StoreInfo> = app
+        .available_stores
+        .iter()
+        .filter(|s| s.name != app.current_store)
+        .collect();
+
+    let items: Vec<ListItem> = other_stores
+        .iter()
+        .enumerate()
+        .map(|(i, store)| {
+            let is_selected = i == selected_idx;
+
+            let prefix = if is_selected { "> " } else { "  " };
+            let number = if i < 9 {
+                format!("{}. ", i + 1)
+            } else {
+                "   ".to_string()
+            };
+
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(number, Style::default().fg(Color::DarkGray)),
+                Span::styled(&store.name, style),
+                Span::raw(" - "),
+                Span::styled(
+                    format_size(store.size_bytes),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .title(format!(" Move to Store (from: {}) ", app.current_store))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+
+    f.render_widget(list, area);
+}
+
+fn draw_export_dialog(f: &mut Frame, app: &App, export_all: bool) {
+    use ratatui::style::Color;
+    use ratatui::style::Modifier;
+    use ratatui::style::Style;
+    use ratatui::text::Line;
+    use ratatui::text::Span;
+    use ratatui::widgets::Block;
+    use ratatui::widgets::Borders;
+    use ratatui::widgets::Clear;
+    use ratatui::widgets::Paragraph;
+
+    let area = centered_rect(50, 30, f.area());
+
+    f.render_widget(Clear, area);
+
+    let current_style = if !export_all {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let all_style = if export_all {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let content = vec![
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "  Export memories to JSON file",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(if !export_all { "> " } else { "  " }, current_style),
+            Span::styled("[c]", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" Current store ({})", app.current_store_display()),
+                current_style,
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(if export_all { "> " } else { "  " }, all_style),
+            Span::styled("[a]", Style::default().fg(Color::Yellow)),
+            Span::styled(" All stores", all_style),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            format!("  Memories to export: {}", app.memories.len()),
+            Style::default().fg(Color::DarkGray),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Enter", Style::default().fg(Color::Green)),
+            Span::raw(" to export  "),
+            Span::styled("Esc", Style::default().fg(Color::Red)),
+            Span::raw(" to cancel"),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(content).block(
+        Block::default()
+            .title(" Export Memories ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
     );
 
     f.render_widget(paragraph, area);
