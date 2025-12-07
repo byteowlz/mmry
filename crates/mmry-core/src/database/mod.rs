@@ -378,6 +378,106 @@ impl Database {
             tracing::info!("Chunking columns and indices added");
         }
 
+        // Ensure agent and provenance tables exist
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS agents (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                description TEXT,
+                metadata JSON DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS agent_events (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                status TEXT,
+                payload JSON,
+                span_id TEXT,
+                memory_id TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id)")
+            .execute(pool)
+            .await?;
+
+        // Ensure bridge block ledger exists
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bridge_blocks (
+                block_id TEXT PRIMARY KEY,
+                span_id TEXT,
+                topic_label TEXT,
+                keywords JSON DEFAULT '[]',
+                status TEXT,
+                exit_reason TEXT,
+                content_json JSON,
+                agent_id TEXT REFERENCES agents(id),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_bridge_blocks_span ON bridge_blocks(span_id)")
+            .execute(pool)
+            .await?;
+
+        // Ensure fact and profile tables exist
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS facts (
+                id TEXT PRIMARY KEY,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                source_span TEXT,
+                turn_id TEXT,
+                observed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                recency_score REAL DEFAULT 1.0,
+                metadata JSON DEFAULT '{}',
+                agent_id TEXT REFERENCES agents(id)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_key ON facts(fact_key)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_observed ON facts(observed_at DESC)")
+            .execute(pool)
+            .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                id TEXT PRIMARY KEY,
+                profile JSON NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
     }
 
@@ -553,6 +653,7 @@ mod tests {
     use crate::memory::Memory;
     use crate::memory::MemoryType;
     use chrono::Utc;
+    use serde_json::json;
     use sqlx::sqlite::SqlitePoolOptions;
     use tempfile::tempdir;
 
@@ -718,6 +819,57 @@ mod tests {
 
         // Verify legacy database was removed
         assert!(!legacy_path.exists());
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_provenance_and_bridge_blocks_roundtrip() -> crate::Result<()> {
+        use crate::agents::AgentEvent;
+        use crate::agents::AgentRecord;
+        use crate::agents::BridgeBlock;
+        use crate::agents::FactRecord;
+        use crate::agents::UserProfileEntry;
+
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("agent.db");
+
+        let db = Database::init(&db_path, TEST_DIM).await?;
+
+        let mut agent = AgentRecord::new("tester", "sidecar");
+        agent.description = Some("integration test agent".to_string());
+        operations::upsert_agent(db.pool(), &agent).await?;
+
+        let mut block = BridgeBlock::new();
+        block.span_id = Some("span-1".to_string());
+        block.topic_label = Some("topic".to_string());
+        block.keywords = vec!["k1".to_string(), "k2".to_string()];
+        block.agent_id = Some(agent.id);
+        operations::upsert_bridge_block(db.pool(), &block).await?;
+
+        let blocks = operations::list_bridge_blocks_by_span(db.pool(), Some("span-1"), 10).await?;
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].span_id.as_deref(), Some("span-1"));
+        assert_eq!(blocks[0].agent_id, Some(agent.id));
+
+        let mut fact = FactRecord::new("key", "value");
+        fact.agent_id = Some(agent.id);
+        operations::upsert_fact(db.pool(), &fact).await?;
+
+        let facts = operations::list_facts_by_key(db.pool(), "key", 10).await?;
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].fact_value, "value");
+        assert_eq!(facts[0].agent_id, Some(agent.id));
+
+        let mut event = AgentEvent::new(agent.id, "route");
+        event.payload = json!({ "query": "hello" });
+        operations::record_agent_event(db.pool(), &event).await?;
+
+        let profile = UserProfileEntry::new(json!({"name": "tester"}));
+        operations::set_user_profile(db.pool(), &profile).await?;
+        let loaded = operations::get_user_profile(db.pool(), profile.id).await?;
+        assert!(loaded.is_some());
 
         db.close().await;
         Ok(())

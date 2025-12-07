@@ -122,8 +122,6 @@ impl Chunker {
                         method: ChunkMethod::Paragraph,
                         index,
                     });
-                    index += 1;
-                    current_chunk = String::new();
                 }
                 // This paragraph is too large, abort paragraph chunking
                 return Ok(Vec::new());
@@ -193,8 +191,6 @@ impl Chunker {
                         method: ChunkMethod::Sentence,
                         index,
                     });
-                    index += 1;
-                    current_chunk = String::new();
                 }
                 return Ok(Vec::new());
             }

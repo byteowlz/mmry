@@ -7,13 +7,31 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Json;
 use axum::Router;
+use mmry_core::agents::AgentEvent;
+use mmry_core::agents::AgentRecord;
+use mmry_core::agents::BridgeBlock;
+use mmry_core::agents::FactRecord;
+use mmry_core::analysis::Analyzer;
+use mmry_core::analysis::AnalyzerRouting;
+use mmry_core::analysis::NoOpAnalyzer;
 use mmry_core::config::Config;
+use mmry_core::database::operations;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankScore;
 use mmry_core::search::SearchService;
+use rig::client::CompletionClient;
+use rig::completion::AssistantContent;
+use rig::completion::CompletionError;
+use rig::completion::CompletionModel;
+use rig::completion::CompletionResponse as RigCompletionResponse;
+use rig::message::Message as RigMessage;
+use rig::message::UserContent;
+use rig::one_or_many::OneOrMany;
+use rig::providers::openai;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +40,7 @@ use tonic::transport::Server;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
+use uuid::Uuid;
 
 // Include generated protobuf code
 pub mod embeddings {
@@ -36,6 +55,7 @@ use embeddings::*;
 struct ExternalApiState {
     state: Arc<ServiceState>,
     api_key: Option<String>,
+    analyzer: Arc<dyn Analyzer + Send + Sync>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +109,132 @@ struct RerankItem {
     relevance_score: f32,
 }
 
+#[derive(Debug, Deserialize)]
+struct AgentRouteRequest {
+    query: String,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    span_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentMemory {
+    id: String,
+    content: String,
+    category: String,
+    tags: Vec<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentRoutingPayload {
+    chosen_block: Option<String>,
+    is_new_topic: bool,
+    rationale: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentRouteResponse {
+    routing: AgentRoutingPayload,
+    contexts: Vec<AgentMemory>,
+    bridge_blocks: Vec<BridgeBlock>,
+    facts: Vec<FactRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct RigAnalyzer {
+    model_name: String,
+    client: openai::CompletionsClient,
+}
+
+impl RigAnalyzer {
+    fn new(model_name: String, client: openai::CompletionsClient) -> Self {
+        Self { model_name, client }
+    }
+}
+
+impl Analyzer for RigAnalyzer {
+    fn extract_facts(&self, _content: &str) -> mmry_core::Result<Vec<FactRecord>> {
+        Ok(Vec::new())
+    }
+
+    fn route(
+        &self,
+        _query: &str,
+        _candidates: &[BridgeBlock],
+    ) -> mmry_core::Result<AnalyzerRouting> {
+        let prompt = "You route user queries to conversation bridge blocks. Reply with JSON: {\"chosen_block\": \"<uuid-or-null>\", \"is_new_topic\": true|false, \"reason\": \"...\"}.";
+        let user_payload = json!({
+            "query": _query,
+            "bridge_blocks": _candidates.iter().map(|b| {
+                json!({
+                    "block_id": b.block_id.to_string(),
+                    "topic": b.topic_label,
+                    "keywords": b.keywords,
+                    "status": b.status,
+                })
+            }).collect::<Vec<_>>()
+        })
+        .to_string();
+
+        let model = self.client.completion_model(self.model_name.clone());
+        let request = model
+            .completion_request(RigMessage::User {
+                content: OneOrMany::one(UserContent::text(user_payload)),
+            })
+            .preamble(prompt.to_string())
+            .temperature(0.0)
+            .build();
+
+        let fut = {
+            let model = model.clone();
+            async move { model.completion(request).await }
+        };
+        let response: RigCompletionResponse<_> = block_on_in_place(fut)
+            .map_err(|e| mmry_core::Error::Service(format!("Rig completion failed: {e}")))?;
+
+        let routing = response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                AssistantContent::Text(t) => {
+                    serde_json::from_str::<serde_json::Value>(&t.text).ok()
+                }
+                _ => None,
+            })
+            .and_then(|val| parse_routing_from_content(&val));
+
+        Ok(routing.unwrap_or_else(AnalyzerRouting::new_topic))
+    }
+}
+
+fn parse_routing_from_content(content: &serde_json::Value) -> Option<AnalyzerRouting> {
+    let chosen_block = content
+        .get("chosen_block")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok());
+    let is_new_topic = content
+        .get("is_new_topic")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let rationale = content
+        .get("reason")
+        .or_else(|| content.get("rationale"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+
+    Some(AnalyzerRouting {
+        chosen_block,
+        is_new_topic,
+        rationale,
+    })
+}
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -445,6 +591,92 @@ async fn rerank_handler(
     }))
 }
 
+async fn agent_route_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<AgentRouteRequest>,
+) -> Result<Json<AgentRouteResponse>, ApiError> {
+    enforce_api_key(&app_state.api_key, &headers)?;
+    app_state.state.record_activity().await;
+
+    let limit = payload
+        .limit
+        .unwrap_or(app_state.state.search_config().default_limit as i64)
+        .max(1);
+
+    let mut agent = AgentRecord::new("agent", "external");
+    if let Some(agent_id) = payload
+        .agent_id
+        .as_ref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+    {
+        agent.id = agent_id;
+    }
+
+    operations::upsert_agent(app_state.state.db.pool(), &agent)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to upsert agent: {e}")))?;
+
+    let search_service = SearchService::new(
+        app_state.state.db.pool().clone(),
+        app_state.state.search_config(),
+        Arc::clone(&app_state.state.embeddings_wrapper),
+        Arc::clone(&app_state.state.sparse_embeddings),
+        Arc::clone(&app_state.state.reranker),
+    );
+
+    let memories = search_service
+        .search_with_options(
+            &payload.query,
+            payload.category.as_deref(),
+            limit,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("Search failed: {e}")))?;
+
+    let contexts: Vec<AgentMemory> = memories.into_iter().map(AgentMemory::from).collect();
+
+    let bridge_blocks = operations::list_bridge_blocks_by_span(
+        app_state.state.db.pool(),
+        payload.span_id.as_deref(),
+        5,
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("Failed to load bridge blocks: {e}")))?;
+
+    let facts = operations::list_facts_by_key(app_state.state.db.pool(), &payload.query, 5)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to load facts: {e}")))?;
+
+    let routing = app_state
+        .analyzer
+        .route(&payload.query, &bridge_blocks)
+        .map_err(|e| ApiError::internal(format!("Routing failed: {e}")))?;
+
+    let mut event = AgentEvent::new(agent.id, "route");
+    event.span_id = payload.span_id.clone();
+    event.payload = serde_json::json!({
+        "query": payload.query,
+        "limit": limit,
+        "category": payload.category,
+        "contexts": contexts.len(),
+        "bridge_blocks": bridge_blocks.len(),
+    });
+
+    operations::record_agent_event(app_state.state.db.pool(), &event)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to persist agent event: {e}")))?;
+
+    Ok(Json(AgentRouteResponse {
+        routing: to_routing_payload(routing),
+        contexts,
+        bridge_blocks,
+        facts,
+    }))
+}
+
 pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -> Result<()> {
     let state = Arc::new(ServiceState::new(config.clone()).await?);
 
@@ -501,12 +733,18 @@ async fn run_http_api(
 ) -> Result<()> {
     let api_key = normalize_api_key(&api_config.api_key);
     let addr: std::net::SocketAddr = format!("{}:{}", api_config.host, api_config.port).parse()?;
+    let analyzer = build_analyzer(&state.config);
 
-    let external_state = ExternalApiState { state, api_key };
+    let external_state = ExternalApiState {
+        state,
+        api_key,
+        analyzer,
+    };
 
     let app = Router::new()
         .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/rerank", post(rerank_handler))
+        .route("/v1/agents/route", post(agent_route_handler))
         .with_state(external_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -549,6 +787,105 @@ fn memory_to_proto(memory: Memory) -> MemoryResult {
     }
 }
 
+impl From<Memory> for AgentMemory {
+    fn from(memory: Memory) -> Self {
+        AgentMemory {
+            id: memory.id.to_string(),
+            content: memory.content,
+            category: memory.category,
+            tags: memory.tags,
+            created_at: memory.created_at.to_rfc3339(),
+            updated_at: memory.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+fn to_routing_payload(routing: AnalyzerRouting) -> AgentRoutingPayload {
+    AgentRoutingPayload {
+        chosen_block: routing.chosen_block.map(|id| id.to_string()),
+        is_new_topic: routing.is_new_topic,
+        rationale: routing.rationale,
+    }
+}
+
+fn block_on_in_place<F, T>(fut: F) -> Result<T, CompletionError>
+where
+    F: std::future::Future<Output = Result<T, CompletionError>> + Send + 'static,
+    T: Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(fut))
+    } else {
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| CompletionError::RequestError(Box::new(e)))?;
+            rt.block_on(fut)
+        });
+
+        match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(CompletionError::RequestError(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                "analyzer thread panicked",
+            )))),
+        }
+    }
+}
+
+fn normalize_rig_base_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let base = if trimmed.ends_with("/chat/completions") {
+        trimmed
+            .trim_end_matches("/chat/completions")
+            .trim_end_matches('/')
+    } else {
+        trimmed
+    };
+
+    let base = if base.ends_with("/v1") {
+        base.to_string()
+    } else {
+        format!("{base}/v1")
+    };
+
+    Some(base)
+}
+
+fn build_analyzer(config: &Config) -> Arc<dyn Analyzer + Send + Sync> {
+    if config.analyzer.enabled && config.analyzer.provider.eq_ignore_ascii_case("rig") {
+        if let Some(base) = config
+            .analyzer
+            .endpoint
+            .as_deref()
+            .and_then(normalize_rig_base_url)
+        {
+            let api_key = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .unwrap_or_else(|| "mmry-local".to_string());
+            let builder = openai::CompletionsClient::builder()
+                .api_key(&api_key)
+                .base_url(&base);
+            if let Ok(client) = builder.build() {
+                let model = config
+                    .analyzer
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "qwen/qwen3-coder-30b".to_string());
+                return Arc::new(RigAnalyzer::new(model, client));
+            }
+        }
+    }
+
+    Arc::new(NoOpAnalyzer::default())
+}
+
 async fn idle_timeout_task(state: Arc<ServiceState>, timeout_seconds: u64) {
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -587,5 +924,226 @@ async fn shutdown_signal() {
         _ = terminate => {
             tracing::info!("Received SIGTERM, shutting down");
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::post as axum_post;
+    use axum::Json;
+    use axum::Router as AxumRouter;
+    use std::net::SocketAddr;
+    use tempfile::tempdir;
+    use tokio::sync::oneshot;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_route_returns_new_topic_and_logs_event() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.analyzer.enabled = true;
+        config.analyzer.provider = "rig".to_string();
+        config.analyzer.model = Some("rig-local".to_string());
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+        };
+
+        let payload = AgentRouteRequest {
+            query: "hello world".to_string(),
+            limit: Some(5),
+            category: None,
+            span_id: None,
+            agent_id: None,
+        };
+
+        let response =
+            agent_route_handler(AxumState(external_state), HeaderMap::new(), Json(payload))
+                .await
+                .expect("route handler ok");
+
+        assert!(response.routing.is_new_topic);
+        assert_eq!(response.contexts.len(), 0);
+
+        let event_count = operations::count_agent_events(state.db.pool())
+            .await
+            .expect("count events");
+        assert_eq!(event_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_route_uses_rig_endpoint_when_configured() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.analyzer.enabled = true;
+        config.analyzer.provider = "rig".to_string();
+
+        let desired_block = uuid::Uuid::new_v4();
+
+        // Start mock server
+        let (addr, shutdown_tx, ready_rx) = spawn_mock_rig_server(desired_block).await;
+        let endpoint = format!("http://{addr}/v1", addr = addr);
+        config.analyzer.endpoint = Some(endpoint.clone());
+
+        // Wait until server signals readiness
+        let _ = ready_rx.await;
+
+        // Sanity check mock endpoint is reachable
+        let ping_client = reqwest::Client::new();
+        let ping_url = format!("{endpoint}/chat/completions");
+        ping_client
+            .post(ping_url)
+            .json(&json!({"ping": true}))
+            .send()
+            .await
+            .expect("mock server reachable");
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        // Insert a bridge block so it can be returned in response
+        let mut block = BridgeBlock::new();
+        block.block_id = desired_block;
+        block.span_id = Some("span-mock".to_string());
+        operations::upsert_bridge_block(state.db.pool(), &block)
+            .await
+            .expect("insert block");
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+        };
+
+        let payload = AgentRouteRequest {
+            query: "route me".to_string(),
+            limit: Some(5),
+            category: None,
+            span_id: Some("span-mock".to_string()),
+            agent_id: None,
+        };
+
+        let response =
+            agent_route_handler(AxumState(external_state), HeaderMap::new(), Json(payload))
+                .await
+                .expect("route handler ok");
+
+        if response.routing.chosen_block.is_none() {
+            panic!(
+                "routing missing chosen_block; rationale: {:?}",
+                response.routing.rationale
+            );
+        }
+
+        assert_eq!(
+            response.routing.chosen_block,
+            Some(desired_block.to_string())
+        );
+        assert!(!response.routing.is_new_topic);
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_route_hits_local_rig_when_enabled_env_flag() {
+        if std::env::var("RUN_LOCAL_RIG_TEST").is_err() {
+            return;
+        }
+
+        std::env::remove_var("OPENAI_API_KEY");
+
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.analyzer.enabled = true;
+        config.analyzer.provider = "rig".to_string();
+        config.analyzer.model = Some(
+            std::env::var("LOCAL_RIG_MODEL").unwrap_or_else(|_| "qwen/qwen3-coder-30b".to_string()),
+        );
+        let endpoint = std::env::var("LOCAL_RIG_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:1234/v1".to_string());
+        config.analyzer.endpoint = Some(endpoint);
+
+        let analyzer = build_analyzer(&config);
+        let mut candidate = BridgeBlock::new();
+        candidate.topic_label = Some("local rig target".to_string());
+
+        let routing = analyzer
+            .route(
+                "Route this Thursday query. Respond with JSON only as instructed.",
+                &[candidate],
+            )
+            .expect("local rig completion should succeed");
+
+        assert!(
+            routing.chosen_block.is_some() || routing.is_new_topic,
+            "routing should either pick a block or mark new topic"
+        );
+    }
+
+    async fn spawn_mock_rig_server(
+        desired_block: uuid::Uuid,
+    ) -> (SocketAddr, oneshot::Sender<()>, oneshot::Receiver<()>) {
+        let app = AxumRouter::new().route(
+            "/v1/chat/completions",
+            axum_post(move || async move {
+                let content = format!(
+                    r#"{{"chosen_block":"{id}","is_new_topic":false,"reason":"routed"}}"#,
+                    id = desired_block
+                );
+                let body = json!({
+                    "id": "mock-completion",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "mock-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": { "role": "assistant", "content": content },
+                            "finish_reason": "stop",
+                            "logprobs": null
+                        }
+                    ],
+                    "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+                });
+                Json(body)
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            let _ = ready_tx.send(());
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = rx.await;
+                })
+                .await
+                .ok();
+        });
+
+        (addr, tx, ready_rx)
     }
 }

@@ -1,3 +1,5 @@
+pub mod agents;
+pub mod analysis;
 pub mod chunking;
 pub mod config;
 pub mod database;

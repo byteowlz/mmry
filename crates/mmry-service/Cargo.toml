@@ -21,6 +21,9 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+rig-core = { version = "0.26.0", default-features = false, features = ["reqwest-tls"] }
 
 # gRPC
 tonic = "0.12"
@@ -36,3 +39,6 @@ tonic-build = "0.12"
 
 [features]
 default = []
+
+[dev-dependencies]
+tempfile = { workspace = true }

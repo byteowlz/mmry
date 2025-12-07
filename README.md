@@ -123,6 +123,23 @@ When service mode is enabled, `mmry search` now delegates the entire search (DB 
 
 The CLI exits directly once a command finishes to sidestep an upstream fastembed/ONNX shutdown bug; the OS reclaims any leaked service resources.
 
+## Optional analyzer (Rig + local LLM)
+
+mmry can call an OpenAI-compatible local model (e.g., LM Studio) for routing decisions without requiring an API key.
+
+1) Run LM Studio (or any OpenAI-compatible server) at `http://localhost:1234/v1`.
+2) Add to `~/.config/mmry/config.toml`:
+
+```toml
+[analyzer]
+enabled = true
+provider = "rig"
+endpoint = "http://localhost:1234/v1"
+model = "qwen/qwen3-coder-30b"
+```
+
+The service will build a Rig client pointing at the endpoint and use it for agent routing; if the analyzer is disabled or no model is configured, mmry falls back to deterministic no-op behavior.
+
 ## How It Works
 
 mmry stores everything in SQLite with vector extensions for similarity search. It uses [fastembed](https://github.com/Anush008/fastembed-rs) to run embedding models locally via ONNX Runtime - no external APIs needed.

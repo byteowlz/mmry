@@ -59,6 +59,8 @@ pub struct Config {
     pub service: ServiceConfig,
     #[serde(default)]
     pub external_api: ExternalApiConfig,
+    #[serde(default)]
+    pub analyzer: AnalyzerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +230,19 @@ pub struct ExternalApiConfig {
     pub api_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnalyzerConfig {
+    /// Enable analyzer-backed features (fact extraction, routing)
+    pub enabled: bool,
+    /// Provider for analyzer (e.g., "rig", "none")
+    pub provider: String,
+    /// Optional model identifier/path for Rig
+    pub model: Option<String>,
+    /// Optional HTTP endpoint for analyzer calls (e.g., local v1/chat/completions)
+    pub endpoint: Option<String>,
+}
+
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
@@ -246,6 +261,17 @@ impl Default for ExternalApiConfig {
             host: "127.0.0.1".to_string(),
             port: 8081,
             api_key: None,
+        }
+    }
+}
+
+impl Default for AnalyzerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "rig".to_string(),
+            model: None,
+            endpoint: None,
         }
     }
 }
@@ -345,6 +371,7 @@ impl Default for Config {
                 preload_models: true,
             },
             external_api: ExternalApiConfig::default(),
+            analyzer: AnalyzerConfig::default(),
         }
     }
 }
