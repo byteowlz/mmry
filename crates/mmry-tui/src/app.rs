@@ -119,6 +119,8 @@ pub struct App {
     sparse_embeddings: Arc<SparseEmbeddingService>,
     /// Shared reranker service
     reranker: Arc<RerankerService>,
+    /// Help screen scroll offset
+    pub help_scroll: usize,
 }
 
 impl App {
@@ -170,6 +172,7 @@ impl App {
             embeddings,
             sparse_embeddings,
             reranker,
+            help_scroll: 0,
         };
 
         app.search_mode_index = app.index_for_mode(app.config.search.mode);
@@ -833,6 +836,30 @@ impl App {
         match action {
             KeyAction::Escape | KeyAction::Char('?') | KeyAction::Char('q') | KeyAction::Quit => {
                 self.mode = AppMode::Normal;
+                self.help_scroll = 0;
+            }
+            KeyAction::Down | KeyAction::Char('j') => {
+                self.help_scroll = self.help_scroll.saturating_add(1);
+            }
+            KeyAction::Up | KeyAction::Char('k') => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            KeyAction::PageDown => {
+                self.help_scroll = self.help_scroll.saturating_add(10);
+            }
+            KeyAction::PageUp => {
+                self.help_scroll = self.help_scroll.saturating_sub(10);
+            }
+            KeyAction::Char('g') if self.g_prefix => {
+                self.help_scroll = 0;
+                self.g_prefix = false;
+            }
+            KeyAction::Char('g') => {
+                self.g_prefix = true;
+            }
+            KeyAction::Char('G') => {
+                // Scroll to bottom - we'll cap this in the draw function
+                self.help_scroll = 100;
             }
             _ => {}
         }

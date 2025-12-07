@@ -23,7 +23,8 @@ pub struct ServiceState {
 
 impl ServiceState {
     pub async fn new(config: Config) -> mmry_core::Result<Self> {
-        let db = Database::init(&config.database.path, config.embeddings.dimension).await?;
+        // Use init_store to properly use the stores system (handles legacy migration)
+        let db = Database::init_store(&config, None).await?;
 
         // Disable daemon usage inside the daemon itself to avoid recursion
         let mut local_config = config.clone();

@@ -166,7 +166,7 @@ impl EmbeddingService for EmbeddingServiceImpl {
         let embedding = service
             .embed(&text)
             .await
-            .map_err(|e| Status::internal(format!("Embedding failed: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Embedding failed: {e}")))?;
 
         let values = embedding.unwrap_or_default();
 
@@ -193,7 +193,7 @@ impl EmbeddingService for EmbeddingServiceImpl {
             let embedding = service
                 .embed(&text)
                 .await
-                .map_err(|e| Status::internal(format!("Embedding failed: {}", e)))?;
+                .map_err(|e| Status::internal(format!("Embedding failed: {e}")))?;
 
             if let Some(values) = embedding {
                 embeddings.push(Embedding { values });
@@ -221,11 +221,11 @@ impl EmbeddingService for EmbeddingServiceImpl {
         let tokenizer = service
             .get_tokenizer()
             .await
-            .map_err(|e| Status::internal(format!("Failed to get tokenizer: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to get tokenizer: {e}")))?;
 
         let encoding = tokenizer
             .encode(text.as_str(), false)
-            .map_err(|e| Status::internal(format!("Tokenization failed: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Tokenization failed: {e}")))?;
 
         let token_count = encoding.len() as u32;
 
@@ -309,7 +309,7 @@ impl EmbeddingService for EmbeddingServiceImpl {
                 Some(req.rerank),
             )
             .await
-            .map_err(|e| Status::internal(format!("Search failed: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Search failed: {e}")))?;
 
         let results = memories.into_iter().map(memory_to_proto).collect();
 
@@ -544,7 +544,7 @@ fn memory_to_proto(memory: Memory) -> MemoryResult {
         total_chunks: memory.total_chunks.unwrap_or(-1),
         chunk_method: memory
             .chunk_method
-            .map(|m| format!("{:?}", m).to_lowercase())
+            .map(|m| format!("{m:?}").to_lowercase())
             .unwrap_or_default(),
     }
 }
