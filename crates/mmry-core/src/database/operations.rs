@@ -352,6 +352,10 @@ pub async fn list_bridge_blocks_by_span(
     Ok(blocks)
 }
 
+pub async fn list_bridge_blocks(pool: &SqlitePool, limit: i64) -> crate::Result<Vec<BridgeBlock>> {
+    list_bridge_blocks_by_span(pool, None, limit).await
+}
+
 pub async fn upsert_fact(pool: &SqlitePool, fact: &FactRecord) -> crate::Result<()> {
     sqlx::query(
         r#"
@@ -483,4 +487,88 @@ pub async fn count_agent_events(pool: &SqlitePool) -> crate::Result<i64> {
         .fetch_one(pool)
         .await?;
     Ok(count)
+}
+
+pub async fn list_recent_facts(pool: &SqlitePool, limit: i64) -> crate::Result<Vec<FactRecord>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, fact_key, fact_value, source_span, turn_id, observed_at, recency_score, metadata, agent_id
+        FROM facts
+        ORDER BY observed_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut facts = Vec::new();
+    for row in rows {
+        let metadata: String = row.try_get("metadata")?;
+        let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+        let raw_id: String = row.try_get("id")?;
+        let parsed_id = Uuid::parse_str(&raw_id)
+            .map_err(|e| crate::Error::Config(format!("Invalid fact id: {e}")))?;
+
+        facts.push(FactRecord {
+            id: parsed_id,
+            fact_key: row.try_get("fact_key")?,
+            fact_value: row.try_get("fact_value")?,
+            source_span: row.try_get("source_span").ok().flatten(),
+            turn_id: row.try_get("turn_id").ok().flatten(),
+            observed_at: chrono::DateTime::parse_from_rfc3339(row.try_get("observed_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            recency_score: row.try_get("recency_score")?,
+            metadata: serde_json::from_str(&metadata)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
+        });
+    }
+
+    Ok(facts)
+}
+
+pub async fn list_agent_events(pool: &SqlitePool, limit: i64) -> crate::Result<Vec<AgentEvent>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, agent_id, event_type, status, payload, span_id, memory_id, created_at, updated_at
+        FROM agent_events
+        ORDER BY created_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let payload: String = row.try_get("payload")?;
+        let memory_id: Option<String> = row.try_get("memory_id").ok().flatten();
+
+        let raw_id: String = row.try_get("id")?;
+        let raw_agent: String = row.try_get("agent_id")?;
+
+        events.push(AgentEvent {
+            id: Uuid::parse_str(&raw_id)
+                .map_err(|e| crate::Error::Config(format!("Invalid agent_event id: {e}")))?,
+            agent_id: Uuid::parse_str(&raw_agent)
+                .map_err(|e| crate::Error::Config(format!("Invalid agent_event agent_id: {e}")))?,
+            event_type: row.try_get("event_type")?,
+            status: row.try_get("status").ok().flatten(),
+            payload: serde_json::from_str(&payload)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            span_id: row.try_get("span_id").ok().flatten(),
+            memory_id: memory_id.and_then(|m| Uuid::parse_str(&m).ok()),
+            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        });
+    }
+
+    Ok(events)
 }

@@ -285,6 +285,21 @@ impl Database {
     }
 
     async fn apply_schema_updates(pool: &SqlitePool) -> crate::Result<()> {
+        // Ensure embedding column exists (older installs may have been initialized without it)
+        let embedding_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='embedding'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !embedding_exists {
+            tracing::info!("Adding embedding column to memories table...");
+            sqlx::query("ALTER TABLE memories ADD COLUMN embedding BLOB")
+                .execute(pool)
+                .await?;
+            tracing::info!("embedding column added");
+        }
+
         // Check if sparse_embedding column exists, add if not
         let sparse_column_exists: bool = sqlx::query_scalar(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='sparse_embedding'",
@@ -862,6 +877,9 @@ mod tests {
         assert_eq!(facts[0].fact_value, "value");
         assert_eq!(facts[0].agent_id, Some(agent.id));
 
+        let recent_facts = operations::list_recent_facts(db.pool(), 5).await?;
+        assert!(!recent_facts.is_empty());
+
         let mut event = AgentEvent::new(agent.id, "route");
         event.payload = json!({ "query": "hello" });
         operations::record_agent_event(db.pool(), &event).await?;
@@ -870,6 +888,89 @@ mod tests {
         operations::set_user_profile(db.pool(), &profile).await?;
         let loaded = operations::get_user_profile(db.pool(), profile.id).await?;
         assert!(loaded.is_some());
+
+        let listed_events = operations::list_agent_events(db.pool(), 5).await?;
+        assert_eq!(listed_events.len(), 1);
+        assert_eq!(listed_events[0].agent_id, agent.id);
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_schema_idempotently() -> crate::Result<()> {
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("legacy.db");
+        let url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let pool = SqlitePool::connect(&url).await?;
+
+        // Simulate an older install: memories table without tags, sparse, or chunking columns.
+        sqlx::query(
+            r#"
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata JSON,
+                importance INTEGER DEFAULT 5,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                category TEXT DEFAULT 'default'
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        drop(pool);
+
+        // Initialize should add missing columns and new tables without failing if re-run.
+        let db = Database::init(&db_path, TEST_DIM).await?;
+
+        // Verify new columns were added
+        let has_tags: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='tags'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        let has_embedding: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='embedding'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        let has_sparse: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='sparse_embedding'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        let has_chunk_index: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='chunk_index'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+
+        assert!(has_tags);
+        assert!(has_embedding);
+        assert!(has_sparse);
+        assert!(has_chunk_index);
+
+        // Verify agent/fact tables exist
+        let bridge_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='bridge_blocks'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        let facts_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='facts'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+
+        assert!(bridge_exists);
+        assert!(facts_exists);
+
+        // Second init should be idempotent
+        let _ = Database::init(&db_path, TEST_DIM).await?;
 
         db.close().await;
         Ok(())

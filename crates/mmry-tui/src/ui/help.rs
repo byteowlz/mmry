@@ -37,6 +37,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Line::from("  G          Jump to bottom"),
         Line::from("  Ctrl-d     Page down"),
         Line::from("  Ctrl-u     Page up"),
+        Line::from("  b          Cycle data views (memories / bridge / facts / events)"),
         Line::from(""),
         Line::from(Span::styled(
             "Selection (Middle Pane):",

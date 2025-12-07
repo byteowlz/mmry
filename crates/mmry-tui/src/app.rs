@@ -5,6 +5,9 @@ use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
+use mmry_core::agents::AgentEvent;
+use mmry_core::agents::BridgeBlock;
+use mmry_core::agents::FactRecord;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::graph_ops;
@@ -40,6 +43,7 @@ use crate::events::KeyAction;
 use crate::state::sort::SortMode;
 use crate::state::AppMode;
 use crate::state::FilterState;
+use crate::state::MiddleView;
 use crate::state::Pane;
 use crate::state::RightPaneView;
 use crate::state::Selection;
@@ -82,11 +86,15 @@ pub struct App {
     sort_menu_index: usize,
     search_backup: Option<Vec<Memory>>,
     pub memories: Vec<Memory>,
+    pub bridge_blocks: Vec<BridgeBlock>,
+    pub facts: Vec<FactRecord>,
+    pub agent_events: Vec<AgentEvent>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
 
     pub mode: AppMode,
     pub active_pane: Pane,
+    pub middle_view: MiddleView,
     pub right_pane_view: RightPaneView,
 
     pub left_selection: Selection,
@@ -150,10 +158,14 @@ impl App {
             sort_menu_index: 0,
             search_backup: None,
             memories: Vec::new(),
+            bridge_blocks: Vec::new(),
+            facts: Vec::new(),
+            agent_events: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
             mode: AppMode::Normal,
             active_pane: Pane::Middle,
+            middle_view: MiddleView::Memories,
             right_pane_view: RightPaneView::default(),
             left_selection: Selection::new(),
             middle_selection: Selection::new(),
@@ -176,8 +188,7 @@ impl App {
         };
 
         app.search_mode_index = app.index_for_mode(app.config.search.mode);
-        app.refresh_memories().await?;
-        app.update_categories_and_tags();
+        app.refresh_current_view().await?;
 
         Ok(app)
     }
@@ -206,7 +217,7 @@ impl App {
         self.memory_store_map.clear();
 
         // Refresh data
-        self.refresh_memories().await?;
+        self.refresh_current_view().await?;
         self.middle_selection.reset();
         self.filter_state.clear();
         self.search_backup = None;
@@ -300,22 +311,51 @@ impl App {
         }
     }
 
-    pub async fn refresh_memories(&mut self) -> Result<()> {
-        if self.viewing_all_stores {
-            // Load from all stores
-            self.memory_store_map.clear();
-            let results = list_all_stores(&self.config, None, 1000).await?;
-            self.memories.clear();
-            for item in results {
-                self.memory_store_map.insert(item.memory.id, item.store);
-                self.memories.push(item.memory);
+    pub async fn refresh_current_view(&mut self) -> Result<()> {
+        match self.middle_view {
+            MiddleView::Memories => {
+                if self.viewing_all_stores {
+                    self.memory_store_map.clear();
+                    let results = list_all_stores(&self.config, None, 1000).await?;
+                    self.memories.clear();
+                    for item in results {
+                        self.memory_store_map.insert(item.memory.id, item.store);
+                        self.memories.push(item.memory);
+                    }
+                } else {
+                    self.memories = operations::list_memories(self.db.pool(), None, 1000).await?;
+                }
+                self.sort_state.sort_memories(&mut self.memories);
+                self.update_categories_and_tags();
+                self.search_backup = None;
+                self.middle_selection.index = self
+                    .middle_selection
+                    .index
+                    .min(self.filtered_memories().len().saturating_sub(1));
             }
-        } else {
-            self.memories = operations::list_memories(self.db.pool(), None, 1000).await?;
+            MiddleView::BridgeBlocks => {
+                self.bridge_blocks = operations::list_bridge_blocks(self.db.pool(), 200).await?;
+                self.middle_selection.index = self
+                    .middle_selection
+                    .index
+                    .min(self.bridge_blocks.len().saturating_sub(1));
+            }
+            MiddleView::Facts => {
+                self.facts = operations::list_recent_facts(self.db.pool(), 200).await?;
+                self.middle_selection.index = self
+                    .middle_selection
+                    .index
+                    .min(self.facts.len().saturating_sub(1));
+            }
+            MiddleView::AgentEvents => {
+                self.agent_events = operations::list_agent_events(self.db.pool(), 200).await?;
+                self.middle_selection.index = self
+                    .middle_selection
+                    .index
+                    .min(self.agent_events.len().saturating_sub(1));
+            }
         }
-        self.sort_state.sort_memories(&mut self.memories);
-        self.update_categories_and_tags();
-        self.search_backup = None;
+
         Ok(())
     }
 
@@ -338,9 +378,33 @@ impl App {
     }
 
     pub fn selected_memory(&self) -> Option<&Memory> {
+        if self.middle_view != MiddleView::Memories {
+            return None;
+        }
         self.filtered_memories()
             .get(self.middle_selection.index)
             .copied()
+    }
+
+    pub fn selected_bridge_block(&self) -> Option<&BridgeBlock> {
+        if self.middle_view != MiddleView::BridgeBlocks {
+            return None;
+        }
+        self.bridge_blocks.get(self.middle_selection.index)
+    }
+
+    pub fn selected_fact(&self) -> Option<&FactRecord> {
+        if self.middle_view != MiddleView::Facts {
+            return None;
+        }
+        self.facts.get(self.middle_selection.index)
+    }
+
+    pub fn selected_agent_event(&self) -> Option<&AgentEvent> {
+        if self.middle_view != MiddleView::AgentEvents {
+            return None;
+        }
+        self.agent_events.get(self.middle_selection.index)
     }
 
     /// Fetch entities for the currently selected memory (if not already cached)
@@ -403,6 +467,9 @@ impl App {
     }
 
     pub fn get_left_pane_item_count(&self) -> usize {
+        if self.middle_view != MiddleView::Memories {
+            return 5;
+        }
         // FILTERS header (1) + All/Recent/Important (3) + separator (1)
         // + MEMORY TYPES header (1) + Episodic/Semantic/Procedural (3) + separator (1)
         // + CATEGORIES header (1) + categories (N) + separator (1)
@@ -412,6 +479,15 @@ impl App {
     }
 
     pub fn get_selected_left_item(&self) -> Option<LeftPaneItem> {
+        if self.middle_view != MiddleView::Memories {
+            return match self.left_selection.index {
+                1 => Some(LeftPaneItem::Category("Memories".to_string())),
+                2 => Some(LeftPaneItem::Category("Bridge Blocks".to_string())),
+                3 => Some(LeftPaneItem::Category("Facts".to_string())),
+                4 => Some(LeftPaneItem::Category("Agent Events".to_string())),
+                _ => Some(LeftPaneItem::Separator),
+            };
+        }
         let idx = self.left_selection.index;
         let mut current = 0;
 
@@ -497,7 +573,9 @@ impl App {
                 let result = self.handle_key_action(action).await;
 
                 // After key handling, check if we need to update entity cache
-                if self.right_pane_view == RightPaneView::Graph {
+                if self.middle_view == MiddleView::Memories
+                    && self.right_pane_view == RightPaneView::Graph
+                {
                     self.fetch_selected_memory_entities().await?;
                 }
 
@@ -506,7 +584,9 @@ impl App {
             AppEvent::Resize(_, _) => {}
             AppEvent::Tick => {
                 // On tick, fetch entities if in graph view and cache is stale
-                if self.right_pane_view == RightPaneView::Graph {
+                if self.middle_view == MiddleView::Memories
+                    && self.right_pane_view == RightPaneView::Graph
+                {
                     if let Some(memory) = self.selected_memory() {
                         if self.cached_entity_memory_id != Some(memory.id) {
                             self.fetch_selected_memory_entities().await?;
@@ -563,7 +643,9 @@ impl App {
             KeyAction::PageUp => self.page_up(),
 
             KeyAction::Char('d') => {
-                if self.middle_selection.has_selections() {
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message = Some("Delete works only in Memories view".to_string());
+                } else if self.middle_selection.has_selections() {
                     let filtered = self.filtered_memories();
                     let ids: Vec<Uuid> = self
                         .middle_selection
@@ -579,27 +661,39 @@ impl App {
 
             KeyAction::ToggleSelect => {
                 if self.active_pane == Pane::Middle {
-                    self.middle_selection.toggle_selection();
-                    let count = self.filtered_memories().len();
-                    self.middle_selection.next(count, 20);
-                    self.status_message = if self.middle_selection.has_selections() {
-                        Some(format!(
-                            "{} selected",
-                            self.middle_selection.selection_count()
-                        ))
+                    if self.middle_view != MiddleView::Memories {
+                        self.status_message =
+                            Some("Selection is only available in Memories view".to_string());
                     } else {
-                        None
-                    };
+                        self.middle_selection.toggle_selection();
+                        let count = self.filtered_memories().len();
+                        self.middle_selection.next(count, 20);
+                        self.status_message = if self.middle_selection.has_selections() {
+                            Some(format!(
+                                "{} selected",
+                                self.middle_selection.selection_count()
+                            ))
+                        } else {
+                            None
+                        };
+                    }
                 } else if self.active_pane == Pane::Left {
-                    self.toggle_filter_item();
+                    if self.middle_view == MiddleView::Memories {
+                        self.toggle_filter_item();
+                    }
                 }
             }
 
             KeyAction::SelectAll => {
                 if self.active_pane == Pane::Middle {
-                    let count = self.filtered_memories().len();
-                    self.middle_selection.select_all(count);
-                    self.status_message = Some(format!("Selected all {count} memories"));
+                    if self.middle_view != MiddleView::Memories {
+                        self.status_message =
+                            Some("Selection is only available in Memories view".to_string());
+                    } else {
+                        let count = self.filtered_memories().len();
+                        self.middle_selection.select_all(count);
+                        self.status_message = Some(format!("Selected all {count} memories"));
+                    }
                 }
             }
 
@@ -611,23 +705,36 @@ impl App {
             }
 
             KeyAction::Char('e') => {
-                if let Some(memory) = self.selected_memory() {
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message =
+                        Some("Editing is only available in Memories view".to_string());
+                } else if let Some(memory) = self.selected_memory() {
                     self.edit_memory(memory.id).await?;
                 }
             }
 
             KeyAction::Char('a') => {
-                self.add_memory().await?;
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message =
+                        Some("Add is only available in Memories view".to_string());
+                } else {
+                    self.add_memory().await?;
+                }
             }
 
             KeyAction::Char('r') => {
-                self.refresh_memories().await?;
-                self.status_message = Some("Refreshed memories".to_string());
+                self.refresh_current_view().await?;
+                self.status_message = Some("Refreshed".to_string());
             }
 
             KeyAction::Char('/') | KeyAction::Char(':') => {
-                self.mode = AppMode::Search(String::new());
-                self.search_mode_index = self.index_for_mode(self.config.search.mode);
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message =
+                        Some("Search is only available in Memories view".to_string());
+                } else {
+                    self.mode = AppMode::Search(String::new());
+                    self.search_mode_index = self.index_for_mode(self.config.search.mode);
+                }
             }
 
             KeyAction::Escape => {
@@ -637,17 +744,29 @@ impl App {
             }
 
             KeyAction::Char('s') => {
-                self.sort_menu_index = self.index_for_sort_mode(self.sort_state.mode);
-                self.mode = AppMode::Sort;
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message = Some("Sorting applies only in Memories view".to_string());
+                } else {
+                    self.sort_menu_index = self.index_for_sort_mode(self.sort_state.mode);
+                    self.mode = AppMode::Sort;
+                }
             }
 
             KeyAction::Char('t') => {
-                use crate::state::WhichKeyContext;
-                self.mode = AppMode::WhichKey(WhichKeyContext::Type);
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message =
+                        Some("Type quick-change only in Memories view".to_string());
+                } else {
+                    use crate::state::WhichKeyContext;
+                    self.mode = AppMode::WhichKey(WhichKeyContext::Type);
+                }
             }
 
             KeyAction::Char('i') => {
-                if self.active_pane == Pane::Left {
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message =
+                        Some("Importance change only in Memories view".to_string());
+                } else if self.active_pane == Pane::Left {
                     self.isolate_filter_item();
                 } else {
                     use crate::state::WhichKeyContext;
@@ -656,40 +775,75 @@ impl App {
             }
 
             KeyAction::Char('c') => {
-                use crate::state::WhichKeyContext;
-                self.mode = AppMode::WhichKey(WhichKeyContext::Category);
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message = Some("Category change only in Memories view".to_string());
+                } else {
+                    use crate::state::WhichKeyContext;
+                    self.mode = AppMode::WhichKey(WhichKeyContext::Category);
+                }
             }
 
             KeyAction::Char('v') => {
-                // Toggle right pane view between Preview and Graph
-                self.right_pane_view = match self.right_pane_view {
-                    RightPaneView::Preview => RightPaneView::Graph,
-                    RightPaneView::Graph => RightPaneView::Preview,
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message =
+                        Some("Graph view is only available for memories".to_string());
+                } else {
+                    self.right_pane_view = match self.right_pane_view {
+                        RightPaneView::Preview => RightPaneView::Graph,
+                        RightPaneView::Graph => RightPaneView::Preview,
+                    };
+                    self.status_message = Some(format!(
+                        "View: {}",
+                        match self.right_pane_view {
+                            RightPaneView::Preview => "Preview",
+                            RightPaneView::Graph => "Graph",
+                        }
+                    ));
+                }
+            }
+
+            KeyAction::Char('b') => {
+                self.middle_view = match self.middle_view {
+                    MiddleView::Memories => MiddleView::BridgeBlocks,
+                    MiddleView::BridgeBlocks => MiddleView::Facts,
+                    MiddleView::Facts => MiddleView::AgentEvents,
+                    MiddleView::AgentEvents => MiddleView::Memories,
                 };
-                self.status_message = Some(format!(
-                    "View: {}",
-                    match self.right_pane_view {
-                        RightPaneView::Preview => "Preview",
-                        RightPaneView::Graph => "Graph",
-                    }
-                ));
+                self.left_selection.index = 0;
+                self.middle_selection.index = 0;
+                self.refresh_current_view().await?;
+                self.status_message = Some(match self.middle_view {
+                    MiddleView::Memories => "View: Memories".to_string(),
+                    MiddleView::BridgeBlocks => "View: Bridge Blocks".to_string(),
+                    MiddleView::Facts => "View: Facts".to_string(),
+                    MiddleView::AgentEvents => "View: Agent Events".to_string(),
+                });
             }
 
             KeyAction::Char('S') => {
-                // Open store selection
-                self.available_stores = list_stores(&self.config).unwrap_or_default();
-                if self.available_stores.is_empty() {
-                    self.status_message = Some(
-                        "No stores available. Create one with: mmry stores create <name>"
-                            .to_string(),
-                    );
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message =
+                        Some("Store switching applies only in Memories view".to_string());
                 } else {
-                    let current_idx = self.current_store_index();
-                    self.mode = AppMode::StoreSelect(current_idx);
+                    self.available_stores = list_stores(&self.config).unwrap_or_default();
+                    if self.available_stores.is_empty() {
+                        self.status_message = Some(
+                            "No stores available. Create one with: mmry stores create <name>"
+                                .to_string(),
+                        );
+                    } else {
+                        let current_idx = self.current_store_index();
+                        self.mode = AppMode::StoreSelect(current_idx);
+                    }
                 }
             }
 
             KeyAction::Char('m') => {
+                if self.middle_view != MiddleView::Memories {
+                    self.status_message =
+                        Some("Move is only available in Memories view".to_string());
+                    return Ok(true);
+                }
                 // Move memory to another store
                 if self.viewing_all_stores {
                     self.status_message =
@@ -789,7 +943,7 @@ impl App {
                 KeyAction::Char('y') => {
                     let deleted = operations::delete_memory(self.db.pool(), id).await?;
                     if deleted {
-                        self.refresh_memories().await?;
+                        self.refresh_current_view().await?;
                         self.status_message = Some(format!("Deleted memory {id}"));
                     } else {
                         self.status_message = Some(format!("Memory {id} not found"));
@@ -819,7 +973,7 @@ impl App {
                     }
 
                     self.middle_selection.deselect_all();
-                    self.refresh_memories().await?;
+                    self.refresh_current_view().await?;
                     self.status_message = Some(format!("Deleted {deleted_count}/{count} memories"));
                     self.mode = AppMode::Normal;
                 }
@@ -1048,7 +1202,7 @@ impl App {
                         operations::delete_memory(self.db.pool(), id).await?;
                         operations::insert_memory(self.db.pool(), &updated_memory).await?;
 
-                        self.refresh_memories().await?;
+                        self.refresh_current_view().await?;
 
                         // Find the edited memory and move cursor to it
                         self.active_pane = Pane::Middle;
@@ -1098,7 +1252,7 @@ impl App {
                         let new_id = new_memory.id;
                         operations::insert_memory(self.db.pool(), &new_memory).await?;
 
-                        self.refresh_memories().await?;
+                        self.refresh_current_view().await?;
 
                         // Find the new memory and move cursor to it
                         self.active_pane = Pane::Middle;
@@ -1487,7 +1641,7 @@ impl App {
                         .await
                     {
                         Ok(_) => {
-                            self.refresh_memories().await?;
+                            self.refresh_current_view().await?;
                             self.status_message =
                                 Some(format!("Moved memory to store '{target_name}'"));
                         }
@@ -1519,7 +1673,7 @@ impl App {
                         .await
                         {
                             Ok(_) => {
-                                self.refresh_memories().await?;
+                                self.refresh_current_view().await?;
                                 self.status_message =
                                     Some(format!("Moved memory to store '{target_name}'"));
                             }
@@ -1612,7 +1766,7 @@ impl App {
             operations::delete_memory(self.db.pool(), id).await?;
             operations::insert_memory(self.db.pool(), &updated).await?;
 
-            self.refresh_memories().await?;
+            self.refresh_current_view().await?;
             self.status_message = Some(format!("Updated memory type to {memory_type:?}"));
         }
         Ok(())
@@ -1628,7 +1782,7 @@ impl App {
             operations::delete_memory(self.db.pool(), id).await?;
             operations::insert_memory(self.db.pool(), &updated).await?;
 
-            self.refresh_memories().await?;
+            self.refresh_current_view().await?;
             self.status_message = Some(format!("Updated importance to {importance}"));
         }
         Ok(())
@@ -1644,7 +1798,7 @@ impl App {
             operations::delete_memory(self.db.pool(), id).await?;
             operations::insert_memory(self.db.pool(), &updated).await?;
 
-            self.refresh_memories().await?;
+            self.refresh_current_view().await?;
             self.status_message = Some(format!("Updated importance to {}", updated.importance));
         }
         Ok(())
@@ -1660,7 +1814,7 @@ impl App {
             operations::delete_memory(self.db.pool(), id).await?;
             operations::insert_memory(self.db.pool(), &updated).await?;
 
-            self.refresh_memories().await?;
+            self.refresh_current_view().await?;
             self.status_message = Some(format!("Updated category to {category}"));
         }
         Ok(())
@@ -1708,10 +1862,14 @@ mod tests {
             sort_menu_index: 0,
             search_backup: None,
             memories: Vec::new(),
+            bridge_blocks: Vec::new(),
+            facts: Vec::new(),
+            agent_events: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
             mode: AppMode::Normal,
             active_pane: Pane::Middle,
+            middle_view: MiddleView::Memories,
             right_pane_view: RightPaneView::default(),
             left_selection: Selection::new(),
             middle_selection: Selection::new(),
@@ -1730,6 +1888,7 @@ mod tests {
             embeddings,
             sparse_embeddings,
             reranker,
+            help_scroll: 0,
         };
 
         let context = TestContext {

@@ -13,6 +13,14 @@ pub enum Pane {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiddleView {
+    Memories,
+    BridgeBlocks,
+    Facts,
+    AgentEvents,
+}
+
 /// View mode for the right pane
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RightPaneView {
