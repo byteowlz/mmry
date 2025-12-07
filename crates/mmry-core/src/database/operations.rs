@@ -572,3 +572,220 @@ pub async fn list_agent_events(pool: &SqlitePool, limit: i64) -> crate::Result<V
 
     Ok(events)
 }
+
+/// Get an agent by name
+pub async fn get_agent_by_name(
+    pool: &SqlitePool,
+    name: &str,
+) -> crate::Result<Option<AgentRecord>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, kind, description, metadata, created_at, updated_at
+        FROM agents
+        WHERE name = ?
+        "#,
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row {
+        let raw_id: String = row.try_get("id")?;
+        let metadata: String = row.try_get("metadata")?;
+
+        Ok(Some(AgentRecord {
+            id: Uuid::parse_str(&raw_id)
+                .map_err(|e| crate::Error::Config(format!("Invalid agent id: {e}")))?,
+            name: row.try_get("name")?,
+            kind: row.try_get("kind")?,
+            description: row.try_get("description").ok().flatten(),
+            metadata: serde_json::from_str(&metadata)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Get an agent by ID
+pub async fn get_agent(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<AgentRecord>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, kind, description, metadata, created_at, updated_at
+        FROM agents
+        WHERE id = ?
+        "#,
+    )
+    .bind(id.to_string())
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row {
+        let raw_id: String = row.try_get("id")?;
+        let metadata: String = row.try_get("metadata")?;
+
+        Ok(Some(AgentRecord {
+            id: Uuid::parse_str(&raw_id)
+                .map_err(|e| crate::Error::Config(format!("Invalid agent id: {e}")))?,
+            name: row.try_get("name")?,
+            kind: row.try_get("kind")?,
+            description: row.try_get("description").ok().flatten(),
+            metadata: serde_json::from_str(&metadata)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Get recent bridge blocks for an agent
+pub async fn get_recent_bridge_blocks_for_agent(
+    pool: &SqlitePool,
+    agent_id: Uuid,
+    limit: i64,
+) -> crate::Result<Vec<BridgeBlock>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at
+        FROM bridge_blocks
+        WHERE agent_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(agent_id.to_string())
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut blocks = Vec::new();
+    for row in rows {
+        let keywords: String = row.try_get("keywords")?;
+        let content_json: String = row.try_get("content_json")?;
+        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+        let raw_block_id: String = row.try_get("block_id")?;
+        let block_id = Uuid::parse_str(&raw_block_id)
+            .map_err(|e| crate::Error::Config(format!("Invalid bridge_block id: {e}")))?;
+
+        blocks.push(BridgeBlock {
+            block_id,
+            span_id: row.try_get("span_id").ok().flatten(),
+            topic_label: row.try_get("topic_label").ok().flatten(),
+            keywords: serde_json::from_str(&keywords).unwrap_or_default(),
+            status: row.try_get("status").ok().flatten(),
+            exit_reason: row.try_get("exit_reason").ok().flatten(),
+            content: serde_json::from_str(&content_json)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
+            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        });
+    }
+
+    Ok(blocks)
+}
+
+/// Get a specific bridge block by ID
+pub async fn get_bridge_block(
+    pool: &SqlitePool,
+    block_id: Uuid,
+) -> crate::Result<Option<BridgeBlock>> {
+    let row = sqlx::query(
+        r#"
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at
+        FROM bridge_blocks
+        WHERE block_id = ?
+        "#,
+    )
+    .bind(block_id.to_string())
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row {
+        let keywords: String = row.try_get("keywords")?;
+        let content_json: String = row.try_get("content_json")?;
+        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+        let raw_block_id: String = row.try_get("block_id")?;
+        let parsed_block_id = Uuid::parse_str(&raw_block_id)
+            .map_err(|e| crate::Error::Config(format!("Invalid bridge_block id: {e}")))?;
+
+        Ok(Some(BridgeBlock {
+            block_id: parsed_block_id,
+            span_id: row.try_get("span_id").ok().flatten(),
+            topic_label: row.try_get("topic_label").ok().flatten(),
+            keywords: serde_json::from_str(&keywords).unwrap_or_default(),
+            status: row.try_get("status").ok().flatten(),
+            exit_reason: row.try_get("exit_reason").ok().flatten(),
+            content: serde_json::from_str(&content_json)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
+            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Search facts by query (key or value contains)
+pub async fn search_facts(
+    pool: &SqlitePool,
+    query: &str,
+    limit: i64,
+) -> crate::Result<Vec<FactRecord>> {
+    let search_pattern = format!("%{query}%");
+    let rows = sqlx::query(
+        r#"
+        SELECT id, fact_key, fact_value, source_span, turn_id, observed_at, recency_score, metadata, agent_id
+        FROM facts
+        WHERE fact_key LIKE ? OR fact_value LIKE ?
+        ORDER BY recency_score DESC, observed_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(&search_pattern)
+    .bind(&search_pattern)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut facts = Vec::new();
+    for row in rows {
+        let metadata: String = row.try_get("metadata")?;
+        let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+        let raw_id: String = row.try_get("id")?;
+        let parsed_id = Uuid::parse_str(&raw_id)
+            .map_err(|e| crate::Error::Config(format!("Invalid fact id: {e}")))?;
+
+        facts.push(FactRecord {
+            id: parsed_id,
+            fact_key: row.try_get("fact_key")?,
+            fact_value: row.try_get("fact_value")?,
+            source_span: row.try_get("source_span").ok().flatten(),
+            turn_id: row.try_get("turn_id").ok().flatten(),
+            observed_at: chrono::DateTime::parse_from_rfc3339(row.try_get("observed_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            recency_score: row.try_get("recency_score")?,
+            metadata: serde_json::from_str(&metadata)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
+        });
+    }
+
+    Ok(facts)
+}

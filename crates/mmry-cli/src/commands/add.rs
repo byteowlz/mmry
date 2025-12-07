@@ -3,6 +3,7 @@ use std::io::Read;
 use std::io::{self};
 use std::sync::Arc;
 
+use mmry_core::analysis::NoOpAnalyzer;
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
 use mmry_core::database::graph_ops;
@@ -13,6 +14,9 @@ use mmry_core::graph::Entity;
 use mmry_core::graph::MemoryEntityLink;
 use mmry_core::graph::RelationType;
 use mmry_core::graph::Relationship;
+use mmry_core::hmlr::get_or_create_human_agent;
+use mmry_core::hmlr::HmlrContext;
+use mmry_core::hmlr::HmlrPipeline;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
 use mmry_core::ner::NerService;
@@ -237,6 +241,16 @@ pub async fn handle(
         // Extract entities and build graph
         let entity_count = extract_and_link_entities(db, &ner, &memory, cmd.json).await?;
 
+        // HMLR enrichment (if enabled)
+        let hmlr_result = if config.hmlr.enabled {
+            let pipeline = HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer));
+            let human_id = get_or_create_human_agent(db.pool(), config).await?;
+            let context = HmlrContext::for_human(human_id);
+            Some(pipeline.enrich_memory(db.pool(), &memory, context).await?)
+        } else {
+            None
+        };
+
         if cmd.json {
             let json = serialize_memory(&memory, cmd.full)?;
             println!("{json}");
@@ -246,6 +260,24 @@ pub async fn handle(
             println!("  Content: {}", memory.content);
             if entity_count > 0 {
                 println!("  Entities: {entity_count} extracted");
+            }
+            // Show HMLR enrichment info
+            if let Some(ref result) = hmlr_result {
+                if !result.facts.is_empty() {
+                    println!("  Facts extracted: {}", result.facts.len());
+                }
+                if let Some(ref block) = result.bridge_block {
+                    println!(
+                        "  Bridge block: {} ({})",
+                        block
+                            .block_id
+                            .to_string()
+                            .chars()
+                            .take(8)
+                            .collect::<String>(),
+                        block.status.as_deref().unwrap_or("unknown")
+                    );
+                }
             }
         }
     }
@@ -318,6 +350,16 @@ async fn handle_json_input(
     sparse_embeddings: Arc<SparseEmbeddingService>,
     ner: Arc<NerService>,
 ) -> anyhow::Result<()> {
+    // Prepare HMLR pipeline if enabled
+    let hmlr_pipeline = if config.hmlr.enabled {
+        Some((
+            HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer)),
+            get_or_create_human_agent(db.pool(), config).await?,
+        ))
+    } else {
+        None
+    };
+
     // Handle array of objects
     if let Some(array) = json_value.as_array() {
         let mut results = Vec::new();
@@ -327,6 +369,11 @@ async fn handle_json_input(
             operations::insert_memory(db.pool(), &memory).await?;
             // Extract entities for each memory
             extract_and_link_entities(db, &ner, &memory, true).await?;
+            // HMLR enrichment
+            if let Some((ref pipeline, human_id)) = hmlr_pipeline {
+                let context = HmlrContext::for_human(human_id);
+                let _ = pipeline.enrich_memory(db.pool(), &memory, context).await;
+            }
             results.push(memory);
         }
 
@@ -348,9 +395,12 @@ async fn handle_json_input(
                 println!("{json}");
             }
         } else {
-            println!("✓ Added {} memories", results.len());
+            println!("+ Added {} memories", results.len());
             for memory in &results {
                 println!("  - [{}] {}", memory.id, memory.content);
+            }
+            if hmlr_pipeline.is_some() {
+                println!("  HMLR enrichment applied");
             }
         }
         return Ok(());
@@ -362,14 +412,38 @@ async fn handle_json_input(
     operations::insert_memory(db.pool(), &memory).await?;
     // Extract entities
     extract_and_link_entities(db, &ner, &memory, cmd.json).await?;
+    // HMLR enrichment
+    let hmlr_result = if let Some((ref pipeline, human_id)) = hmlr_pipeline {
+        let context = HmlrContext::for_human(human_id);
+        Some(pipeline.enrich_memory(db.pool(), &memory, context).await?)
+    } else {
+        None
+    };
 
     if cmd.json {
         let json = serialize_memory(&memory, cmd.full)?;
         println!("{json}");
     } else {
-        println!("✓ Added memory: {}", memory.id);
+        println!("+ Added memory: {}", memory.id);
         println!("  Type: {:?}", memory.memory_type);
         println!("  Content: {}", memory.content);
+        if let Some(ref result) = hmlr_result {
+            if !result.facts.is_empty() {
+                println!("  Facts extracted: {}", result.facts.len());
+            }
+            if let Some(ref block) = result.bridge_block {
+                println!(
+                    "  Bridge block: {} ({})",
+                    block
+                        .block_id
+                        .to_string()
+                        .chars()
+                        .take(8)
+                        .collect::<String>(),
+                    block.status.as_deref().unwrap_or("unknown")
+                );
+            }
+        }
     }
 
     Ok(())

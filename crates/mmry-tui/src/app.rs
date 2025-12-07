@@ -8,6 +8,7 @@ use crossterm::terminal::LeaveAlternateScreen;
 use mmry_core::agents::AgentEvent;
 use mmry_core::agents::BridgeBlock;
 use mmry_core::agents::FactRecord;
+use mmry_core::analysis::NoOpAnalyzer;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::graph_ops;
@@ -15,6 +16,9 @@ use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::graph::Entity;
+use mmry_core::hmlr::get_or_create_human_agent;
+use mmry_core::hmlr::HmlrContext;
+use mmry_core::hmlr::HmlrPipeline;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
@@ -1252,6 +1256,30 @@ impl App {
                         let new_id = new_memory.id;
                         operations::insert_memory(self.db.pool(), &new_memory).await?;
 
+                        // HMLR enrichment (if enabled)
+                        let mut hmlr_info = String::new();
+                        if self.config.hmlr.enabled {
+                            let pipeline =
+                                HmlrPipeline::new(self.config.hmlr.clone(), Arc::new(NoOpAnalyzer));
+                            if let Ok(human_id) =
+                                get_or_create_human_agent(self.db.pool(), &self.config).await
+                            {
+                                let context = HmlrContext::for_human(human_id);
+                                if let Ok(result) = pipeline
+                                    .enrich_memory(self.db.pool(), &new_memory, context)
+                                    .await
+                                {
+                                    if !result.facts.is_empty() {
+                                        hmlr_info
+                                            .push_str(&format!(" | {} facts", result.facts.len()));
+                                    }
+                                    if result.bridge_block.is_some() {
+                                        hmlr_info.push_str(" | block assigned");
+                                    }
+                                }
+                            }
+                        }
+
                         self.refresh_current_view().await?;
 
                         // Find the new memory and move cursor to it
@@ -1263,7 +1291,11 @@ impl App {
                             self.middle_selection.offset = pos.saturating_sub(10);
                         }
 
-                        self.status_message = Some(format!("Created memory {new_id}"));
+                        self.status_message = Some(format!(
+                            "Created memory {}{}",
+                            new_id.to_string().chars().take(8).collect::<String>(),
+                            hmlr_info
+                        ));
                         self.needs_redraw = true;
                     }
                     Err(e) => {

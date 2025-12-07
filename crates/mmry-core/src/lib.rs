@@ -6,6 +6,7 @@ pub mod database;
 pub mod embeddings;
 pub mod error;
 pub mod graph;
+pub mod hmlr;
 pub mod integrations;
 pub mod memory;
 pub mod ner;

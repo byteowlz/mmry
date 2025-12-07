@@ -186,3 +186,44 @@ host = "127.0.0.1"
 port = 8081
 # Optional API key for requests (Authorization: Bearer <key>); leave empty to disable auth
 api_key = ""
+
+[analyzer]
+# Enable analyzer-backed features (fact extraction, intelligent routing)
+# When enabled, uses LLM for smarter fact extraction and bridge block routing
+enabled = false
+# Provider: "rig" for LLM-based analysis, "none" for heuristics only
+provider = "rig"
+# Model identifier (optional, uses provider default if not set)
+# model = "qwen/qwen3-coder-30b"
+# Optional endpoint for local LLM (e.g., LM Studio, Ollama)
+# endpoint = "http://localhost:1234/v1"
+
+[hmlr]
+# Enable HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline
+# When enabled, memories are automatically enriched with:
+# - Structured facts (extracted from content)
+# - Bridge block assignment (conversational spans)
+# - Audit trail (who created what and when)
+enabled = false
+
+# Extract structured key-value facts from memory content
+# Facts are stored in the facts table for deterministic retrieval
+# Example: "Met with Sarah" -> {person: Sarah, event: meeting}
+extract_facts = true
+
+# Assign memories to conversational bridge blocks
+# Groups related memories into spans for better context retrieval
+# HMLR-style: retrieves 5-10 turn blocks instead of fragments
+bridge_routing = true
+
+# Log all memory operations for auditability
+# Records who created each memory and when
+audit_trail = true
+
+# Track human operators as agents
+# Creates an agent record for manual CLI/TUI operations
+# This allows unified tracking of human and AI-created memories
+track_human_agent = true
+
+# Name for the human operator agent (used when track_human_agent=true)
+human_agent_name = "human"

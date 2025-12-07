@@ -61,6 +61,8 @@ pub struct Config {
     pub external_api: ExternalApiConfig,
     #[serde(default)]
     pub analyzer: AnalyzerConfig,
+    #[serde(default)]
+    pub hmlr: HmlrConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +278,37 @@ impl Default for AnalyzerConfig {
     }
 }
 
+/// Configuration for HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HmlrConfig {
+    /// Enable HMLR enrichment pipeline (opt-in, disabled by default)
+    pub enabled: bool,
+    /// Extract structured facts from memory content
+    pub extract_facts: bool,
+    /// Assign memories to conversational bridge blocks
+    pub bridge_routing: bool,
+    /// Log all ingestion events for auditability
+    pub audit_trail: bool,
+    /// Auto-create agent record for human operators
+    pub track_human_agent: bool,
+    /// Name for the human operator agent (used when track_human_agent=true)
+    pub human_agent_name: String,
+}
+
+impl Default for HmlrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            extract_facts: true,
+            bridge_routing: true,
+            audit_trail: true,
+            track_human_agent: true,
+            human_agent_name: "human".to_string(),
+        }
+    }
+}
+
 impl Default for NerConfig {
     fn default() -> Self {
         Self {
@@ -372,6 +405,7 @@ impl Default for Config {
             },
             external_api: ExternalApiConfig::default(),
             analyzer: AnalyzerConfig::default(),
+            hmlr: HmlrConfig::default(),
         }
     }
 }
