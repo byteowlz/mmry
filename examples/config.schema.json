@@ -1,0 +1,779 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "analyzer": {
+      "default": {
+        "enabled": false,
+        "endpoint": null,
+        "model": null,
+        "provider": "rig"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/AnalyzerConfig"
+        }
+      ]
+    },
+    "chunking": {
+      "default": {
+        "dedupe_chunk_threshold": 0.9800000190734863,
+        "dedupe_chunks": false,
+        "embed_metadata": true,
+        "enabled": true,
+        "max_chunk_tokens": 200,
+        "max_tokens_hard_limit": 8192,
+        "metadata_weight": 0.10000000149011612,
+        "min_chunk_tokens": 50,
+        "overlap_tokens": 25,
+        "paragraph_separator": "\n\n"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ChunkingConfig"
+        }
+      ]
+    },
+    "cleanup": {
+      "default": {
+        "auto_prune": false,
+        "prune_importance_min": 2,
+        "prune_threshold_days": 365
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/CleanupConfig"
+        }
+      ]
+    },
+    "database": {
+      "default": {
+        "backup_on_startup": true,
+        "backup_retention_days": 30,
+        "path": "/Users/tommyfalkowski/.local/share/mmry/memories.db"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/DatabaseConfig"
+        }
+      ]
+    },
+    "embeddings": {
+      "default": {
+        "backend": "fastembed",
+        "batch_size": 32,
+        "dimension": 384,
+        "enabled": true,
+        "model": "Xenova/all-MiniLM-L6-v2"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EmbeddingsConfig"
+        }
+      ]
+    },
+    "entities": {
+      "default": {
+        "auto_link": true,
+        "extract_enabled": true,
+        "types": [
+          "person",
+          "place",
+          "organization",
+          "project",
+          "technology"
+        ]
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EntitiesConfig"
+        }
+      ]
+    },
+    "external_api": {
+      "default": {
+        "api_key": null,
+        "enable": false,
+        "host": "127.0.0.1",
+        "max_batch_size": 64,
+        "max_input_chars": 16000,
+        "port": 8081,
+        "request_timeout_seconds": 30,
+        "require_api_key": false
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ExternalApiConfig"
+        }
+      ]
+    },
+    "hmlr": {
+      "default": {
+        "audit_trail": true,
+        "bridge_routing": true,
+        "enabled": false,
+        "extract_facts": true,
+        "human_agent_name": "human",
+        "track_human_agent": true
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/HmlrConfig"
+        }
+      ]
+    },
+    "integrations": {
+      "default": {
+        "lst": {
+          "data_dir": null,
+          "enabled": true,
+          "interactive": true,
+          "min_note_length": 20,
+          "min_task_length": 10,
+          "only_completed": true
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/IntegrationsConfig"
+        }
+      ]
+    },
+    "memory": {
+      "default": {
+        "auto_dedupe": true,
+        "dedupe_threshold": 0.949999988079071,
+        "default_category": "default",
+        "importance_auto_score": true
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/MemoryConfig"
+        }
+      ]
+    },
+    "ner": {
+      "default": {
+        "confidence_threshold": 0.5,
+        "enabled": true,
+        "labels": [
+          "person",
+          "organization",
+          "location",
+          "technology",
+          "project"
+        ],
+        "model": "urchade/gliner_multi-v2.1"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/NerConfig"
+        }
+      ]
+    },
+    "search": {
+      "default": {
+        "bm25_b": 0.75,
+        "bm25_k1": 1.2000000476837158,
+        "bm25_weight": 0.0,
+        "boost_recent": true,
+        "default_limit": 10,
+        "fuzzy_weight": 0.20000000298023224,
+        "importance_weight": 0.05000000074505806,
+        "keyword_weight": 0.4000000059604645,
+        "mode": "hybrid",
+        "recency_weight": 0.30000001192092896,
+        "rerank_enabled": true,
+        "rerank_model": "BAAI/bge-reranker-base",
+        "rerank_top_k": 20,
+        "similarity_threshold": 0.699999988079071,
+        "sparse_embedding_weight": 0.0,
+        "vector_weight": 0.3499999940395355
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/SearchConfig"
+        }
+      ]
+    },
+    "service": {
+      "default": {
+        "auto_start": true,
+        "enabled": false,
+        "idle_timeout_seconds": 300,
+        "preload_models": true
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ServiceConfig"
+        }
+      ]
+    },
+    "sparse_embeddings": {
+      "default": {
+        "enabled": false,
+        "model": "Qdrant/Splade_PP_en_v1"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/SparseEmbeddingsConfig"
+        }
+      ]
+    },
+    "stores": {
+      "default": {
+        "default": "default",
+        "directory": "/Users/tommyfalkowski/.local/share/mmry/stores"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/StoresConfig"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "AnalyzerConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable analyzer-backed features (fact extraction, routing)",
+          "default": false,
+          "type": "boolean"
+        },
+        "endpoint": {
+          "description": "Optional HTTP endpoint for analyzer calls (e.g., local v1/chat/completions)",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Optional model identifier/path for Rig",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "Provider for analyzer (e.g., \"rig\", \"none\")",
+          "default": "rig",
+          "type": "string"
+        }
+      }
+    },
+    "ChunkingConfig": {
+      "type": "object",
+      "properties": {
+        "dedupe_chunk_threshold": {
+          "default": 0.9800000190734863,
+          "type": "number",
+          "format": "float"
+        },
+        "dedupe_chunks": {
+          "default": false,
+          "type": "boolean"
+        },
+        "embed_metadata": {
+          "default": true,
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "max_chunk_tokens": {
+          "default": 200,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "max_tokens_hard_limit": {
+          "default": 8192,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "metadata_weight": {
+          "default": 0.10000000149011612,
+          "type": "number",
+          "format": "float"
+        },
+        "min_chunk_tokens": {
+          "default": 50,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "overlap_tokens": {
+          "default": 25,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "paragraph_separator": {
+          "default": "\n\n",
+          "type": "string"
+        }
+      }
+    },
+    "CleanupConfig": {
+      "type": "object",
+      "properties": {
+        "auto_prune": {
+          "default": false,
+          "type": "boolean"
+        },
+        "prune_importance_min": {
+          "default": 2,
+          "type": "integer",
+          "format": "int32"
+        },
+        "prune_threshold_days": {
+          "default": 365,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "DatabaseConfig": {
+      "type": "object",
+      "properties": {
+        "backup_on_startup": {
+          "default": true,
+          "type": "boolean"
+        },
+        "backup_retention_days": {
+          "default": 30,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "path": {
+          "default": "/Users/tommyfalkowski/.local/share/mmry/memories.db",
+          "type": "string"
+        }
+      }
+    },
+    "EmbeddingsConfig": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "default": "fastembed",
+          "type": "string"
+        },
+        "batch_size": {
+          "default": 32,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "dimension": {
+          "default": 384,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "model": {
+          "default": "Xenova/all-MiniLM-L6-v2",
+          "type": "string"
+        }
+      }
+    },
+    "EntitiesConfig": {
+      "type": "object",
+      "properties": {
+        "auto_link": {
+          "default": true,
+          "type": "boolean"
+        },
+        "extract_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "types": {
+          "default": [
+            "person",
+            "place",
+            "organization",
+            "project",
+            "technology"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ExternalApiConfig": {
+      "type": "object",
+      "properties": {
+        "api_key": {
+          "description": "Optional API key required for requests (Authorization: Bearer <key>)",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enable": {
+          "description": "Expose HTTP API for embeddings and reranking",
+          "default": false,
+          "type": "boolean"
+        },
+        "host": {
+          "description": "Host to bind the external API server",
+          "default": "127.0.0.1",
+          "type": "string"
+        },
+        "max_batch_size": {
+          "description": "Maximum items accepted per batch request",
+          "default": 64,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "max_input_chars": {
+          "description": "Maximum characters accepted per input string",
+          "default": 16000,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "port": {
+          "description": "Port for the external API server",
+          "default": 8081,
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "request_timeout_seconds": {
+          "description": "Request timeout in seconds for embedding/rerank calls",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "require_api_key": {
+          "description": "Require Authorization: Bearer ... header (if false and api_key is set, key is still enforced)",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "HmlrConfig": {
+      "description": "Configuration for HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline",
+      "type": "object",
+      "properties": {
+        "audit_trail": {
+          "description": "Log all ingestion events for auditability",
+          "default": true,
+          "type": "boolean"
+        },
+        "bridge_routing": {
+          "description": "Assign memories to conversational bridge blocks",
+          "default": true,
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "Enable HMLR enrichment pipeline (opt-in, disabled by default)",
+          "default": false,
+          "type": "boolean"
+        },
+        "extract_facts": {
+          "description": "Extract structured facts from memory content",
+          "default": true,
+          "type": "boolean"
+        },
+        "human_agent_name": {
+          "description": "Name for the human operator agent (used when track_human_agent=true)",
+          "default": "human",
+          "type": "string"
+        },
+        "track_human_agent": {
+          "description": "Auto-create agent record for human operators",
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "IntegrationsConfig": {
+      "type": "object",
+      "properties": {
+        "lst": {
+          "default": {
+            "data_dir": null,
+            "enabled": true,
+            "interactive": true,
+            "min_note_length": 20,
+            "min_task_length": 10,
+            "only_completed": true
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/LstIntegrationConfig"
+            }
+          ]
+        }
+      }
+    },
+    "LstIntegrationConfig": {
+      "type": "object",
+      "properties": {
+        "data_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "interactive": {
+          "default": true,
+          "type": "boolean"
+        },
+        "min_note_length": {
+          "default": 20,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "min_task_length": {
+          "default": 10,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "only_completed": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "MemoryConfig": {
+      "type": "object",
+      "properties": {
+        "auto_dedupe": {
+          "default": true,
+          "type": "boolean"
+        },
+        "dedupe_threshold": {
+          "default": 0.949999988079071,
+          "type": "number",
+          "format": "float"
+        },
+        "default_category": {
+          "default": "default",
+          "type": "string"
+        },
+        "importance_auto_score": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "NerConfig": {
+      "type": "object",
+      "required": [
+        "confidence_threshold",
+        "enabled",
+        "model"
+      ],
+      "properties": {
+        "confidence_threshold": {
+          "description": "Minimum confidence threshold for accepting entities (0.0 - 1.0)",
+          "type": "number",
+          "format": "float"
+        },
+        "enabled": {
+          "description": "Enable NER-based entity extraction",
+          "type": "boolean"
+        },
+        "labels": {
+          "description": "Entity labels to extract (GLiNER is zero-shot, so you can specify any labels) Examples: [\"person\", \"company\", \"technology\", \"project\", \"location\"]",
+          "default": [
+            "person",
+            "organization",
+            "location",
+            "technology",
+            "project"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model": {
+          "description": "GLiNER model to use (HuggingFace repo name) Recommended: \"urchade/gliner_multi-v2.1\" for multilingual",
+          "type": "string"
+        }
+      }
+    },
+    "SearchConfig": {
+      "type": "object",
+      "properties": {
+        "bm25_b": {
+          "default": 0.75,
+          "type": "number",
+          "format": "float"
+        },
+        "bm25_k1": {
+          "default": 1.2000000476837158,
+          "type": "number",
+          "format": "float"
+        },
+        "bm25_weight": {
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "boost_recent": {
+          "default": true,
+          "type": "boolean"
+        },
+        "default_limit": {
+          "default": 10,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "fuzzy_weight": {
+          "default": 0.20000000298023224,
+          "type": "number",
+          "format": "float"
+        },
+        "importance_weight": {
+          "default": 0.05000000074505806,
+          "type": "number",
+          "format": "float"
+        },
+        "keyword_weight": {
+          "default": 0.4000000059604645,
+          "type": "number",
+          "format": "float"
+        },
+        "mode": {
+          "default": "hybrid",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SearchMode"
+            }
+          ]
+        },
+        "recency_weight": {
+          "default": 0.30000001192092896,
+          "type": "number",
+          "format": "float"
+        },
+        "rerank_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "rerank_model": {
+          "default": "BAAI/bge-reranker-base",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rerank_top_k": {
+          "default": 20,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "similarity_threshold": {
+          "default": 0.699999988079071,
+          "type": "number",
+          "format": "float"
+        },
+        "sparse_embedding_weight": {
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "vector_weight": {
+          "default": 0.3499999940395355,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "SearchMode": {
+      "type": "string",
+      "enum": [
+        "hybrid",
+        "keyword",
+        "fuzzy",
+        "semantic",
+        "bm25",
+        "sparse"
+      ]
+    },
+    "ServiceConfig": {
+      "type": "object",
+      "properties": {
+        "auto_start": {
+          "default": true,
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "idle_timeout_seconds": {
+          "default": 300,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "preload_models": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "SparseEmbeddingsConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "default": "Qdrant/Splade_PP_en_v1",
+          "type": "string"
+        }
+      }
+    },
+    "StoresConfig": {
+      "type": "object",
+      "required": [
+        "default",
+        "directory"
+      ],
+      "properties": {
+        "default": {
+          "description": "Default store to use when --store is not specified",
+          "type": "string"
+        },
+        "directory": {
+          "description": "Directory where store databases are kept",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

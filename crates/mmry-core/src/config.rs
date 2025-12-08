@@ -1,6 +1,11 @@
+use config as config_rs;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
+const SCHEMA_FILENAME: &str = "config.schema.json";
+const GLOBAL_CONFIG_BASENAME: &str = "config.toml";
+const LOCAL_CONFIG_BASENAME: &str = "mmry.config.toml";
 
 /// Expand tilde (~) and environment variables in a path
 fn expand_path(path: &PathBuf) -> PathBuf {
@@ -28,7 +33,73 @@ fn expand_path(path: &PathBuf) -> PathBuf {
     with_env
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+fn default_data_dir() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("mmry")
+}
+
+fn global_config_dir() -> crate::Result<PathBuf> {
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::config_dir)
+        .map(|dir| dir.join("mmry"))
+        .ok_or_else(|| crate::Error::Config("Could not find config directory".to_string()))
+}
+
+fn global_config_path() -> crate::Result<PathBuf> {
+    Ok(global_config_dir()?.join(GLOBAL_CONFIG_BASENAME))
+}
+
+fn local_config_path() -> crate::Result<PathBuf> {
+    Ok(std::env::current_dir()?.join(LOCAL_CONFIG_BASENAME))
+}
+
+fn schema_to_string() -> crate::Result<String> {
+    let schema = schemars::schema_for!(Config);
+    serde_json::to_string_pretty(&schema).map_err(crate::Error::from)
+}
+
+fn write_schema(path: &PathBuf) -> crate::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !path.exists() {
+        std::fs::write(path, schema_to_string()?)?;
+    }
+    Ok(())
+}
+
+fn write_config_file(
+    config: &Config,
+    path: &PathBuf,
+    schema_path: &PathBuf,
+    overwrite: bool,
+) -> crate::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    write_schema(schema_path)?;
+
+    if overwrite || !path.exists() {
+        let mut content = String::from("# @schema ./config.schema.json\n");
+        let serialized = toml::to_string_pretty(config)
+            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {e}")))?;
+        content.push_str(&serialized);
+        std::fs::write(path, content)?;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
     Hybrid,
@@ -40,7 +111,8 @@ pub enum SearchMode {
     SparseEmbedding,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
@@ -65,7 +137,7 @@ pub struct Config {
     pub hmlr: HmlrConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StoresConfig {
     /// Directory where store databases are kept
     pub directory: PathBuf,
@@ -75,14 +147,7 @@ pub struct StoresConfig {
 
 impl Default for StoresConfig {
     fn default() -> Self {
-        let data_dir = std::env::var("XDG_DATA_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(dirs::data_dir)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("mmry")
-            .join("stores");
+        let data_dir = default_data_dir().join("stores");
 
         Self {
             directory: data_dir,
@@ -91,20 +156,23 @@ impl Default for StoresConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct SparseEmbeddingsConfig {
     pub enabled: bool,
     pub model: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct DatabaseConfig {
     pub path: PathBuf,
     pub backup_on_startup: bool,
     pub backup_retention_days: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct EmbeddingsConfig {
     pub enabled: bool,
     pub model: String,
@@ -113,7 +181,7 @@ pub struct EmbeddingsConfig {
     pub batch_size: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SearchConfig {
     pub default_limit: usize,
@@ -134,7 +202,8 @@ pub struct SearchConfig {
     pub bm25_b: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct MemoryConfig {
     pub default_category: String,
     pub auto_dedupe: bool,
@@ -142,7 +211,8 @@ pub struct MemoryConfig {
     pub importance_auto_score: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct ChunkingConfig {
     pub enabled: bool,
     pub max_chunk_tokens: usize,
@@ -156,14 +226,15 @@ pub struct ChunkingConfig {
     pub dedupe_chunk_threshold: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct EntitiesConfig {
     pub extract_enabled: bool,
     pub auto_link: bool,
     pub types: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NerConfig {
     /// Enable NER-based entity extraction
     pub enabled: bool,
@@ -188,19 +259,22 @@ fn default_ner_labels() -> Vec<String> {
     ]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct CleanupConfig {
     pub auto_prune: bool,
     pub prune_threshold_days: u32,
     pub prune_importance_min: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct IntegrationsConfig {
     pub lst: LstIntegrationConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct LstIntegrationConfig {
     pub enabled: bool,
     pub data_dir: Option<PathBuf>,
@@ -210,7 +284,114 @@ pub struct LstIntegrationConfig {
     pub min_note_length: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        let data_dir = default_data_dir();
+        Self {
+            path: data_dir.join("memories.db"),
+            backup_on_startup: true,
+            backup_retention_days: 30,
+        }
+    }
+}
+
+impl Default for EmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "Xenova/all-MiniLM-L6-v2".to_string(),
+            backend: "fastembed".to_string(),
+            dimension: 384,
+            batch_size: 32,
+        }
+    }
+}
+
+impl Default for SparseEmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "Qdrant/Splade_PP_en_v1".to_string(),
+        }
+    }
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            default_category: "default".to_string(),
+            auto_dedupe: true,
+            dedupe_threshold: 0.95,
+            importance_auto_score: true,
+        }
+    }
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_chunk_tokens: 200,
+            min_chunk_tokens: 50,
+            max_tokens_hard_limit: 8192,
+            overlap_tokens: 25,
+            paragraph_separator: "\n\n".to_string(),
+            embed_metadata: true,
+            metadata_weight: 0.1,
+            dedupe_chunks: false,
+            dedupe_chunk_threshold: 0.98,
+        }
+    }
+}
+
+impl Default for EntitiesConfig {
+    fn default() -> Self {
+        Self {
+            extract_enabled: true,
+            auto_link: true,
+            types: vec![
+                "person".to_string(),
+                "place".to_string(),
+                "organization".to_string(),
+                "project".to_string(),
+                "technology".to_string(),
+            ],
+        }
+    }
+}
+
+impl Default for CleanupConfig {
+    fn default() -> Self {
+        Self {
+            auto_prune: false,
+            prune_threshold_days: 365,
+            prune_importance_min: 2,
+        }
+    }
+}
+
+impl Default for LstIntegrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            data_dir: None,
+            only_completed: true,
+            interactive: true,
+            min_task_length: 10,
+            min_note_length: 20,
+        }
+    }
+}
+
+impl Default for IntegrationsConfig {
+    fn default() -> Self {
+        Self {
+            lst: LstIntegrationConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ServiceConfig {
     pub enabled: bool,
@@ -219,20 +400,28 @@ pub struct ServiceConfig {
     pub preload_models: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ExternalApiConfig {
     /// Expose HTTP API for embeddings and reranking
     pub enable: bool,
+    /// Require Authorization: Bearer ... header (if false and api_key is set, key is still enforced)
+    pub require_api_key: bool,
     /// Host to bind the external API server
     pub host: String,
     /// Port for the external API server
     pub port: u16,
     /// Optional API key required for requests (Authorization: Bearer <key>)
     pub api_key: Option<String>,
+    /// Maximum characters accepted per input string
+    pub max_input_chars: usize,
+    /// Maximum items accepted per batch request
+    pub max_batch_size: usize,
+    /// Request timeout in seconds for embedding/rerank calls
+    pub request_timeout_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct AnalyzerConfig {
     /// Enable analyzer-backed features (fact extraction, routing)
@@ -260,9 +449,13 @@ impl Default for ExternalApiConfig {
     fn default() -> Self {
         Self {
             enable: false,
+            require_api_key: false,
             host: "127.0.0.1".to_string(),
             port: 8081,
             api_key: None,
+            max_input_chars: 16000,
+            max_batch_size: 64,
+            request_timeout_seconds: 30,
         }
     }
 }
@@ -279,7 +472,7 @@ impl Default for AnalyzerConfig {
 }
 
 /// Configuration for HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct HmlrConfig {
     /// Enable HMLR enrichment pipeline (opt-in, disabled by default)
@@ -322,87 +515,19 @@ impl Default for NerConfig {
 
 impl Default for Config {
     fn default() -> Self {
-        let data_dir = std::env::var("XDG_DATA_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(dirs::data_dir)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("mmry");
-
         Self {
-            database: DatabaseConfig {
-                path: data_dir.join("memories.db"),
-                backup_on_startup: true,
-                backup_retention_days: 30,
-            },
-            stores: StoresConfig {
-                directory: data_dir.join("stores"),
-                default: "default".to_string(),
-            },
-            embeddings: EmbeddingsConfig {
-                enabled: true,
-                model: "Xenova/all-MiniLM-L6-v2".to_string(),
-                backend: "fastembed".to_string(),
-                dimension: 384,
-                batch_size: 32,
-            },
-            sparse_embeddings: SparseEmbeddingsConfig {
-                enabled: false,
-                model: "Qdrant/Splade_PP_en_v1".to_string(),
-            },
+            database: DatabaseConfig::default(),
+            stores: StoresConfig::default(),
+            embeddings: EmbeddingsConfig::default(),
+            sparse_embeddings: SparseEmbeddingsConfig::default(),
             search: SearchConfig::default(),
-            memory: MemoryConfig {
-                default_category: "default".to_string(),
-                auto_dedupe: true,
-                dedupe_threshold: 0.95,
-                importance_auto_score: true,
-            },
-            chunking: ChunkingConfig {
-                enabled: true,
-                max_chunk_tokens: 200, // Safe for default model (all-MiniLM-L6-v2: 256 tokens)
-                min_chunk_tokens: 50,
-                max_tokens_hard_limit: 8192, // Support long-context models (BGE-M3, Nomic, ModernBERT)
-                overlap_tokens: 25,
-                paragraph_separator: "\n\n".to_string(),
-                embed_metadata: true,
-                metadata_weight: 0.1,
-                dedupe_chunks: false,
-                dedupe_chunk_threshold: 0.98,
-            },
-            entities: EntitiesConfig {
-                extract_enabled: true,
-                auto_link: true,
-                types: vec![
-                    "person".to_string(),
-                    "place".to_string(),
-                    "organization".to_string(),
-                    "project".to_string(),
-                    "technology".to_string(),
-                ],
-            },
+            memory: MemoryConfig::default(),
+            chunking: ChunkingConfig::default(),
+            entities: EntitiesConfig::default(),
             ner: NerConfig::default(),
-            cleanup: CleanupConfig {
-                auto_prune: false,
-                prune_threshold_days: 365,
-                prune_importance_min: 2,
-            },
-            integrations: IntegrationsConfig {
-                lst: LstIntegrationConfig {
-                    enabled: true,
-                    data_dir: None, // Auto-detect from $XDG_DATA_HOME
-                    only_completed: true,
-                    interactive: true,
-                    min_task_length: 10,
-                    min_note_length: 20,
-                },
-            },
-            service: ServiceConfig {
-                enabled: false, // Disabled by default, users can enable it
-                auto_start: true,
-                idle_timeout_seconds: 300, // 5 minutes
-                preload_models: true,
-            },
+            cleanup: CleanupConfig::default(),
+            integrations: IntegrationsConfig::default(),
+            service: ServiceConfig::default(),
             external_api: ExternalApiConfig::default(),
             analyzer: AnalyzerConfig::default(),
             hmlr: HmlrConfig::default(),
@@ -435,28 +560,81 @@ impl Default for SearchConfig {
 
 impl Config {
     pub fn load() -> crate::Result<Self> {
-        let config_dir = std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(dirs::config_dir)
-            .ok_or_else(|| crate::Error::Config("Could not find config directory".to_string()))?
-            .join("mmry");
+        Self::load_with_path(None)
+    }
 
-        let config_path = config_dir.join("config.toml");
+    pub fn load_with_path(config_path: Option<PathBuf>) -> crate::Result<Self> {
+        let global_path = global_config_path()?;
+        let local_path = local_config_path()?;
+        let cli_path = config_path.map(|p| expand_path(&p));
 
-        if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)?;
-            let mut config: Config = toml::from_str(&content)
-                .map_err(|e| crate::Error::Config(format!("Failed to parse config: {e}")))?;
+        let mut builder = config_rs::Config::builder()
+            .add_source(
+                config_rs::File::from(global_path.clone())
+                    .required(false)
+                    .format(config_rs::FileFormat::Toml),
+            )
+            .add_source(
+                config_rs::File::from(local_path.clone())
+                    .required(false)
+                    .format(config_rs::FileFormat::Toml),
+            )
+            .add_source(
+                config_rs::Environment::with_prefix("MMRY")
+                    .separator("__")
+                    .try_parsing(true)
+                    .list_separator(","),
+            );
 
-            // Expand paths
-            config.expand_paths();
-
-            Ok(config)
-        } else {
-            Ok(Self::default())
+        if let Some(path) = cli_path.clone() {
+            builder = builder.add_source(
+                config_rs::File::from(path)
+                    .required(false)
+                    .format(config_rs::FileFormat::Toml),
+            );
         }
+
+        let raw = builder
+            .build()
+            .map_err(|e| crate::Error::Config(format!("Failed to load config sources: {e}")))?;
+
+        let mut config: Config = raw
+            .try_deserialize()
+            .map_err(|e| crate::Error::Config(format!("Failed to parse config: {e}")))?;
+
+        config.expand_paths();
+
+        let cli_exists = cli_path.as_ref().is_some_and(|p| p.exists());
+        let local_exists = local_path.exists();
+        let global_exists = global_path.exists();
+
+        if !cli_exists && !local_exists && !global_exists {
+            let target = cli_path.as_ref().unwrap_or(&global_path);
+            let schema_path = target
+                .parent()
+                .map(|dir| dir.join(SCHEMA_FILENAME))
+                .ok_or_else(|| {
+                    crate::Error::Config(
+                        "Could not determine directory for config file".to_string(),
+                    )
+                })?;
+            write_config_file(&config, target, &schema_path, false)?;
+        } else {
+            let active = cli_path
+                .as_ref()
+                .filter(|path| path.exists())
+                .or_else(|| local_path.exists().then_some(&local_path))
+                .or_else(|| global_path.exists().then_some(&global_path));
+
+            if let Some(path) = active {
+                if let Some(dir) = path.parent() {
+                    let schema_path = dir.join(SCHEMA_FILENAME);
+                    let _ = write_schema(&schema_path);
+                }
+            }
+        }
+
+        Ok(config)
     }
 
     /// Expand tilde and environment variables in all path fields
@@ -480,28 +658,21 @@ impl Config {
     }
 
     pub fn save(&self) -> crate::Result<()> {
-        let config_dir = std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(dirs::config_dir)
-            .ok_or_else(|| crate::Error::Config("Could not find config directory".to_string()))?
-            .join("mmry");
-
-        std::fs::create_dir_all(&config_dir)?;
-
-        let config_path = config_dir.join("config.toml");
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {e}")))?;
-
-        std::fs::write(config_path, content)?;
-        Ok(())
+        let config_path = global_config_path()?;
+        let schema_path = config_path
+            .parent()
+            .map(|dir| dir.join(SCHEMA_FILENAME))
+            .ok_or_else(|| {
+                crate::Error::Config("Could not determine directory for config file".to_string())
+            })?;
+        write_config_file(self, &config_path, &schema_path, true)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf as StdPathBuf;
 
     #[test]
     fn test_expand_path_with_tilde() {
@@ -565,5 +736,17 @@ mod tests {
         // Test deserialization
         let deserialized: SearchMode = serde_json::from_str("\"sparse\"").unwrap();
         assert_eq!(deserialized, SearchMode::SparseEmbedding);
+    }
+
+    #[test]
+    #[ignore]
+    fn write_schema_example() {
+        let target = StdPathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|root| root.join("examples").join("config.schema.json"))
+            .expect("repo root");
+        let schema = schema_to_string().expect("schema");
+        std::fs::write(target, schema).expect("write schema");
     }
 }

@@ -18,8 +18,26 @@ async fn main() -> Result<()> {
         .init();
 
     // Parse arguments
-    let args: Vec<String> = std::env::args().collect();
-    let foreground = args.contains(&"--foreground".to_string());
+    let mut args_iter = std::env::args().skip(1).peekable();
+    let mut foreground = false;
+    let mut config_path: Option<PathBuf> = None;
+
+    while let Some(arg) = args_iter.next() {
+        match arg.as_str() {
+            "--foreground" => foreground = true,
+            "--config" => {
+                if let Some(path) = args_iter.next() {
+                    config_path = Some(PathBuf::from(path));
+                }
+            }
+            value if value.starts_with("--config=") => {
+                if let Some((_, path)) = value.split_once('=') {
+                    config_path = Some(PathBuf::from(path));
+                }
+            }
+            _ => {}
+        }
+    }
 
     // Get state directory
     let state_dir = get_state_dir()?;
@@ -35,7 +53,11 @@ async fn main() -> Result<()> {
     tracing::info!("Starting mmry service (PID: {})", pid);
 
     // Load configuration
-    let config = mmry_core::config::Config::load()?;
+    let env_config = std::env::var("MMRY_CONFIG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let config = mmry_core::config::Config::load_with_path(config_path.or(env_config))?;
 
     // Start server
     match server::run_server(config, port_file, foreground).await {

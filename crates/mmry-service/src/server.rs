@@ -15,6 +15,7 @@ use mmry_core::analysis::Analyzer;
 use mmry_core::analysis::AnalyzerRouting;
 use mmry_core::analysis::NoOpAnalyzer;
 use mmry_core::config::Config;
+use mmry_core::config::ExternalApiConfig;
 use mmry_core::database::operations;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankScore;
@@ -36,6 +37,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
+use tokio::task::spawn_blocking;
+use tokio::time::timeout;
 use tonic::transport::Server;
 use tonic::Request;
 use tonic::Response;
@@ -56,6 +59,7 @@ struct ExternalApiState {
     state: Arc<ServiceState>,
     api_key: Option<String>,
     analyzer: Arc<dyn Analyzer + Send + Sync>,
+    api_config: ExternalApiConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,6 +305,13 @@ impl ApiError {
         }
     }
 
+    fn unauthorized_with_reason<M: Into<String>>(msg: M) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: msg.into(),
+        }
+    }
+
     fn bad_request<M: Into<String>>(msg: M) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -318,6 +329,13 @@ impl ApiError {
     fn internal<M: Into<String>>(msg: M) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: msg.into(),
+        }
+    }
+
+    fn timeout<M: Into<String>>(msg: M) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
             message: msg.into(),
         }
     }
@@ -521,8 +539,18 @@ fn normalize_api_key(key: &Option<String>) -> Option<String> {
         .filter(|k| !k.is_empty())
 }
 
-fn enforce_api_key(required_key: &Option<String>, headers: &HeaderMap) -> Result<(), ApiError> {
-    if let Some(expected) = required_key {
+fn enforce_api_key(
+    require_api_key: bool,
+    configured_key: &Option<String>,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let normalized = normalize_api_key(configured_key);
+
+    if require_api_key || normalized.is_some() {
+        let expected = normalized.as_ref().ok_or_else(|| {
+            ApiError::unauthorized_with_reason("API key required but not configured")
+        })?;
+
         let auth_header = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -543,12 +571,47 @@ fn enforce_api_key(required_key: &Option<String>, headers: &HeaderMap) -> Result
     Ok(())
 }
 
+fn validate_batch(inputs: &[String], cfg: &ExternalApiConfig, field: &str) -> Result<(), ApiError> {
+    if inputs.len() > cfg.max_batch_size {
+        return Err(ApiError::bad_request(format!(
+            "{field} exceeds max batch size of {}",
+            cfg.max_batch_size
+        )));
+    }
+
+    for (idx, input) in inputs.iter().enumerate() {
+        if input.chars().count() > cfg.max_input_chars {
+            return Err(ApiError::bad_request(format!(
+                "{field}[{idx}] exceeds max length of {} characters",
+                cfg.max_input_chars
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_text_len(text: &str, cfg: &ExternalApiConfig, field: &str) -> Result<(), ApiError> {
+    if text.chars().count() > cfg.max_input_chars {
+        return Err(ApiError::bad_request(format!(
+            "{field} exceeds max length of {} characters",
+            cfg.max_input_chars
+        )));
+    }
+
+    Ok(())
+}
+
 async fn embeddings_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
     headers: HeaderMap,
     Json(payload): Json<EmbeddingRequestPayload>,
 ) -> Result<Json<EmbeddingResponsePayload>, ApiError> {
-    enforce_api_key(&app_state.api_key, &headers)?;
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
     app_state.state.record_activity().await;
 
     let EmbeddingRequestPayload { model, input } = payload;
@@ -562,6 +625,8 @@ async fn embeddings_handler(
         return Err(ApiError::bad_request("input cannot be empty"));
     }
 
+    validate_batch(&inputs, &app_state.api_config, "input")?;
+
     let service_arc = app_state.state.get_embedding_service().await;
     let service_guard = service_arc.lock().await;
 
@@ -569,11 +634,13 @@ async fn embeddings_handler(
         .as_ref()
         .ok_or_else(|| ApiError::service_unavailable("Embedding service not available"))?;
 
+    let timeout_duration = Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
+
     let mut data = Vec::with_capacity(inputs.len());
     for (idx, text) in inputs.into_iter().enumerate() {
-        let embedding = service
-            .embed(&text)
+        let embedding = timeout(timeout_duration, service.embed(&text))
             .await
+            .map_err(|_| ApiError::timeout("Embedding request timed out"))?
             .map_err(|e| ApiError::internal(format!("Embedding failed: {e}")))?;
 
         let values =
@@ -600,24 +667,37 @@ async fn rerank_handler(
     headers: HeaderMap,
     Json(payload): Json<RerankRequestPayload>,
 ) -> Result<Json<RerankResponsePayload>, ApiError> {
-    enforce_api_key(&app_state.api_key, &headers)?;
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
     app_state.state.record_activity().await;
 
     if payload.documents.is_empty() {
         return Err(ApiError::bad_request("documents cannot be empty"));
     }
 
+    validate_text_len(&payload.query, &app_state.api_config, "query")?;
+    validate_batch(&payload.documents, &app_state.api_config, "documents")?;
+
     let limit = payload
         .top_n
         .unwrap_or(payload.documents.len())
         .min(payload.documents.len());
 
-    let results = app_state
-        .state
-        .reranker
-        .rerank_with_scores(&payload.query, &payload.documents)
-        .await
-        .map_err(|e| ApiError::internal(format!("Rerank failed: {e}")))?;
+    let timeout_duration = Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
+
+    let results = timeout(
+        timeout_duration,
+        app_state
+            .state
+            .reranker
+            .rerank_with_scores(&payload.query, &payload.documents),
+    )
+    .await
+    .map_err(|_| ApiError::timeout("Rerank request timed out"))?
+    .map_err(|e| ApiError::internal(format!("Rerank failed: {e}")))?;
 
     let reranked: Vec<RerankItem> = results
         .into_iter()
@@ -652,11 +732,20 @@ async fn agent_memory_create_handler(
     use mmry_core::hmlr::HmlrPipeline;
     use mmry_core::memory::MemoryType;
 
-    enforce_api_key(&app_state.api_key, &headers)?;
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
     app_state.state.record_activity().await;
 
     if payload.content.is_empty() {
         return Err(ApiError::bad_request("content cannot be empty"));
+    }
+
+    validate_text_len(&payload.content, &app_state.api_config, "content")?;
+    if let Some(query) = payload.query.as_deref() {
+        validate_text_len(query, &app_state.api_config, "query")?;
     }
 
     // Determine memory type
@@ -697,7 +786,13 @@ async fn agent_memory_create_handler(
         let service_arc = app_state.state.get_embedding_service().await;
         let service_guard = service_arc.lock().await;
         if let Some(service) = service_guard.as_ref() {
-            if let Ok(Some(vector)) = service.embed(&memory.content).await {
+            let timeout_duration =
+                Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
+            if let Ok(Some(vector)) = timeout(timeout_duration, service.embed(&memory.content))
+                .await
+                .map_err(|_| ApiError::timeout("Embedding request timed out"))?
+                .map_err(|e| ApiError::internal(format!("Embedding failed: {e}")))
+            {
                 memory.embedding = Some(vector);
             }
         }
@@ -728,6 +823,12 @@ async fn agent_memory_create_handler(
     if app_state.state.config.hmlr.enabled {
         // Load conversation history memories if provided
         let conversation_history = if let Some(history_ids) = payload.conversation_history {
+            if history_ids.len() > app_state.api_config.max_batch_size {
+                return Err(ApiError::bad_request(format!(
+                    "conversation_history exceeds max batch size of {}",
+                    app_state.api_config.max_batch_size
+                )));
+            }
             let mut memories = Vec::new();
             for id_str in history_ids {
                 if let Ok(id) = Uuid::parse_str(&id_str) {
@@ -803,13 +904,20 @@ async fn agent_route_handler(
     headers: HeaderMap,
     Json(payload): Json<AgentRouteRequest>,
 ) -> Result<Json<AgentRouteResponse>, ApiError> {
-    enforce_api_key(&app_state.api_key, &headers)?;
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
     app_state.state.record_activity().await;
 
-    let limit = payload
+    validate_text_len(&payload.query, &app_state.api_config, "query")?;
+
+    let requested_limit = payload
         .limit
         .unwrap_or(app_state.state.search_config().default_limit as i64)
         .max(1);
+    let limit = std::cmp::min(requested_limit, app_state.api_config.max_batch_size as i64);
 
     let mut agent = AgentRecord::new("agent", "external");
     if let Some(agent_id) = payload
@@ -857,9 +965,13 @@ async fn agent_route_handler(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to load facts: {e}")))?;
 
-    let routing = app_state
-        .analyzer
-        .route(&payload.query, &bridge_blocks)
+    let analyzer = Arc::clone(&app_state.analyzer);
+    let query = payload.query.clone();
+    let blocks_for_route = bridge_blocks.clone();
+
+    let routing = spawn_blocking(move || analyzer.route(&query, &blocks_for_route))
+        .await
+        .map_err(|e| ApiError::internal(format!("Routing task failed: {e}")))?
         .map_err(|e| ApiError::internal(format!("Routing failed: {e}")))?;
 
     let mut event = AgentEvent::new(agent.id, "route");
@@ -946,6 +1058,7 @@ async fn run_http_api(
         state,
         api_key,
         analyzer,
+        api_config,
     };
 
     let app = Router::new()
@@ -1163,6 +1276,7 @@ mod tests {
             state: Arc::clone(&state),
             api_key: None,
             analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
         };
 
         let payload = AgentRouteRequest {
@@ -1233,6 +1347,7 @@ mod tests {
             state: Arc::clone(&state),
             api_key: None,
             analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
         };
 
         let payload = AgentRouteRequest {

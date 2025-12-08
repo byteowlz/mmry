@@ -2,6 +2,7 @@ mod commands;
 
 use clap::Parser;
 use clap::Subcommand;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use mmry_core::config::Config;
@@ -31,6 +32,15 @@ struct Cli {
         help = "Store to use (defaults to config default)"
     )]
     store: Option<String>,
+
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        env = "MMRY_CONFIG",
+        help = "Path to config file (overrides XDG/local default)"
+    )]
+    config: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -115,7 +125,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Load config
     tracing::debug!("Loading config");
-    let config = Config::load()?;
+    let config = Config::load_with_path(cli.config.clone())?;
     tracing::debug!("Config loaded");
 
     // Handle commands that don't need database initialization

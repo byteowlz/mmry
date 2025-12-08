@@ -13,21 +13,63 @@ use uuid::Uuid;
 
 /// Helper function to parse a Memory from a database row
 fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
+    let id_raw: String = row.try_get("id")?;
+    let id = uuid::Uuid::parse_str(&id_raw)
+        .map_err(|e| crate::Error::InvalidInput(format!("Invalid memory id '{id_raw}': {e}")))?;
+
     let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
-    let embedding_vec = embedding.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
+    let embedding_vec = match embedding {
+        Some(bytes) => Some(serde_json::from_slice::<Vec<f32>>(&bytes).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid embedding for memory {id}: {e}"))
+        })?),
+        None => None,
+    };
 
     let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
-    let sparse_embedding_vec = sparse_embedding
-        .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
+    let sparse_embedding_vec = match sparse_embedding {
+        Some(bytes) => Some(
+            serde_json::from_slice::<StoredSparseEmbedding>(&bytes).map_err(|e| {
+                crate::Error::InvalidInput(format!("Invalid sparse embedding for memory {id}: {e}"))
+            })?,
+        ),
+        None => None,
+    };
 
     let parent_id: Option<String> = row.try_get("parent_id").ok().flatten();
-    let parent_id = parent_id.and_then(|s| Uuid::parse_str(&s).ok());
+    let parent_id = match parent_id {
+        Some(raw) => Some(Uuid::parse_str(&raw).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid parent_id '{raw}' for memory {id}: {e}"))
+        })?),
+        None => None,
+    };
 
     let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
-    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok());
+    let chunk_method = match chunk_method {
+        Some(raw) => Some(serde_json::from_str(&format!("\"{raw}\"")).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid chunk_method '{raw}' for memory {id}: {e}"))
+        })?),
+        None => None,
+    };
+
+    let created_at_raw: String = row.try_get("created_at")?;
+    let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_raw)
+        .map_err(|e| {
+            crate::Error::InvalidInput(format!(
+                "Invalid created_at for memory {id} ({created_at_raw}): {e}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
+    let updated_at_raw: String = row.try_get("updated_at")?;
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_raw)
+        .map_err(|e| {
+            crate::Error::InvalidInput(format!(
+                "Invalid updated_at for memory {id} ({updated_at_raw}): {e}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
 
     Ok(Memory {
-        id: Uuid::parse_str(row.try_get("id")?).unwrap(),
+        id,
         memory_type: serde_json::from_str(row.try_get("type")?)?,
         content: row.try_get("content")?,
         embedding: embedding_vec,
@@ -36,12 +78,8 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         importance: row.try_get("importance")?,
         category: row.try_get("category")?,
         tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
-        created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-            .unwrap()
-            .with_timezone(&chrono::Utc),
+        created_at,
+        updated_at,
         parent_id,
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),

@@ -235,7 +235,7 @@ mod tests {
 
         // Create the human agent first
         let human_id = {
-            let mut agent = AgentRecord::new("test_human", "human_operator");
+            let agent = AgentRecord::new("test_human", "human_operator");
             operations::upsert_agent(db.pool(), &agent).await?;
             agent.id
         };
