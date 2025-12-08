@@ -6,15 +6,20 @@
 //! - Scribe: Maintains user profile (async fire-and-forget)
 //! - LatticeCrawler: Finds candidate bridge blocks via search
 //! - ContextHydrator: Assembles final context from multiple sources
+//! - Benchmarks: RAGAS-style tests for memory system quality
 
+pub mod benchmarks;
 mod context_hydrator;
 mod fact_scrubber;
 mod governor;
 mod lattice_crawler;
+pub mod prompts;
 mod scribe;
 
 pub use context_hydrator::ContextHydrator;
 pub use context_hydrator::HydratedContext;
+pub use context_hydrator::SynthesisOptions;
+pub use context_hydrator::SynthesisResult;
 pub use fact_scrubber::FactScrubber;
 pub use governor::Governor;
 pub use governor::GovernorDecision;

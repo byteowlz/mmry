@@ -74,6 +74,12 @@ pub struct BridgeBlock {
     pub created_at: DateTime<Utc>,
 }
 
+impl Default for BridgeBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BridgeBlock {
     pub fn new() -> Self {
         Self {

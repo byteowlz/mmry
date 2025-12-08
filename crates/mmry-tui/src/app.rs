@@ -6,6 +6,7 @@ use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use mmry_core::agents::AgentEvent;
+use mmry_core::agents::AgentRecord;
 use mmry_core::agents::BridgeBlock;
 use mmry_core::agents::FactRecord;
 use mmry_core::analysis::NoOpAnalyzer;
@@ -117,6 +118,13 @@ pub struct App {
     /// ID of the memory whose entities are cached
     cached_entity_memory_id: Option<Uuid>,
 
+    /// HMLR enrichments for the currently selected memory
+    pub selected_memory_facts: Vec<FactRecord>,
+    pub selected_memory_bridge_block: Option<BridgeBlock>,
+    pub selected_memory_creator_agent: Option<AgentRecord>,
+    /// ID of the memory whose HMLR data is cached
+    cached_hmlr_memory_id: Option<Uuid>,
+
     /// Current store name (empty string means "All Stores")
     pub current_store: String,
     /// Whether we're viewing all stores
@@ -181,6 +189,10 @@ impl App {
             needs_redraw: false,
             selected_memory_entities: Vec::new(),
             cached_entity_memory_id: None,
+            selected_memory_facts: Vec::new(),
+            selected_memory_bridge_block: None,
+            selected_memory_creator_agent: None,
+            cached_hmlr_memory_id: None,
             current_store,
             viewing_all_stores: false,
             memory_store_map: HashMap::new(),
@@ -429,6 +441,58 @@ impl App {
         Ok(())
     }
 
+    /// Fetch HMLR enrichments for the currently selected memory (if not already cached)
+    pub async fn fetch_selected_memory_hmlr(&mut self) -> Result<()> {
+        if let Some(memory) = self.selected_memory() {
+            let memory_id = memory.id;
+
+            // Only fetch if we haven't cached this memory's HMLR data
+            if self.cached_hmlr_memory_id != Some(memory_id) {
+                // Get agent events for this memory to find associated facts and bridge blocks
+                let events =
+                    operations::get_agent_events_for_memory(self.db.pool(), memory_id, 10).await?;
+
+                // Get facts for this memory
+                self.selected_memory_facts =
+                    operations::get_facts_for_memory(self.db.pool(), memory_id, 20).await?;
+
+                // Get bridge block if any event has a span_id
+                self.selected_memory_bridge_block = None;
+                self.selected_memory_creator_agent = None;
+
+                for event in &events {
+                    // Get creator agent
+                    if self.selected_memory_creator_agent.is_none() {
+                        if let Ok(Some(agent)) =
+                            operations::get_agent(self.db.pool(), event.agent_id).await
+                        {
+                            self.selected_memory_creator_agent = Some(agent);
+                        }
+                    }
+
+                    // Get bridge block from span_id
+                    if self.selected_memory_bridge_block.is_none() {
+                        if let Some(span_id) = &event.span_id {
+                            if let Ok(Some(block)) =
+                                operations::get_bridge_block_by_span(self.db.pool(), span_id).await
+                            {
+                                self.selected_memory_bridge_block = Some(block);
+                            }
+                        }
+                    }
+                }
+
+                self.cached_hmlr_memory_id = Some(memory_id);
+            }
+        } else {
+            self.selected_memory_facts.clear();
+            self.selected_memory_bridge_block = None;
+            self.selected_memory_creator_agent = None;
+            self.cached_hmlr_memory_id = None;
+        }
+        Ok(())
+    }
+
     pub fn filtered_memories(&self) -> Vec<&Memory> {
         self.memories
             .iter()
@@ -583,6 +647,13 @@ impl App {
                     self.fetch_selected_memory_entities().await?;
                 }
 
+                // Fetch HMLR data for preview pane
+                if self.middle_view == MiddleView::Memories
+                    && self.right_pane_view == RightPaneView::Preview
+                {
+                    self.fetch_selected_memory_hmlr().await?;
+                }
+
                 return result;
             }
             AppEvent::Resize(_, _) => {}
@@ -594,6 +665,16 @@ impl App {
                     if let Some(memory) = self.selected_memory() {
                         if self.cached_entity_memory_id != Some(memory.id) {
                             self.fetch_selected_memory_entities().await?;
+                        }
+                    }
+                }
+                // On tick, fetch HMLR data if in preview view and cache is stale
+                if self.middle_view == MiddleView::Memories
+                    && self.right_pane_view == RightPaneView::Preview
+                {
+                    if let Some(memory) = self.selected_memory() {
+                        if self.cached_hmlr_memory_id != Some(memory.id) {
+                            self.fetch_selected_memory_hmlr().await?;
                         }
                     }
                 }
@@ -1913,6 +1994,10 @@ mod tests {
             needs_redraw: false,
             selected_memory_entities: Vec::new(),
             cached_entity_memory_id: None,
+            selected_memory_facts: Vec::new(),
+            selected_memory_bridge_block: None,
+            selected_memory_creator_agent: None,
+            cached_hmlr_memory_id: None,
             current_store: "test".to_string(),
             viewing_all_stores: false,
             memory_store_map: HashMap::new(),

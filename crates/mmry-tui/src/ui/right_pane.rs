@@ -119,6 +119,103 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             },
         ]));
 
+        // HMLR Enrichments Section
+        let has_hmlr_data = !app.selected_memory_facts.is_empty()
+            || app.selected_memory_bridge_block.is_some()
+            || app.selected_memory_creator_agent.is_some();
+
+        if has_hmlr_data {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "HMLR Enrichments:",
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(Color::Magenta),
+            )));
+            lines.push(Line::from(""));
+
+            // Creator Agent
+            if let Some(agent) = &app.selected_memory_creator_agent {
+                lines.push(Line::from(vec![
+                    Span::styled("Creator: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(&agent.name, Style::default().fg(Color::Cyan)),
+                    Span::raw(" ("),
+                    Span::styled(&agent.kind, Style::default().fg(Color::DarkGray)),
+                    Span::raw(")"),
+                ]));
+            }
+
+            // Bridge Block
+            if let Some(block) = &app.selected_memory_bridge_block {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "Bridge Block: ",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        block
+                            .block_id
+                            .to_string()
+                            .chars()
+                            .take(8)
+                            .collect::<String>(),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+                if let Some(topic) = &block.topic_label {
+                    lines.push(Line::from(vec![
+                        Span::styled("  Topic: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(topic),
+                    ]));
+                }
+                if !block.keywords.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("  Keywords: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(block.keywords.join(", "), Style::default().fg(Color::Cyan)),
+                    ]));
+                }
+                if let Some(status) = &block.status {
+                    lines.push(Line::from(vec![
+                        Span::styled("  Status: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            status,
+                            Style::default().fg(if status == "open" {
+                                Color::Green
+                            } else {
+                                Color::Red
+                            }),
+                        ),
+                    ]));
+                }
+            }
+
+            // Facts
+            if !app.selected_memory_facts.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Facts: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("({})", app.selected_memory_facts.len()),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+                for fact in app.selected_memory_facts.iter().take(5) {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(&fact.fact_key, Style::default().fg(Color::Green)),
+                        Span::raw(": "),
+                        Span::raw(&fact.fact_value),
+                    ]));
+                }
+                if app.selected_memory_facts.len() > 5 {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ... and {} more", app.selected_memory_facts.len() - 5),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+        }
+
         lines
     } else {
         vec![Line::from("No memory selected")]

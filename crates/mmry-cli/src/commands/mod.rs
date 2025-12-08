@@ -1,5 +1,6 @@
 pub mod add;
 pub mod export;
+pub mod hmlr;
 pub mod init;
 pub mod ls;
 pub mod models;

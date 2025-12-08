@@ -247,6 +247,132 @@ fn estimate_tokens(text: &str) -> usize {
     text.len() / 4 + 1
 }
 
+/// Synthesis result for a bridge block
+#[derive(Debug, Clone)]
+pub struct SynthesisResult {
+    pub block_id: Uuid,
+    pub summary: String,
+    pub key_points: Vec<String>,
+    pub action_items: Vec<String>,
+    pub synthesized_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Synthesis options
+#[derive(Debug, Clone)]
+pub struct SynthesisOptions {
+    /// Minimum memories before synthesis is triggered
+    pub min_memories_for_synthesis: usize,
+    /// Maximum age in hours for block to be eligible for synthesis
+    pub max_age_hours: u64,
+    /// Only synthesize closed/inactive blocks
+    pub only_inactive: bool,
+}
+
+impl Default for SynthesisOptions {
+    fn default() -> Self {
+        Self {
+            min_memories_for_synthesis: 5,
+            max_age_hours: 24,
+            only_inactive: true,
+        }
+    }
+}
+
+impl ContextHydrator {
+    /// Find bridge blocks that are eligible for synthesis
+    pub async fn find_synthesis_candidates(
+        &self,
+        pool: &SqlitePool,
+        options: &SynthesisOptions,
+    ) -> Result<Vec<BridgeBlock>> {
+        let blocks = operations::list_bridge_blocks(pool, 100).await?;
+        let now = chrono::Utc::now();
+        let max_age = chrono::Duration::hours(options.max_age_hours as i64);
+
+        let mut candidates = Vec::new();
+
+        for block in blocks {
+            // Skip if we only want inactive and this is active
+            if options.only_inactive && block.status == Some("active".to_string()) {
+                continue;
+            }
+
+            // Skip if block is too new
+            if now.signed_duration_since(block.created_at) < max_age {
+                continue;
+            }
+
+            // Check if block has enough memories
+            let memories = self.get_block_memories(pool, &block).await?;
+            if memories.len() >= options.min_memories_for_synthesis {
+                candidates.push(block);
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    /// Prepare content for synthesis (to be processed by an analyzer/LLM)
+    pub async fn prepare_for_synthesis(
+        &self,
+        pool: &SqlitePool,
+        block: &BridgeBlock,
+    ) -> Result<Vec<String>> {
+        let memories = self.get_block_memories(pool, block).await?;
+        Ok(memories.into_iter().map(|m| m.content).collect())
+    }
+
+    /// Update a bridge block with synthesis results
+    pub async fn apply_synthesis(
+        &self,
+        pool: &SqlitePool,
+        block: &mut BridgeBlock,
+        result: &SynthesisResult,
+    ) -> Result<()> {
+        // Update block content with synthesis
+        if let Some(obj) = block.content.as_object_mut() {
+            obj.insert(
+                "synthesis".to_string(),
+                serde_json::json!({
+                    "summary": result.summary,
+                    "key_points": result.key_points,
+                    "action_items": result.action_items,
+                    "synthesized_at": result.synthesized_at.to_rfc3339()
+                }),
+            );
+        }
+
+        // Mark block as closed/synthesized
+        block.status = Some("synthesized".to_string());
+
+        // Save updated block
+        operations::upsert_bridge_block(pool, block).await?;
+
+        Ok(())
+    }
+
+    /// Update fact recency scores (decay older facts)
+    pub async fn decay_fact_recency(&self, pool: &SqlitePool, decay_rate: f32) -> Result<usize> {
+        let facts = operations::list_recent_facts(pool, 1000).await?;
+        let mut updated = 0;
+
+        for mut fact in facts {
+            // Apply exponential decay
+            let new_recency = fact.recency_score * (1.0 - decay_rate);
+            if new_recency < 0.01 {
+                // Don't update if already very low
+                continue;
+            }
+
+            fact.recency_score = new_recency;
+            operations::upsert_fact(pool, &fact).await?;
+            updated += 1;
+        }
+
+        Ok(updated)
+    }
+}
+
 impl HydratedContext {
     /// Format context as a string for LLM prompts
     pub fn to_prompt_context(&self) -> String {
@@ -440,5 +566,92 @@ mod tests {
         assert_eq!(options.max_tokens, 4000);
         assert_eq!(options.max_active_memories, 10);
         assert!(options.include_profile);
+    }
+
+    #[test]
+    fn test_synthesis_options_default() {
+        let options = SynthesisOptions::default();
+        assert_eq!(options.min_memories_for_synthesis, 5);
+        assert_eq!(options.max_age_hours, 24);
+        assert!(options.only_inactive);
+    }
+
+    #[tokio::test]
+    async fn test_find_synthesis_candidates_empty() -> anyhow::Result<()> {
+        let (_temp, db) = setup_test_db().await?;
+        let hydrator = ContextHydrator::new();
+        let options = SynthesisOptions::default();
+
+        let candidates = hydrator
+            .find_synthesis_candidates(db.pool(), &options)
+            .await?;
+        assert!(candidates.is_empty());
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_decay_fact_recency() -> anyhow::Result<()> {
+        let (_temp, db) = setup_test_db().await?;
+        let hydrator = ContextHydrator::new();
+
+        // Create fact with high recency
+        let mut fact = FactRecord::new("test_key", "test_value");
+        fact.recency_score = 1.0;
+        operations::upsert_fact(db.pool(), &fact).await?;
+
+        // Apply decay
+        let updated = hydrator.decay_fact_recency(db.pool(), 0.1).await?;
+        assert_eq!(updated, 1);
+
+        // Check new recency
+        let facts = operations::list_facts_by_key(db.pool(), "test_key", 1).await?;
+        assert!(!facts.is_empty());
+        assert!(facts[0].recency_score < 1.0);
+        assert!(facts[0].recency_score > 0.8); // 1.0 * 0.9 = 0.9
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_synthesis() -> anyhow::Result<()> {
+        let (_temp, db) = setup_test_db().await?;
+        let hydrator = ContextHydrator::new();
+
+        // Create agent first for FK constraint
+        let agent = crate::agents::AgentRecord::new("synth_agent", "test");
+        operations::upsert_agent(db.pool(), &agent).await?;
+
+        // Create a bridge block
+        let mut block = BridgeBlock::new();
+        block.agent_id = Some(agent.id);
+        block.status = Some("active".to_string());
+        block.topic_label = Some("Test Topic".to_string());
+        operations::upsert_bridge_block(db.pool(), &block).await?;
+
+        // Apply synthesis
+        let result = SynthesisResult {
+            block_id: block.block_id,
+            summary: "This was a discussion about testing".to_string(),
+            key_points: vec!["Point 1".to_string(), "Point 2".to_string()],
+            action_items: vec!["Follow up".to_string()],
+            synthesized_at: chrono::Utc::now(),
+        };
+
+        hydrator
+            .apply_synthesis(db.pool(), &mut block, &result)
+            .await?;
+
+        // Verify block was updated
+        let updated_block = operations::get_bridge_block(db.pool(), block.block_id)
+            .await?
+            .unwrap();
+        assert_eq!(updated_block.status, Some("synthesized".to_string()));
+        assert!(updated_block.content.get("synthesis").is_some());
+
+        db.close().await;
+        Ok(())
     }
 }

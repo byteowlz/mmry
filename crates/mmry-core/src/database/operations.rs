@@ -397,7 +397,7 @@ pub async fn list_facts_by_key(
         SELECT id, fact_key, fact_value, source_span, turn_id, observed_at, recency_score, metadata, agent_id
         FROM facts
         WHERE fact_key = ?
-        ORDER BY observed_at DESC
+        ORDER BY recency_score DESC, observed_at DESC
         LIMIT ?
         "#,
     )
@@ -484,6 +484,38 @@ pub async fn get_user_profile(
 
 pub async fn count_agent_events(pool: &SqlitePool) -> crate::Result<i64> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events")
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
+/// Count total memories
+pub async fn count_memories(pool: &SqlitePool) -> crate::Result<i64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories")
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
+/// Count total facts
+pub async fn count_facts(pool: &SqlitePool) -> crate::Result<i64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM facts")
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
+/// Count total bridge blocks
+pub async fn count_bridge_blocks(pool: &SqlitePool) -> crate::Result<i64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bridge_blocks")
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
+/// Count total agents
+pub async fn count_agents(pool: &SqlitePool) -> crate::Result<i64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
         .fetch_one(pool)
         .await?;
     Ok(count)
@@ -711,6 +743,149 @@ pub async fn get_bridge_block(
         "#,
     )
     .bind(block_id.to_string())
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row {
+        let keywords: String = row.try_get("keywords")?;
+        let content_json: String = row.try_get("content_json")?;
+        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+        let raw_block_id: String = row.try_get("block_id")?;
+        let parsed_block_id = Uuid::parse_str(&raw_block_id)
+            .map_err(|e| crate::Error::Config(format!("Invalid bridge_block id: {e}")))?;
+
+        Ok(Some(BridgeBlock {
+            block_id: parsed_block_id,
+            span_id: row.try_get("span_id").ok().flatten(),
+            topic_label: row.try_get("topic_label").ok().flatten(),
+            keywords: serde_json::from_str(&keywords).unwrap_or_default(),
+            status: row.try_get("status").ok().flatten(),
+            exit_reason: row.try_get("exit_reason").ok().flatten(),
+            content: serde_json::from_str(&content_json)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
+            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Get facts for a specific agent event (memory)
+pub async fn get_facts_for_memory(
+    pool: &SqlitePool,
+    memory_id: Uuid,
+    limit: i64,
+) -> crate::Result<Vec<FactRecord>> {
+    // Facts are linked to memories via agent_events that reference the memory
+    let rows = sqlx::query(
+        r#"
+        SELECT f.id, f.fact_key, f.fact_value, f.source_span, f.turn_id, f.observed_at, f.recency_score, f.metadata, f.agent_id
+        FROM facts f
+        INNER JOIN agent_events ae ON f.turn_id = ae.id
+        WHERE ae.memory_id = ?
+        ORDER BY f.observed_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(memory_id.to_string())
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut facts = Vec::new();
+    for row in rows {
+        let metadata: String = row.try_get("metadata")?;
+        let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+        let raw_id: String = row.try_get("id")?;
+        let parsed_id = Uuid::parse_str(&raw_id)
+            .map_err(|e| crate::Error::Config(format!("Invalid fact id: {e}")))?;
+
+        facts.push(FactRecord {
+            id: parsed_id,
+            fact_key: row.try_get("fact_key")?,
+            fact_value: row.try_get("fact_value")?,
+            source_span: row.try_get("source_span").ok().flatten(),
+            turn_id: row.try_get("turn_id").ok().flatten(),
+            observed_at: chrono::DateTime::parse_from_rfc3339(row.try_get("observed_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            recency_score: row.try_get("recency_score")?,
+            metadata: serde_json::from_str(&metadata)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
+        });
+    }
+
+    Ok(facts)
+}
+
+/// Get agent events for a specific memory
+pub async fn get_agent_events_for_memory(
+    pool: &SqlitePool,
+    memory_id: Uuid,
+    limit: i64,
+) -> crate::Result<Vec<AgentEvent>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, agent_id, event_type, status, payload, span_id, memory_id, created_at, updated_at
+        FROM agent_events
+        WHERE memory_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(memory_id.to_string())
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let payload: String = row.try_get("payload")?;
+        let mem_id: Option<String> = row.try_get("memory_id").ok().flatten();
+
+        let raw_id: String = row.try_get("id")?;
+        let raw_agent: String = row.try_get("agent_id")?;
+
+        events.push(AgentEvent {
+            id: Uuid::parse_str(&raw_id)
+                .map_err(|e| crate::Error::Config(format!("Invalid agent_event id: {e}")))?,
+            agent_id: Uuid::parse_str(&raw_agent)
+                .map_err(|e| crate::Error::Config(format!("Invalid agent_event agent_id: {e}")))?,
+            event_type: row.try_get("event_type")?,
+            status: row.try_get("status").ok().flatten(),
+            payload: serde_json::from_str(&payload)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            span_id: row.try_get("span_id").ok().flatten(),
+            memory_id: mem_id.and_then(|m| Uuid::parse_str(&m).ok()),
+            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        });
+    }
+
+    Ok(events)
+}
+
+/// Get bridge block by span ID
+pub async fn get_bridge_block_by_span(
+    pool: &SqlitePool,
+    span_id: &str,
+) -> crate::Result<Option<BridgeBlock>> {
+    let row = sqlx::query(
+        r#"
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at
+        FROM bridge_blocks
+        WHERE span_id = ?
+        "#,
+    )
+    .bind(span_id)
     .fetch_optional(pool)
     .await?;
 

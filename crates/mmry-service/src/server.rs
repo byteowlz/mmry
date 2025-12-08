@@ -122,6 +122,36 @@ struct AgentRouteRequest {
     agent_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AgentMemoryCreateRequest {
+    /// Content of the memory
+    content: String,
+    /// Category for the memory
+    #[serde(default)]
+    category: Option<String>,
+    /// Memory type: episodic, semantic, procedural
+    #[serde(default)]
+    memory_type: Option<String>,
+    /// Tags for the memory
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    /// Importance score (1-10)
+    #[serde(default)]
+    importance: Option<i32>,
+    /// Agent ID (UUID) - if not provided, creates/uses "external" agent
+    #[serde(default)]
+    agent_id: Option<String>,
+    /// Optional span ID for bridge block grouping
+    #[serde(default)]
+    span_id: Option<String>,
+    /// Optional query/prompt that led to this memory
+    #[serde(default)]
+    query: Option<String>,
+    /// Previous memories in conversation (for HMLR routing)
+    #[serde(default)]
+    conversation_history: Option<Vec<String>>,
+}
+
 #[derive(Debug, Serialize)]
 struct AgentMemory {
     id: String,
@@ -145,6 +175,28 @@ struct AgentRouteResponse {
     contexts: Vec<AgentMemory>,
     bridge_blocks: Vec<BridgeBlock>,
     facts: Vec<FactRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentMemoryCreateResponse {
+    /// Created memory ID
+    id: String,
+    /// Memory type
+    memory_type: String,
+    /// Category
+    category: String,
+    /// Tags
+    tags: Vec<String>,
+    /// Importance
+    importance: i32,
+    /// Facts extracted (if HMLR enabled)
+    facts_extracted: usize,
+    /// Bridge block ID (if HMLR enabled and routing active)
+    bridge_block_id: Option<String>,
+    /// Whether this started a new topic
+    is_new_topic: bool,
+    /// Created timestamp
+    created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -591,6 +643,161 @@ async fn rerank_handler(
     }))
 }
 
+async fn agent_memory_create_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<AgentMemoryCreateRequest>,
+) -> Result<Json<AgentMemoryCreateResponse>, ApiError> {
+    use mmry_core::hmlr::HmlrContext;
+    use mmry_core::hmlr::HmlrPipeline;
+    use mmry_core::memory::MemoryType;
+
+    enforce_api_key(&app_state.api_key, &headers)?;
+    app_state.state.record_activity().await;
+
+    if payload.content.is_empty() {
+        return Err(ApiError::bad_request("content cannot be empty"));
+    }
+
+    // Determine memory type
+    let memory_type = match payload.memory_type.as_deref() {
+        Some("semantic") => MemoryType::Semantic,
+        Some("procedural") => MemoryType::Procedural,
+        _ => MemoryType::Episodic,
+    };
+
+    // Get or create agent
+    let mut agent = AgentRecord::new("agent", "external");
+    if let Some(agent_id) = payload
+        .agent_id
+        .as_ref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+    {
+        agent.id = agent_id;
+    }
+    operations::upsert_agent(app_state.state.db.pool(), &agent)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to upsert agent: {e}")))?;
+
+    // Create memory
+    let category = payload
+        .category
+        .unwrap_or_else(|| app_state.state.config.memory.default_category.clone());
+    let mut memory = Memory::new(memory_type, payload.content.clone(), category.clone());
+
+    if let Some(tags) = payload.tags {
+        memory.tags = tags;
+    }
+    if let Some(importance) = payload.importance {
+        memory.importance = importance.clamp(1, 10);
+    }
+
+    // Generate embeddings if enabled
+    {
+        let service_arc = app_state.state.get_embedding_service().await;
+        let service_guard = service_arc.lock().await;
+        if let Some(service) = service_guard.as_ref() {
+            if let Ok(Some(vector)) = service.embed(&memory.content).await {
+                memory.embedding = Some(vector);
+            }
+        }
+    }
+
+    // Generate sparse embeddings if enabled
+    if let Some(sparse_vec) = app_state
+        .state
+        .sparse_embeddings
+        .embed(&memory.content)
+        .await
+        .ok()
+        .flatten()
+    {
+        memory.sparse_embedding = Some(sparse_vec.into());
+    }
+
+    // Insert memory
+    operations::insert_memory(app_state.state.db.pool(), &memory)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to insert memory: {e}")))?;
+
+    // HMLR enrichment
+    let mut facts_extracted = 0;
+    let mut bridge_block_id = None;
+    let mut is_new_topic = true;
+
+    if app_state.state.config.hmlr.enabled {
+        // Load conversation history memories if provided
+        let conversation_history = if let Some(history_ids) = payload.conversation_history {
+            let mut memories = Vec::new();
+            for id_str in history_ids {
+                if let Ok(id) = Uuid::parse_str(&id_str) {
+                    if let Ok(Some(mem)) =
+                        operations::get_memory(app_state.state.db.pool(), id).await
+                    {
+                        memories.push(mem);
+                    }
+                }
+            }
+            memories
+        } else {
+            Vec::new()
+        };
+
+        let context = HmlrContext::for_agent(agent.id, payload.query, conversation_history);
+        let pipeline = HmlrPipeline::new(
+            app_state.state.config.hmlr.clone(),
+            app_state.analyzer.clone(),
+        );
+
+        match pipeline
+            .enrich_memory(app_state.state.db.pool(), &memory, context)
+            .await
+        {
+            Ok(result) => {
+                facts_extracted = result.facts.len();
+                if let Some(block) = result.bridge_block {
+                    bridge_block_id = Some(block.block_id.to_string());
+                    // Check if this is a new topic based on block creation
+                    is_new_topic = block
+                        .content
+                        .get("memory_ids")
+                        .is_none_or(|ids| ids.as_array().is_none_or(|arr| arr.len() <= 1));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("HMLR enrichment failed: {e}");
+            }
+        }
+    }
+
+    // Record agent event
+    let mut event = AgentEvent::new(agent.id, "memory_created");
+    event.memory_id = Some(memory.id);
+    event.span_id = payload.span_id;
+    event.payload = serde_json::json!({
+        "memory_type": format!("{:?}", memory.memory_type).to_lowercase(),
+        "category": category,
+        "importance": memory.importance,
+        "facts_extracted": facts_extracted,
+        "bridge_block_id": bridge_block_id,
+    });
+    operations::record_agent_event(app_state.state.db.pool(), &event)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to record event: {e}")))?;
+
+    Ok(Json(AgentMemoryCreateResponse {
+        id: memory.id.to_string(),
+        memory_type: format!("{:?}", memory.memory_type).to_lowercase(),
+        category,
+        tags: memory.tags,
+        importance: memory.importance,
+        facts_extracted,
+        bridge_block_id,
+        is_new_topic,
+        created_at: memory.created_at.to_rfc3339(),
+    }))
+}
+
 async fn agent_route_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
     headers: HeaderMap,
@@ -745,6 +952,7 @@ async fn run_http_api(
         .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/rerank", post(rerank_handler))
         .route("/v1/agents/route", post(agent_route_handler))
+        .route("/v1/agents/memories", post(agent_memory_create_handler))
         .with_state(external_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -826,8 +1034,7 @@ where
 
         match handle.join() {
             Ok(result) => result,
-            Err(_) => Err(CompletionError::RequestError(Box::new(io::Error::new(
-                io::ErrorKind::Other,
+            Err(_) => Err(CompletionError::RequestError(Box::new(io::Error::other(
                 "analyzer thread panicked",
             )))),
         }
@@ -883,7 +1090,7 @@ fn build_analyzer(config: &Config) -> Arc<dyn Analyzer + Send + Sync> {
         }
     }
 
-    Arc::new(NoOpAnalyzer::default())
+    Arc::new(NoOpAnalyzer)
 }
 
 async fn idle_timeout_task(state: Arc<ServiceState>, timeout_seconds: u64) {

@@ -12,6 +12,8 @@ use strsim::jaro_winkler;
 use uuid::Uuid;
 use zerocopy::IntoBytes;
 
+use crate::agents::BridgeBlock;
+use crate::agents::FactRecord;
 use crate::config::SearchConfig;
 use crate::config::SearchMode;
 use crate::database::operations;
@@ -27,6 +29,47 @@ pub struct SearchResult {
     pub memory: Memory,
     pub score: f32,
     pub matched_chunk_indices: Vec<usize>,
+}
+
+/// Options for HMLR-enhanced search
+#[derive(Debug, Clone, Default)]
+pub struct HmlrSearchOptions {
+    /// Include facts in search results
+    pub include_facts: bool,
+    /// Group memories by their bridge blocks
+    pub group_by_blocks: bool,
+    /// Strategy for inactive blocks: "include", "exclude", or "deprioritize"
+    pub inactive_block_strategy: InactiveBlockStrategy,
+    /// Maximum number of facts to return per memory
+    pub max_facts_per_memory: usize,
+    /// Search facts as well as memories
+    pub search_facts: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum InactiveBlockStrategy {
+    /// Include all blocks regardless of status
+    #[default]
+    Include,
+    /// Exclude memories in closed blocks
+    Exclude,
+    /// Deprioritize (lower score) memories in closed blocks
+    Deprioritize,
+}
+
+/// HMLR-enhanced search result with facts and bridge blocks
+#[derive(Debug, Clone)]
+pub struct HmlrSearchResult {
+    /// Memories matching the search query
+    pub memories: Vec<Memory>,
+    /// Facts matching the search query (if search_facts enabled)
+    pub facts: Vec<FactRecord>,
+    /// Bridge blocks containing matched memories
+    pub bridge_blocks: Vec<BridgeBlock>,
+    /// Map of memory ID to its associated facts
+    pub memory_facts: HashMap<Uuid, Vec<FactRecord>>,
+    /// Map of memory ID to its bridge block ID
+    pub memory_blocks: HashMap<Uuid, Uuid>,
 }
 
 /// Helper function to parse a Memory from a database row  
@@ -493,6 +536,119 @@ impl SearchService {
             rerank,
         )
         .await
+    }
+
+    /// Search with HMLR enrichments - returns memories, facts, and bridge blocks
+    pub async fn search_with_hmlr(
+        &self,
+        query: &str,
+        category: Option<&str>,
+        limit: i64,
+        options: HmlrSearchOptions,
+    ) -> Result<HmlrSearchResult> {
+        // First, perform regular memory search
+        let memories = self.search(query, category, limit).await?;
+
+        let mut result = HmlrSearchResult {
+            memories: Vec::new(),
+            facts: Vec::new(),
+            bridge_blocks: Vec::new(),
+            memory_facts: HashMap::new(),
+            memory_blocks: HashMap::new(),
+        };
+
+        // Search facts if requested
+        if options.search_facts {
+            let fact_limit = (limit * 2).min(100);
+            result.facts = operations::search_facts(&self.pool, query, fact_limit).await?;
+        }
+
+        // Collect bridge blocks and facts for each memory
+        let mut seen_blocks: HashSet<Uuid> = HashSet::new();
+
+        for memory in memories {
+            let memory_id = memory.id;
+
+            // Get agent events for this memory to find bridge blocks
+            let events = operations::get_agent_events_for_memory(&self.pool, memory_id, 5).await?;
+
+            let mut memory_block_id: Option<Uuid> = None;
+            let mut block_status: Option<String> = None;
+
+            for event in &events {
+                if let Some(span_id) = &event.span_id {
+                    if let Ok(Some(block)) =
+                        operations::get_bridge_block_by_span(&self.pool, span_id).await
+                    {
+                        memory_block_id = Some(block.block_id);
+                        block_status = block.status.clone();
+
+                        if seen_blocks.insert(block.block_id) {
+                            result.bridge_blocks.push(block);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Apply inactive block strategy
+            let include_memory = match (&options.inactive_block_strategy, &block_status) {
+                (InactiveBlockStrategy::Exclude, Some(status)) if status != "open" => false,
+                _ => true,
+            };
+
+            if !include_memory {
+                continue;
+            }
+
+            // Track memory -> block mapping
+            if let Some(block_id) = memory_block_id {
+                result.memory_blocks.insert(memory_id, block_id);
+            }
+
+            // Get facts for this memory if requested
+            if options.include_facts {
+                let max_facts = if options.max_facts_per_memory > 0 {
+                    options.max_facts_per_memory as i64
+                } else {
+                    10
+                };
+                let memory_facts =
+                    operations::get_facts_for_memory(&self.pool, memory_id, max_facts).await?;
+                if !memory_facts.is_empty() {
+                    result.memory_facts.insert(memory_id, memory_facts);
+                }
+            }
+
+            result.memories.push(memory);
+        }
+
+        // Group by blocks if requested
+        if options.group_by_blocks && !result.bridge_blocks.is_empty() {
+            // Sort memories by their block, keeping block order
+            let block_order: HashMap<Uuid, usize> = result
+                .bridge_blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.block_id, i))
+                .collect();
+
+            result.memories.sort_by(|a, b| {
+                let a_order = result
+                    .memory_blocks
+                    .get(&a.id)
+                    .and_then(|bid| block_order.get(bid))
+                    .unwrap_or(&usize::MAX);
+                let b_order = result
+                    .memory_blocks
+                    .get(&b.id)
+                    .and_then(|bid| block_order.get(bid))
+                    .unwrap_or(&usize::MAX);
+                a_order.cmp(b_order)
+            });
+        }
+
+        Ok(result)
     }
 
     #[cfg(test)]

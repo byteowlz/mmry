@@ -140,6 +140,84 @@ model = "qwen/qwen3-coder-30b"
 
 The service will build a Rig client pointing at the endpoint and use it for agent routing; if the analyzer is disabled or no model is configured, mmry falls back to deterministic no-op behavior.
 
+## HMLR: Hierarchical Memory Ledger with Routing
+
+mmry includes optional HMLR features for AI agent workflows. When enabled, memories are enriched with extracted facts, organized into bridge blocks, and tracked with agent attribution.
+
+### Quick Start
+
+Enable HMLR in `~/.config/mmry/config.toml`:
+
+```toml
+[hmlr]
+enabled = true
+extract_facts = true      # Extract key-value facts from content
+bridge_routing = true     # Group related memories into bridge blocks
+audit_trail = true        # Log agent events for debugging
+track_human_agent = true  # Track human as an agent
+human_agent_name = "human"
+```
+
+### What HMLR Adds
+
+**Facts**: Key-value pairs extracted from memory content
+
+```bash
+# Search now includes facts
+mmry search "api key" --hmlr --search-facts
+
+# View facts in TUI (press 'b' to switch to Facts view)
+```
+
+**Bridge Blocks**: Logical groupings of related memories
+
+- Memories within a conversation or task share the same bridge block
+- Blocks track topic, keywords, and status (open/closed)
+- Search can filter or group by blocks
+
+**Agent Attribution**: Track who created each memory
+
+- Distinguishes human vs AI agent entries
+- Logs agent events for debugging and auditing
+
+### HMLR Search
+
+```bash
+# Include HMLR enrichments in search results
+mmry search "project" --hmlr
+
+# Also search facts (not just memories)
+mmry search "deadline" --hmlr --search-facts
+
+# Group results by bridge blocks
+mmry search "api" --hmlr --group-by-blocks
+
+# Exclude closed/inactive blocks
+mmry search "task" --hmlr --inactive-blocks exclude
+```
+
+### TUI Integration
+
+The TUI shows HMLR enrichments when viewing a memory:
+
+- Creator agent name and type
+- Associated bridge block (topic, keywords, status)
+- Extracted facts
+
+Press `b` to cycle through views: Memories, Bridge Blocks, Facts, Agent Events.
+
+### Architecture
+
+HMLR runs as a post-ingestion pipeline:
+
+1. **Governor**: Orchestrates enrichment in parallel
+2. **FactScrubber**: Extracts key-value facts from content
+3. **Scribe**: Async updates to user profile (preferences, constraints)
+4. **LatticeCrawler**: Finds candidate bridge blocks for routing
+5. **ContextHydrator**: Assembles context from multiple sources
+
+All components are opt-in via config. HMLR adds no overhead when disabled.
+
 ## How It Works
 
 mmry stores everything in SQLite with vector extensions for similarity search. It uses [fastembed](https://github.com/Anush008/fastembed-rs) to run embedding models locally via ONNX Runtime - no external APIs needed.

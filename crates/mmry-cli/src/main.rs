@@ -73,6 +73,9 @@ enum Commands {
 
     /// Manage memory stores
     Stores(commands::stores::StoresCmd),
+
+    /// HMLR enrichment operations (backfill, stats)
+    Hmlr(commands::hmlr::HmlrCmd),
 }
 
 fn main() {
@@ -202,6 +205,7 @@ async fn async_main() -> anyhow::Result<()> {
         Commands::Reextract(cmd) => {
             commands::reextract::handle(cmd, &config, &db, Arc::clone(&ner)).await
         }
+        Commands::Hmlr(cmd) => commands::hmlr::handle(cmd, &config, &db).await,
         Commands::Models(_)
         | Commands::Rerankers(_)
         | Commands::Init(_)
