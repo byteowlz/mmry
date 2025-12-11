@@ -113,6 +113,7 @@ pub enum SearchMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
@@ -269,6 +270,7 @@ pub struct CleanupConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[derive(Default)]
 pub struct IntegrationsConfig {
     pub lst: LstIntegrationConfig,
 }
@@ -383,14 +385,6 @@ impl Default for LstIntegrationConfig {
     }
 }
 
-impl Default for IntegrationsConfig {
-    fn default() -> Self {
-        Self {
-            lst: LstIntegrationConfig::default(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ServiceConfig {
@@ -426,11 +420,9 @@ pub struct ExternalApiConfig {
 pub struct AnalyzerConfig {
     /// Enable analyzer-backed features (fact extraction, routing)
     pub enabled: bool,
-    /// Provider for analyzer (e.g., "rig", "none")
-    pub provider: String,
-    /// Optional model identifier/path for Rig
+    /// Model identifier (e.g., "gpt-4o-mini", "qwen/qwen3-coder-30b")
     pub model: Option<String>,
-    /// Optional HTTP endpoint for analyzer calls (e.g., local v1/chat/completions)
+    /// HTTP endpoint for OpenAI-compatible API (e.g., "http://127.0.0.1:1234/v1")
     pub endpoint: Option<String>,
 }
 
@@ -464,7 +456,6 @@ impl Default for AnalyzerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            provider: "rig".to_string(),
             model: None,
             endpoint: None,
         }
@@ -509,28 +500,6 @@ impl Default for NerConfig {
             model: "urchade/gliner_multi-v2.1".to_string(), // Multilingual GLiNER
             confidence_threshold: 0.5, // GLiNER works well with 0.5
             labels: default_ner_labels(),
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            database: DatabaseConfig::default(),
-            stores: StoresConfig::default(),
-            embeddings: EmbeddingsConfig::default(),
-            sparse_embeddings: SparseEmbeddingsConfig::default(),
-            search: SearchConfig::default(),
-            memory: MemoryConfig::default(),
-            chunking: ChunkingConfig::default(),
-            entities: EntitiesConfig::default(),
-            ner: NerConfig::default(),
-            cleanup: CleanupConfig::default(),
-            integrations: IntegrationsConfig::default(),
-            service: ServiceConfig::default(),
-            external_api: ExternalApiConfig::default(),
-            analyzer: AnalyzerConfig::default(),
-            hmlr: HmlrConfig::default(),
         }
     }
 }

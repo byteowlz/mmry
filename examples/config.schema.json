@@ -7,8 +7,7 @@
       "default": {
         "enabled": false,
         "endpoint": null,
-        "model": null,
-        "provider": "rig"
+        "model": null
       },
       "allOf": [
         {
@@ -243,7 +242,7 @@
           "type": "boolean"
         },
         "endpoint": {
-          "description": "Optional HTTP endpoint for analyzer calls (e.g., local v1/chat/completions)",
+          "description": "HTTP endpoint for OpenAI-compatible API (e.g., \"http://127.0.0.1:1234/v1\")",
           "default": null,
           "type": [
             "string",
@@ -251,17 +250,12 @@
           ]
         },
         "model": {
-          "description": "Optional model identifier/path for Rig",
+          "description": "Model identifier (e.g., \"gpt-4o-mini\", \"qwen/qwen3-coder-30b\")",
           "default": null,
           "type": [
             "string",
             "null"
           ]
-        },
-        "provider": {
-          "description": "Provider for analyzer (e.g., \"rig\", \"none\")",
-          "default": "rig",
-          "type": "string"
         }
       }
     },

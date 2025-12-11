@@ -205,7 +205,7 @@ mod tests {
             result.name, result.faithfulness, result.context_recall
         );
         if let Some(err) = &result.error {
-            println!("Error: {}", err);
+            println!("Error: {err}");
         }
 
         assert!(
@@ -226,7 +226,7 @@ mod tests {
             result.name, result.faithfulness, result.context_recall
         );
         if let Some(err) = &result.error {
-            println!("Error: {}", err);
+            println!("Error: {err}");
         }
 
         assert!(

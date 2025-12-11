@@ -8,6 +8,8 @@ use mmry_core::database::Database;
 use mmry_core::hmlr::get_or_create_human_agent;
 use mmry_core::hmlr::HmlrContext;
 use mmry_core::hmlr::HmlrPipeline;
+use mmry_core::service::client::DaemonClient;
+use mmry_core::service::client::EnrichMemoryRequest;
 
 #[derive(Parser)]
 pub struct HmlrCmd {
@@ -78,10 +80,43 @@ async fn handle_backfill(cmd: BackfillCmd, config: &Config, db: &Database) -> an
         return Ok(());
     }
 
+    // Check if we should use the service API (for LLM-based enrichment)
+    let use_service_api = config.analyzer.enabled && config.external_api.enable;
+    let service_client = if use_service_api {
+        match DaemonClient::with_api_config(config.external_api.clone()) {
+            Ok(client) => {
+                if client.is_api_available().await {
+                    if !cmd.json {
+                        println!("Using service API for LLM-based enrichment");
+                    }
+                    Some(client)
+                } else {
+                    if !cmd.json {
+                        eprintln!("Warning: Service API not available, falling back to heuristic enrichment");
+                    }
+                    None
+                }
+            }
+            Err(e) => {
+                if !cmd.json {
+                    eprintln!("Warning: Failed to create service client: {e}");
+                    eprintln!("Falling back to heuristic enrichment");
+                }
+                None
+            }
+        }
+    } else {
+        if !cmd.json && config.analyzer.enabled && !config.external_api.enable {
+            eprintln!("Note: Analyzer is enabled but external_api.enable is false");
+            eprintln!("Enable [external_api] enable = true for LLM-based enrichment");
+        }
+        None
+    };
+
     // Get or create human agent for backfill operations
     let human_id = get_or_create_human_agent(db.pool(), config).await?;
 
-    // Create HMLR pipeline
+    // Create local HMLR pipeline (fallback when service unavailable)
     let pipeline = HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer));
 
     // Fetch memories to process
@@ -184,32 +219,73 @@ async fn handle_backfill(cmd: BackfillCmd, config: &Config, db: &Database) -> an
                 continue;
             }
 
-            let context = HmlrContext::for_human(human_id);
-            match pipeline.enrich_memory(db.pool(), memory, context).await {
-                Ok(result) => {
-                    let facts_count = result.facts.len();
-                    let has_block = result.bridge_block.is_some();
+            // Use service API if available, otherwise fall back to local pipeline
+            if let Some(ref client) = service_client {
+                let request = EnrichMemoryRequest {
+                    content: memory.content.clone(),
+                    category: Some(memory.category.clone()),
+                    memory_type: Some(format!("{:?}", memory.memory_type).to_lowercase()),
+                    tags: if memory.tags.is_empty() {
+                        None
+                    } else {
+                        Some(memory.tags.clone())
+                    },
+                    importance: Some(memory.importance),
+                    agent_id: Some(human_id.to_string()),
+                    query: None,
+                };
 
-                    total_facts += facts_count;
-                    if has_block {
-                        total_blocks += 1;
+                match client.enrich_memory(request).await {
+                    Ok(result) => {
+                        total_facts += result.facts_extracted;
+                        if result.bridge_block_id.is_some() {
+                            total_blocks += 1;
+                        }
+
+                        if cmd.verbose && !cmd.json {
+                            println!(
+                                "Processed {}: {} facts, bridge_block={}",
+                                &memory.id.to_string()[..8],
+                                result.facts_extracted,
+                                result.bridge_block_id.is_some()
+                            );
+                        }
                     }
-
-                    if cmd.verbose && !cmd.json {
-                        println!(
-                            "Processed {}: {} facts, bridge_block={}",
-                            &memory.id.to_string()[..8],
-                            facts_count,
-                            has_block
-                        );
-                        for fact in &result.facts {
-                            println!("  - {}: {}", fact.fact_key, fact.fact_value);
+                    Err(e) => {
+                        if !cmd.json {
+                            eprintln!("Failed to enrich {}: {}", &memory.id.to_string()[..8], e);
                         }
                     }
                 }
-                Err(e) => {
-                    if !cmd.json {
-                        eprintln!("Failed to enrich {}: {}", &memory.id.to_string()[..8], e);
+            } else {
+                // Fallback to local pipeline (heuristic-based)
+                let context = HmlrContext::for_human(human_id);
+                match pipeline.enrich_memory(db.pool(), memory, context).await {
+                    Ok(result) => {
+                        let facts_count = result.facts.len();
+                        let has_block = result.bridge_block.is_some();
+
+                        total_facts += facts_count;
+                        if has_block {
+                            total_blocks += 1;
+                        }
+
+                        if cmd.verbose && !cmd.json {
+                            println!(
+                                "Processed {}: {} facts, bridge_block={}",
+                                &memory.id.to_string()[..8],
+                                facts_count,
+                                has_block
+                            );
+                            for fact in &result.facts {
+                                println!("  - {}: {}", fact.fact_key, fact.fact_value);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if !cmd.json {
+                            eprintln!("Failed to enrich {}: {}", &memory.id.to_string()[..8], e);
+                        }
                     }
                 }
             }
@@ -220,7 +296,7 @@ async fn handle_backfill(cmd: BackfillCmd, config: &Config, db: &Database) -> an
         // Progress update
         if !cmd.json && !cmd.verbose && !cmd.dry_run {
             let batch_end = ((batch_idx + 1) * cmd.batch_size).min(total);
-            println!("  Progress: {}/{} memories processed", batch_end, total);
+            println!("  Progress: {batch_end}/{total} memories processed");
         }
     }
 
@@ -232,19 +308,25 @@ async fn handle_backfill(cmd: BackfillCmd, config: &Config, db: &Database) -> an
                 "processed": processed,
                 "facts_extracted": total_facts,
                 "bridge_blocks_created": total_blocks,
-                "dry_run": cmd.dry_run
+                "dry_run": cmd.dry_run,
+                "used_llm": service_client.is_some()
             }))?
         );
     } else {
         println!();
         if cmd.dry_run {
             println!("Dry run complete:");
-            println!("  Would process {} memories", processed);
+            println!("  Would process {processed} memories");
         } else {
             println!("+ Backfill complete:");
-            println!("  Processed {} memories", processed);
-            println!("  Extracted {} facts", total_facts);
-            println!("  Created {} bridge blocks", total_blocks);
+            println!("  Processed {processed} memories");
+            println!("  Extracted {total_facts} facts");
+            println!("  Created {total_blocks} bridge blocks");
+            if service_client.is_some() {
+                println!("  Used LLM-based enrichment via service API");
+            } else {
+                println!("  Used heuristic-based enrichment (local)");
+            }
         }
     }
 

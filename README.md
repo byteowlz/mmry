@@ -123,22 +123,23 @@ When service mode is enabled, `mmry search` now delegates the entire search (DB 
 
 The CLI exits directly once a command finishes to sidestep an upstream fastembed/ONNX shutdown bug; the OS reclaims any leaked service resources.
 
-## Optional analyzer (Rig + local LLM)
+## Optional analyzer (LLM-based enrichment)
 
-mmry can call an OpenAI-compatible local model (e.g., LM Studio) for routing decisions without requiring an API key.
+mmry can call any OpenAI-compatible API for intelligent fact extraction and routing decisions.
 
-1) Run LM Studio (or any OpenAI-compatible server) at `http://localhost:1234/v1`.
+1) Run a local LLM server (LM Studio, Ollama, vLLM) or use OpenAI directly.
 2) Add to `~/.config/mmry/config.toml`:
 
 ```toml
 [analyzer]
 enabled = true
-provider = "rig"
-endpoint = "http://localhost:1234/v1"
-model = "qwen/qwen3-coder-30b"
+endpoint = "http://127.0.0.1:1234/v1"  # or "https://api.openai.com/v1"
+model = "gpt-4o-mini"  # or your local model name
 ```
 
-The service will build a Rig client pointing at the endpoint and use it for agent routing; if the analyzer is disabled or no model is configured, mmry falls back to deterministic no-op behavior.
+For OpenAI, set the `OPENAI_API_KEY` environment variable. For local servers, no API key is needed.
+
+If the analyzer is disabled or no endpoint is configured, mmry falls back to heuristic-based extraction.
 
 ## HMLR: Hierarchical Memory Ledger with Routing
 

@@ -1178,32 +1178,43 @@ fn normalize_rig_base_url(raw: &str) -> Option<String> {
 }
 
 fn build_analyzer(config: &Config) -> Arc<dyn Analyzer + Send + Sync> {
-    if config.analyzer.enabled && config.analyzer.provider.eq_ignore_ascii_case("rig") {
-        if let Some(base) = config
-            .analyzer
-            .endpoint
-            .as_deref()
-            .and_then(normalize_rig_base_url)
-        {
-            let api_key = std::env::var("OPENAI_API_KEY")
-                .ok()
-                .filter(|k| !k.is_empty())
-                .unwrap_or_else(|| "mmry-local".to_string());
-            let builder = openai::CompletionsClient::builder()
-                .api_key(&api_key)
-                .base_url(&base);
-            if let Ok(client) = builder.build() {
-                let model = config
-                    .analyzer
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "qwen/qwen3-coder-30b".to_string());
-                return Arc::new(RigAnalyzer::new(model, client));
-            }
-        }
+    if !config.analyzer.enabled {
+        return Arc::new(NoOpAnalyzer);
     }
 
-    Arc::new(NoOpAnalyzer)
+    let Some(base) = config
+        .analyzer
+        .endpoint
+        .as_deref()
+        .and_then(normalize_rig_base_url)
+    else {
+        tracing::warn!("Analyzer enabled but no endpoint configured");
+        return Arc::new(NoOpAnalyzer);
+    };
+
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| "mmry-local".to_string());
+
+    let builder = openai::CompletionsClient::builder()
+        .api_key(&api_key)
+        .base_url(&base);
+
+    match builder.build() {
+        Ok(client) => {
+            let model = config
+                .analyzer
+                .model
+                .clone()
+                .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            Arc::new(RigAnalyzer::new(model, client))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to build analyzer client: {e}");
+            Arc::new(NoOpAnalyzer)
+        }
+    }
 }
 
 async fn idle_timeout_task(state: Arc<ServiceState>, timeout_seconds: u64) {
@@ -1267,7 +1278,6 @@ mod tests {
         config.sparse_embeddings.enabled = false;
         config.service.enabled = false;
         config.analyzer.enabled = true;
-        config.analyzer.provider = "rig".to_string();
         config.analyzer.model = Some("rig-local".to_string());
 
         let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
@@ -1311,7 +1321,6 @@ mod tests {
         config.sparse_embeddings.enabled = false;
         config.service.enabled = false;
         config.analyzer.enabled = true;
-        config.analyzer.provider = "rig".to_string();
 
         let desired_block = uuid::Uuid::new_v4();
 
@@ -1395,7 +1404,6 @@ mod tests {
         config.sparse_embeddings.enabled = false;
         config.service.enabled = false;
         config.analyzer.enabled = true;
-        config.analyzer.provider = "rig".to_string();
         config.analyzer.model = Some(
             std::env::var("LOCAL_RIG_MODEL").unwrap_or_else(|_| "qwen/qwen3-coder-30b".to_string()),
         );

@@ -200,12 +200,12 @@ request_timeout_seconds = 30
 # Enable analyzer-backed features (fact extraction, intelligent routing)
 # When enabled, uses LLM for smarter fact extraction and bridge block routing
 enabled = false
-# Provider: "rig" for LLM-based analysis, "none" for heuristics only
-provider = "rig"
-# Model identifier (optional, uses provider default if not set)
-# model = "qwen/qwen3-coder-30b"
-# Optional endpoint for local LLM (e.g., LM Studio, Ollama)
-# endpoint = "http://localhost:1234/v1"
+# Model identifier (e.g., "gpt-4o-mini", "qwen/qwen3-coder-30b")
+# model = "gpt-4o-mini"
+# HTTP endpoint for OpenAI-compatible API
+# For local LLM (LM Studio, Ollama, vLLM): "http://127.0.0.1:1234/v1"
+# For OpenAI: "https://api.openai.com/v1" (set OPENAI_API_KEY env var)
+# endpoint = "http://127.0.0.1:1234/v1"
 
 [hmlr]
 # Enable HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline

@@ -1,8 +1,11 @@
+use crate::config::ExternalApiConfig;
 use crate::memory::ChunkMethod;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
 use crate::service::manager::ServiceManager;
 use crate::Result;
+use serde::Deserialize;
+use serde::Serialize;
 
 // Include generated protobuf code
 mod proto {
@@ -17,16 +20,78 @@ use proto::SearchRequest;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
+/// Request payload for HMLR memory enrichment via external API
+#[derive(Debug, Serialize)]
+pub struct EnrichMemoryRequest {
+    /// Content of the memory to enrich
+    pub content: String,
+    /// Category for the memory
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Memory type: episodic, semantic, procedural
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_type: Option<String>,
+    /// Tags for the memory
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// Importance score (1-10)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub importance: Option<i32>,
+    /// Agent ID (UUID)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Optional query/prompt that led to this memory
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+/// Response from HMLR memory enrichment
+#[derive(Debug, Deserialize)]
+pub struct EnrichMemoryResponse {
+    /// Created memory ID
+    pub id: String,
+    /// Memory type
+    pub memory_type: String,
+    /// Category
+    pub category: String,
+    /// Tags
+    pub tags: Vec<String>,
+    /// Importance
+    pub importance: i32,
+    /// Facts extracted (if HMLR enabled)
+    pub facts_extracted: usize,
+    /// Bridge block ID (if HMLR enabled and routing active)
+    pub bridge_block_id: Option<String>,
+    /// Whether this started a new topic
+    pub is_new_topic: bool,
+    /// Created timestamp
+    pub created_at: String,
+}
+
 pub struct DaemonClient {
     client: Option<EmbeddingServiceClient<Channel>>,
+    http_client: reqwest::Client,
     manager: ServiceManager,
+    api_config: Option<ExternalApiConfig>,
 }
 
 impl DaemonClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
             client: None,
+            http_client: reqwest::Client::new(),
             manager: ServiceManager::new()?,
+            api_config: None,
+        })
+    }
+
+    /// Create a new client with external API configuration
+    pub fn with_api_config(api_config: ExternalApiConfig) -> Result<Self> {
+        Ok(Self {
+            client: None,
+            http_client: reqwest::Client::new(),
+            manager: ServiceManager::new()?,
+            api_config: Some(api_config),
         })
     }
 
@@ -53,6 +118,89 @@ impl DaemonClient {
 
         self.client = Some(EmbeddingServiceClient::new(channel));
         Ok(())
+    }
+
+    /// Get the external API base URL
+    fn get_api_url(&self) -> Result<String> {
+        let config = self
+            .api_config
+            .as_ref()
+            .ok_or_else(|| crate::Error::Service("External API not configured".into()))?;
+
+        if !config.enable {
+            return Err(crate::Error::Service("External API not enabled".into()));
+        }
+
+        Ok(format!("http://{}:{}", config.host, config.port))
+    }
+
+    /// Build authorization header if API key is configured
+    fn get_auth_header(&self) -> Option<String> {
+        self.api_config
+            .as_ref()
+            .and_then(|c| c.api_key.as_ref())
+            .filter(|k| !k.is_empty())
+            .map(|k| format!("Bearer {k}"))
+    }
+
+    /// Enrich a memory using the external API's HMLR pipeline (with LLM support)
+    ///
+    /// This calls the service's /v1/agents/memories endpoint which uses the
+    /// configured LLM analyzer for fact extraction and routing.
+    pub async fn enrich_memory(
+        &self,
+        request: EnrichMemoryRequest,
+    ) -> Result<EnrichMemoryResponse> {
+        let base_url = self.get_api_url()?;
+        let url = format!("{base_url}/v1/agents/memories");
+
+        let mut req = self.http_client.post(&url).json(&request);
+
+        if let Some(auth) = self.get_auth_header() {
+            req = req.header("Authorization", auth);
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|e| crate::Error::Service(format!("HTTP request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(crate::Error::Service(format!(
+                "API error ({status}): {body}"
+            )));
+        }
+
+        response
+            .json::<EnrichMemoryResponse>()
+            .await
+            .map_err(|e| crate::Error::Service(format!("Failed to parse response: {e}")))
+    }
+
+    /// Check if the external API is available
+    pub async fn is_api_available(&self) -> bool {
+        let Ok(base_url) = self.get_api_url() else {
+            return false;
+        };
+
+        // Try to connect to the API (a simple health check would be better,
+        // but for now we just check if we can establish a connection)
+        let url = format!("{base_url}/v1/embeddings");
+        let mut req = self.http_client.post(&url).json(&serde_json::json!({
+            "input": "test"
+        }));
+
+        if let Some(auth) = self.get_auth_header() {
+            req = req.header("Authorization", auth);
+        }
+
+        // We don't care about the response, just that we can connect
+        req.send().await.is_ok()
     }
 
     pub async fn embed(&mut self, text: &str) -> Result<Option<Vec<f32>>> {

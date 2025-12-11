@@ -31,6 +31,7 @@ unicode-segmentation = "1.12"
 tokenizers = { workspace = true }
 ureq = { version = "2.10", optional = true }
 schemars = { workspace = true }
+reqwest = { workspace = true, optional = true }
 
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
@@ -38,7 +39,7 @@ sysinfo = { version = "0.32", optional = true }
 
 [features]
 default = ["service"]
-service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build"]
+service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "dep:reqwest"]
 ner = []
 
 [build-dependencies]

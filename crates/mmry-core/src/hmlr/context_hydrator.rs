@@ -143,7 +143,7 @@ impl ContextHydrator {
                     }
                     InactiveBlockStrategy::MetadataOnly => {
                         let metadata = self.extract_block_metadata(pool, block).await?;
-                        let tokens = estimate_tokens(&format!("{:?}", metadata));
+                        let tokens = estimate_tokens(&format!("{metadata:?}"));
                         if tokens <= remaining_tokens {
                             remaining_tokens -= tokens;
                             context.inactive_block_metadata.push(metadata);

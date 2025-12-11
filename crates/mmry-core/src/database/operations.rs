@@ -19,19 +19,25 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
 
     let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
     let embedding_vec = match embedding {
-        Some(bytes) => Some(serde_json::from_slice::<Vec<f32>>(&bytes).map_err(|e| {
-            crate::Error::InvalidInput(format!("Invalid embedding for memory {id}: {e}"))
-        })?),
+        Some(bytes) => match serde_json::from_slice::<Vec<f32>>(&bytes) {
+            Ok(vec) => Some(vec),
+            Err(e) => {
+                tracing::warn!(memory_id = %id, error = %e, "Invalid dense embedding stored; skipping value");
+                None
+            }
+        },
         None => None,
     };
 
     let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
     let sparse_embedding_vec = match sparse_embedding {
-        Some(bytes) => Some(
-            serde_json::from_slice::<StoredSparseEmbedding>(&bytes).map_err(|e| {
-                crate::Error::InvalidInput(format!("Invalid sparse embedding for memory {id}: {e}"))
-            })?,
-        ),
+        Some(bytes) => match serde_json::from_slice::<StoredSparseEmbedding>(&bytes) {
+            Ok(vec) => Some(vec),
+            Err(e) => {
+                tracing::warn!(memory_id = %id, error = %e, "Invalid sparse embedding stored; skipping value");
+                None
+            }
+        },
         None => None,
     };
 
