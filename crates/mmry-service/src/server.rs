@@ -19,6 +19,12 @@ use mmry_core::analysis::NoOpAnalyzer;
 use mmry_core::config::Config;
 use mmry_core::config::ExternalApiConfig;
 use mmry_core::database::operations;
+use mmry_core::hmlr::prompts::fact_extraction_prompt;
+use mmry_core::hmlr::prompts::parse_facts_response;
+use mmry_core::hmlr::prompts::parse_filtering_response;
+use mmry_core::hmlr::prompts::two_key_filtering_prompt;
+use mmry_core::hmlr::prompts::FilteringResult;
+use mmry_core::hmlr::prompts::MemoryCandidate;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankScore;
 use mmry_core::search::SearchService;
@@ -232,8 +238,32 @@ impl RigAnalyzer {
 
 #[async_trait]
 impl Analyzer for RigAnalyzer {
-    async fn extract_facts(&self, _content: &str) -> mmry_core::Result<Vec<FactRecord>> {
-        Ok(Vec::new())
+    async fn extract_facts(&self, content: &str) -> mmry_core::Result<Vec<FactRecord>> {
+        let prompt = fact_extraction_prompt(content);
+
+        let model = self.client.completion_model(self.model_name.clone());
+        let request = model
+            .completion_request(RigMessage::User {
+                content: OneOrMany::one(UserContent::text(prompt)),
+            })
+            .temperature(0.0)
+            .build();
+
+        let response: RigCompletionResponse<_> = model
+            .completion(request)
+            .await
+            .map_err(|e| mmry_core::Error::Service(format!("Rig completion failed: {e}")))?;
+
+        let facts = response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                AssistantContent::Text(t) => Some(parse_facts_response(&t.text)),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        Ok(facts)
     }
 
     async fn route(
@@ -281,6 +311,45 @@ impl Analyzer for RigAnalyzer {
             .and_then(|val| parse_routing_from_content(&val));
 
         Ok(routing.unwrap_or_else(AnalyzerRouting::new_topic))
+    }
+
+    async fn filter_memories(
+        &self,
+        query: &str,
+        candidates: &[MemoryCandidate],
+    ) -> mmry_core::Result<FilteringResult> {
+        if candidates.is_empty() {
+            return Ok(FilteringResult::default());
+        }
+
+        let prompt = two_key_filtering_prompt(query, candidates);
+
+        let model = self.client.completion_model(self.model_name.clone());
+        let request = model
+            .completion_request(RigMessage::User {
+                content: OneOrMany::one(UserContent::text(prompt)),
+            })
+            .temperature(0.0)
+            .build();
+
+        let response: RigCompletionResponse<_> = model
+            .completion(request)
+            .await
+            .map_err(|e| mmry_core::Error::Service(format!("Rig completion failed: {e}")))?;
+
+        let result = response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                AssistantContent::Text(t) => Some(parse_filtering_response(&t.text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| FilteringResult {
+                relevant_indices: candidates.iter().map(|c| c.index).collect(),
+                reasoning: None,
+            });
+
+        Ok(result)
     }
 }
 
@@ -851,6 +920,13 @@ async fn agent_memory_create_handler(
         memory.importance = importance.clamp(1, 10);
     }
 
+    // Store original query in metadata for 2-key filtering during retrieval
+    if let Some(query) = &payload.query {
+        if let Some(obj) = memory.metadata.as_object_mut() {
+            obj.insert("original_query".to_string(), json!(query));
+        }
+    }
+
     // Generate embeddings if enabled
     {
         let service_arc = app_state.state.get_embedding_service().await;
@@ -1017,7 +1093,8 @@ async fn agent_route_handler(
         search_service.search_with_options(
             &payload.query,
             payload.category.as_deref(),
-            limit,
+            // Request more candidates for filtering
+            limit * 2,
             None,
             None,
         ),
@@ -1026,7 +1103,61 @@ async fn agent_route_handler(
     .map_err(|_| ApiError::timeout("Search request timed out"))?
     .map_err(|e| ApiError::internal(format!("Search failed: {e}")))?;
 
-    let contexts: Vec<AgentMemory> = memories.into_iter().map(AgentMemory::from).collect();
+    // Apply 2-key filtering if analyzer is enabled and we have candidates
+    let filtered_memories = if app_state.state.config.analyzer.enabled && !memories.is_empty() {
+        let candidates: Vec<MemoryCandidate> = memories
+            .iter()
+            .enumerate()
+            .map(|(idx, m)| {
+                let original_query = m
+                    .metadata
+                    .get("original_query")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                MemoryCandidate {
+                    index: idx,
+                    content: m.content.clone(),
+                    similarity: 0.8, // Default high similarity since we don't have actual scores
+                    original_query,
+                }
+            })
+            .collect();
+
+        match timeout(
+            timeout_duration,
+            app_state
+                .analyzer
+                .filter_memories(&payload.query, &candidates),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                let relevant: Vec<Memory> = result
+                    .relevant_indices
+                    .into_iter()
+                    .filter_map(|idx| memories.get(idx).cloned())
+                    .take(limit as usize)
+                    .collect();
+                if !relevant.is_empty() {
+                    relevant
+                } else {
+                    // If filtering removed everything, fall back to original results
+                    memories.into_iter().take(limit as usize).collect()
+                }
+            }
+            _ => {
+                // On timeout or error, use original results
+                memories.into_iter().take(limit as usize).collect()
+            }
+        }
+    } else {
+        memories.into_iter().take(limit as usize).collect()
+    };
+
+    let contexts: Vec<AgentMemory> = filtered_memories
+        .into_iter()
+        .map(AgentMemory::from)
+        .collect();
 
     let bridge_blocks = operations::list_bridge_blocks_by_span(
         app_state.state.db.pool(),
@@ -1476,6 +1607,150 @@ mod tests {
         assert!(
             routing.chosen_block.is_some() || routing.is_new_topic,
             "routing should either pick a block or mark new topic"
+        );
+    }
+
+    /// Integration test for fact extraction with a real LLM endpoint.
+    /// Run with: RUN_OLLAMA_TEST=1 OLLAMA_URL=http://ubuntuserver:11434 cargo test -p mmry-service fact_extraction_with_ollama -- --nocapture
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fact_extraction_with_ollama() {
+        if std::env::var("RUN_OLLAMA_TEST").is_err() {
+            return;
+        }
+
+        let endpoint =
+            std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://ubuntuserver:11434".to_string());
+        let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3:4b".to_string());
+
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.analyzer.enabled = true;
+        config.analyzer.model = Some(model.clone());
+        config.analyzer.endpoint = Some(format!("{endpoint}/v1"));
+
+        let analyzer = build_analyzer(&config);
+
+        // Test fact extraction
+        let content = "My API key is sk-test123 and HMLR stands for Hierarchical Memory Lookup and Routing. John is the CEO of Acme Corp.";
+        let facts = analyzer
+            .extract_facts(content)
+            .await
+            .expect("fact extraction should succeed");
+
+        println!("Extracted {} facts:", facts.len());
+        for fact in &facts {
+            println!(
+                "  - {} = {} (category: {:?})",
+                fact.fact_key, fact.fact_value, fact.category
+            );
+        }
+
+        // We should extract at least 2 facts (API key and HMLR acronym)
+        assert!(
+            facts.len() >= 2,
+            "Expected at least 2 facts, got {}",
+            facts.len()
+        );
+
+        // Verify we found the secret
+        let has_secret = facts.iter().any(|f| {
+            f.fact_value.contains("sk-test123") || f.fact_key.to_lowercase().contains("api")
+        });
+        assert!(has_secret, "Should find API key secret");
+
+        // Verify we found the acronym
+        let has_acronym = facts.iter().any(|f| {
+            f.fact_key.to_uppercase().contains("HMLR")
+                || f.fact_value.to_lowercase().contains("hierarchical")
+        });
+        assert!(has_acronym, "Should find HMLR acronym/definition");
+    }
+
+    /// Integration test for 2-key filtering with a real LLM endpoint.
+    /// Run with: RUN_OLLAMA_TEST=1 OLLAMA_URL=http://ubuntuserver:11434 cargo test -p mmry-service two_key_filtering_with_ollama -- --nocapture
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_key_filtering_with_ollama() {
+        if std::env::var("RUN_OLLAMA_TEST").is_err() {
+            return;
+        }
+
+        let endpoint =
+            std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://ubuntuserver:11434".to_string());
+        let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3:4b".to_string());
+
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.analyzer.enabled = true;
+        config.analyzer.model = Some(model.clone());
+        config.analyzer.endpoint = Some(format!("{endpoint}/v1"));
+
+        let analyzer = build_analyzer(&config);
+
+        // Create test candidates - some relevant, some false positives
+        let candidates = vec![
+            MemoryCandidate {
+                index: 0,
+                content: "I love Python programming and use it daily for data science.".to_string(),
+                similarity: 0.95,
+                original_query: Some("What are your favorite programming languages?".to_string()),
+            },
+            MemoryCandidate {
+                index: 1,
+                content: "I hate Python because of its slow performance in certain tasks."
+                    .to_string(),
+                similarity: 0.93, // High similarity but opposite sentiment!
+                original_query: Some("What programming languages do you dislike?".to_string()),
+            },
+            MemoryCandidate {
+                index: 2,
+                content: "Python scripts help automate my workflow efficiently.".to_string(),
+                similarity: 0.88,
+                original_query: Some("How do you use Python in your work?".to_string()),
+            },
+            MemoryCandidate {
+                index: 3,
+                content: "I went hiking last weekend in the mountains.".to_string(),
+                similarity: 0.30, // Low similarity, unrelated
+                original_query: Some("What did you do this weekend?".to_string()),
+            },
+        ];
+
+        let query = "Tell me about your Python programming experience";
+        let result = analyzer
+            .filter_memories(query, &candidates)
+            .await
+            .expect("filtering should succeed");
+
+        println!("Query: {query}");
+        println!("Filtering result: {:?}", result.relevant_indices);
+        println!("Reasoning: {:?}", result.reasoning);
+
+        // Index 0 and 2 should be relevant (positive Python experiences)
+        // Index 1 should be filtered out (opposite sentiment - "hate" vs asking about experience)
+        // Index 3 should be filtered out (unrelated to Python)
+        assert!(
+            result.relevant_indices.contains(&0),
+            "Should keep index 0 (loves Python)"
+        );
+        assert!(
+            result.relevant_indices.contains(&2),
+            "Should keep index 2 (Python workflow)"
+        );
+        // The LLM might or might not filter out index 1, depending on interpretation
+        // But it should definitely filter out index 3
+        assert!(
+            !result.relevant_indices.contains(&3),
+            "Should filter out index 3 (hiking, unrelated)"
         );
     }
 

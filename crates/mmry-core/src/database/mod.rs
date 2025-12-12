@@ -481,6 +481,56 @@ impl Database {
             .execute(pool)
             .await?;
 
+        // Add fact category and provenance columns if missing (from migration 20251212000000)
+        let facts_has_category: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('facts') WHERE name='category'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !facts_has_category {
+            tracing::info!("Adding category and provenance columns to facts table...");
+            sqlx::query("ALTER TABLE facts ADD COLUMN category TEXT DEFAULT 'General'")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE facts ADD COLUMN evidence_snippet TEXT")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE facts ADD COLUMN source_chunk_id TEXT")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE facts ADD COLUMN source_paragraph_id TEXT")
+                .execute(pool)
+                .await?;
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category)")
+                .execute(pool)
+                .await?;
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_chunk ON facts(source_chunk_id)")
+                .execute(pool)
+                .await?;
+            tracing::info!("Fact category and provenance columns added");
+        }
+
+        // Add bridge block metadata columns if missing (from migration 20251212100000)
+        let bridge_has_open_loops: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('bridge_blocks') WHERE name='open_loops'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !bridge_has_open_loops {
+            tracing::info!(
+                "Adding open_loops and decisions_made columns to bridge_blocks table..."
+            );
+            sqlx::query("ALTER TABLE bridge_blocks ADD COLUMN open_loops JSON DEFAULT '[]'")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE bridge_blocks ADD COLUMN decisions_made JSON DEFAULT '[]'")
+                .execute(pool)
+                .await?;
+            tracing::info!("Bridge block metadata columns added");
+        }
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS user_profiles (

@@ -72,6 +72,14 @@ pub struct BridgeBlock {
     pub content: Value,
     pub agent_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+    /// Unresolved questions or tasks within this conversation topic
+    /// Example: ["What is the deployment timeline?", "Need to confirm API rate limits"]
+    #[serde(default)]
+    pub open_loops: Vec<String>,
+    /// Key decisions made during this conversation topic
+    /// Example: ["Use PostgreSQL for the database", "Deploy to AWS us-east-1"]
+    #[serde(default)]
+    pub decisions_made: Vec<String>,
 }
 
 impl Default for BridgeBlock {
@@ -92,6 +100,68 @@ impl BridgeBlock {
             content: Value::Object(serde_json::Map::new()),
             agent_id: None,
             created_at: Utc::now(),
+            open_loops: Vec::new(),
+            decisions_made: Vec::new(),
+        }
+    }
+
+    /// Add an open loop (unresolved question/task) to this block
+    pub fn add_open_loop<S: Into<String>>(&mut self, question: S) {
+        let q = question.into();
+        if !self.open_loops.contains(&q) {
+            self.open_loops.push(q);
+        }
+    }
+
+    /// Close an open loop (mark question/task as resolved)
+    pub fn close_open_loop(&mut self, question: &str) {
+        self.open_loops.retain(|q| q != question);
+    }
+
+    /// Record a decision made during this conversation
+    pub fn add_decision<S: Into<String>>(&mut self, decision: S) {
+        let d = decision.into();
+        if !self.decisions_made.contains(&d) {
+            self.decisions_made.push(d);
+        }
+    }
+}
+
+/// Category of extracted fact for better organization and retrieval
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum FactCategory {
+    /// Definitions of terms or concepts
+    Definition,
+    /// Acronym expansions (e.g., "API = Application Programming Interface")
+    Acronym,
+    /// Credentials, API keys, passwords, tokens
+    Secret,
+    /// Relationships between entities (e.g., "John is CEO of X")
+    Entity,
+    /// Generic fact that doesn't fit other categories
+    #[default]
+    General,
+}
+
+impl FactCategory {
+    /// Parse category from string (case-insensitive)
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "definition" => Self::Definition,
+            "acronym" => Self::Acronym,
+            "secret" => Self::Secret,
+            "entity" => Self::Entity,
+            _ => Self::General,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Definition => "Definition",
+            Self::Acronym => "Acronym",
+            Self::Secret => "Secret",
+            Self::Entity => "Entity",
+            Self::General => "General",
         }
     }
 }
@@ -101,8 +171,16 @@ pub struct FactRecord {
     pub id: Uuid,
     pub fact_key: String,
     pub fact_value: String,
+    /// Category of the fact (Definition, Acronym, Secret, Entity, General)
+    pub category: FactCategory,
+    /// 10-20 word snippet of context around the fact for provenance
+    pub evidence_snippet: Option<String>,
     pub source_span: Option<String>,
     pub turn_id: Option<String>,
+    /// Source chunk ID for sentence-level provenance
+    pub source_chunk_id: Option<String>,
+    /// Source paragraph chunk ID for broader context
+    pub source_paragraph_id: Option<String>,
     pub observed_at: DateTime<Utc>,
     pub recency_score: f32,
     pub metadata: Value,
@@ -115,13 +193,28 @@ impl FactRecord {
             id: Uuid::new_v4(),
             fact_key: key.into(),
             fact_value: value.into(),
+            category: FactCategory::General,
+            evidence_snippet: None,
             source_span: None,
             turn_id: None,
+            source_chunk_id: None,
+            source_paragraph_id: None,
             observed_at: Utc::now(),
             recency_score: 1.0,
             metadata: Value::Object(serde_json::Map::new()),
             agent_id: None,
         }
+    }
+
+    /// Create a fact with a specific category
+    pub fn with_category<K: Into<String>, V: Into<String>>(
+        key: K,
+        value: V,
+        category: FactCategory,
+    ) -> Self {
+        let mut fact = Self::new(key, value);
+        fact.category = category;
+        fact
     }
 }
 

@@ -3,6 +3,7 @@ use super::upsert_vector_embedding;
 use crate::agents::AgentEvent;
 use crate::agents::AgentRecord;
 use crate::agents::BridgeBlock;
+use crate::agents::FactCategory;
 use crate::agents::FactRecord;
 use crate::agents::UserProfileEntry;
 use crate::memory::Memory;
@@ -331,8 +332,8 @@ pub async fn record_agent_event(pool: &SqlitePool, event: &AgentEvent) -> crate:
 pub async fn upsert_bridge_block(pool: &SqlitePool, block: &BridgeBlock) -> crate::Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO bridge_blocks (block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO bridge_blocks (block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(block_id) DO UPDATE SET
             span_id = excluded.span_id,
             topic_label = excluded.topic_label,
@@ -340,7 +341,9 @@ pub async fn upsert_bridge_block(pool: &SqlitePool, block: &BridgeBlock) -> crat
             status = excluded.status,
             exit_reason = excluded.exit_reason,
             content_json = excluded.content_json,
-            agent_id = excluded.agent_id
+            agent_id = excluded.agent_id,
+            open_loops = excluded.open_loops,
+            decisions_made = excluded.decisions_made
         "#,
     )
     .bind(block.block_id.to_string())
@@ -352,6 +355,8 @@ pub async fn upsert_bridge_block(pool: &SqlitePool, block: &BridgeBlock) -> crat
     .bind(block.content.to_string())
     .bind(block.agent_id.map(|id| id.to_string()))
     .bind(block.created_at.to_rfc3339())
+    .bind(serde_json::to_string(&block.open_loops)?)
+    .bind(serde_json::to_string(&block.decisions_made)?)
     .execute(pool)
     .await?;
 
@@ -366,7 +371,7 @@ pub async fn list_bridge_blocks_by_span(
     let rows = if let Some(id) = span_id {
         sqlx::query(
             r#"
-            SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at
+            SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
             FROM bridge_blocks
             WHERE span_id = ?
             ORDER BY created_at DESC
@@ -380,7 +385,7 @@ pub async fn list_bridge_blocks_by_span(
     } else {
         sqlx::query(
             r#"
-            SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at
+            SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
             FROM bridge_blocks
             ORDER BY created_at DESC
             LIMIT ?
@@ -430,6 +435,8 @@ pub async fn list_bridge_blocks_by_span(
         let keywords: String = row.try_get("keywords").unwrap_or_default();
         let content_json: String = row.try_get("content_json").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+        let open_loops: String = row.try_get("open_loops").unwrap_or_default();
+        let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
 
         blocks.push(BridgeBlock {
             block_id,
@@ -442,6 +449,8 @@ pub async fn list_bridge_blocks_by_span(
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
             created_at,
+            open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
+            decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
         });
     }
 
@@ -455,13 +464,17 @@ pub async fn list_bridge_blocks(pool: &SqlitePool, limit: i64) -> crate::Result<
 pub async fn upsert_fact(pool: &SqlitePool, fact: &FactRecord) -> crate::Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO facts (id, fact_key, fact_value, source_span, turn_id, observed_at, recency_score, metadata, agent_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO facts (id, fact_key, fact_value, category, evidence_snippet, source_span, turn_id, source_chunk_id, source_paragraph_id, observed_at, recency_score, metadata, agent_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             fact_key = excluded.fact_key,
             fact_value = excluded.fact_value,
+            category = excluded.category,
+            evidence_snippet = excluded.evidence_snippet,
             source_span = excluded.source_span,
             turn_id = excluded.turn_id,
+            source_chunk_id = excluded.source_chunk_id,
+            source_paragraph_id = excluded.source_paragraph_id,
             observed_at = excluded.observed_at,
             recency_score = excluded.recency_score,
             metadata = excluded.metadata,
@@ -471,8 +484,12 @@ pub async fn upsert_fact(pool: &SqlitePool, fact: &FactRecord) -> crate::Result<
     .bind(fact.id.to_string())
     .bind(&fact.fact_key)
     .bind(&fact.fact_value)
+    .bind(fact.category.as_str())
+    .bind(&fact.evidence_snippet)
     .bind(&fact.source_span)
     .bind(&fact.turn_id)
+    .bind(&fact.source_chunk_id)
+    .bind(&fact.source_paragraph_id)
     .bind(fact.observed_at.to_rfc3339())
     .bind(fact.recency_score)
     .bind(fact.metadata.to_string())
@@ -490,7 +507,7 @@ pub async fn list_facts_by_key(
 ) -> crate::Result<Vec<FactRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, fact_key, fact_value, source_span, turn_id, observed_at, recency_score, metadata, agent_id
+        SELECT id, fact_key, fact_value, category, evidence_snippet, source_span, turn_id, source_chunk_id, source_paragraph_id, observed_at, recency_score, metadata, agent_id
         FROM facts
         WHERE fact_key = ?
         ORDER BY recency_score DESC, observed_at DESC
@@ -540,13 +557,20 @@ pub async fn list_facts_by_key(
 
         let metadata: String = row.try_get("metadata").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+        let category_str: String = row
+            .try_get("category")
+            .unwrap_or_else(|_| "General".to_string());
 
         facts.push(FactRecord {
             id: parsed_id,
             fact_key: row.try_get("fact_key").unwrap_or_default(),
             fact_value: row.try_get("fact_value").unwrap_or_default(),
+            category: FactCategory::parse(&category_str),
+            evidence_snippet: row.try_get("evidence_snippet").ok().flatten(),
             source_span: row.try_get("source_span").ok().flatten(),
             turn_id: row.try_get("turn_id").ok().flatten(),
+            source_chunk_id: row.try_get("source_chunk_id").ok().flatten(),
+            source_paragraph_id: row.try_get("source_paragraph_id").ok().flatten(),
             observed_at,
             recency_score: row.try_get("recency_score").unwrap_or(0.0),
             metadata: serde_json::from_str(&metadata)
@@ -651,7 +675,7 @@ pub async fn count_agents(pool: &SqlitePool) -> crate::Result<i64> {
 pub async fn list_recent_facts(pool: &SqlitePool, limit: i64) -> crate::Result<Vec<FactRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, fact_key, fact_value, source_span, turn_id, observed_at, recency_score, metadata, agent_id
+        SELECT id, fact_key, fact_value, category, evidence_snippet, source_span, turn_id, source_chunk_id, source_paragraph_id, observed_at, recency_score, metadata, agent_id
         FROM facts
         ORDER BY observed_at DESC
         LIMIT ?
@@ -699,13 +723,20 @@ pub async fn list_recent_facts(pool: &SqlitePool, limit: i64) -> crate::Result<V
 
         let metadata: String = row.try_get("metadata").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+        let category_str: String = row
+            .try_get("category")
+            .unwrap_or_else(|_| "General".to_string());
 
         facts.push(FactRecord {
             id: parsed_id,
             fact_key: row.try_get("fact_key").unwrap_or_default(),
             fact_value: row.try_get("fact_value").unwrap_or_default(),
+            category: FactCategory::parse(&category_str),
+            evidence_snippet: row.try_get("evidence_snippet").ok().flatten(),
             source_span: row.try_get("source_span").ok().flatten(),
             turn_id: row.try_get("turn_id").ok().flatten(),
+            source_chunk_id: row.try_get("source_chunk_id").ok().flatten(),
+            source_paragraph_id: row.try_get("source_paragraph_id").ok().flatten(),
             observed_at,
             recency_score: row.try_get("recency_score").unwrap_or(0.0),
             metadata: serde_json::from_str(&metadata)
@@ -915,7 +946,7 @@ pub async fn get_recent_bridge_blocks_for_agent(
 ) -> crate::Result<Vec<BridgeBlock>> {
     let rows = sqlx::query(
         r#"
-        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
         FROM bridge_blocks
         WHERE agent_id = ?
         ORDER BY created_at DESC
@@ -966,6 +997,8 @@ pub async fn get_recent_bridge_blocks_for_agent(
         let keywords: String = row.try_get("keywords").unwrap_or_default();
         let content_json: String = row.try_get("content_json").unwrap_or_default();
         let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+        let open_loops: String = row.try_get("open_loops").unwrap_or_default();
+        let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
 
         blocks.push(BridgeBlock {
             block_id,
@@ -978,6 +1011,8 @@ pub async fn get_recent_bridge_blocks_for_agent(
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
             created_at,
+            open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
+            decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
         });
     }
 
@@ -991,7 +1026,7 @@ pub async fn get_bridge_block(
 ) -> crate::Result<Option<BridgeBlock>> {
     let row = sqlx::query(
         r#"
-        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
         FROM bridge_blocks
         WHERE block_id = ?
         "#,
@@ -1016,6 +1051,8 @@ pub async fn get_bridge_block(
         let keywords: String = row.try_get("keywords").unwrap_or_default();
         let content_json: String = row.try_get("content_json").unwrap_or_default();
         let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+        let open_loops: String = row.try_get("open_loops").unwrap_or_default();
+        let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
 
         Ok(Some(BridgeBlock {
             block_id: parsed_block_id,
@@ -1028,6 +1065,8 @@ pub async fn get_bridge_block(
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
             created_at,
+            open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
+            decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
         }))
     } else {
         Ok(None)
@@ -1043,7 +1082,7 @@ pub async fn get_facts_for_memory(
     // Facts are linked to memories via agent_events that reference the memory
     let rows = sqlx::query(
         r#"
-        SELECT f.id, f.fact_key, f.fact_value, f.source_span, f.turn_id, f.observed_at, f.recency_score, f.metadata, f.agent_id
+        SELECT f.id, f.fact_key, f.fact_value, f.category, f.evidence_snippet, f.source_span, f.turn_id, f.source_chunk_id, f.source_paragraph_id, f.observed_at, f.recency_score, f.metadata, f.agent_id
         FROM facts f
         INNER JOIN agent_events ae ON f.turn_id = ae.id
         WHERE ae.memory_id = ?
@@ -1094,13 +1133,20 @@ pub async fn get_facts_for_memory(
 
         let metadata: String = row.try_get("metadata").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+        let category_str: String = row
+            .try_get("category")
+            .unwrap_or_else(|_| "General".to_string());
 
         facts.push(FactRecord {
             id: parsed_id,
             fact_key: row.try_get("fact_key").unwrap_or_default(),
             fact_value: row.try_get("fact_value").unwrap_or_default(),
+            category: FactCategory::parse(&category_str),
+            evidence_snippet: row.try_get("evidence_snippet").ok().flatten(),
             source_span: row.try_get("source_span").ok().flatten(),
             turn_id: row.try_get("turn_id").ok().flatten(),
+            source_chunk_id: row.try_get("source_chunk_id").ok().flatten(),
+            source_paragraph_id: row.try_get("source_paragraph_id").ok().flatten(),
             observed_at,
             recency_score: row.try_get("recency_score").unwrap_or(0.0),
             metadata: serde_json::from_str(&metadata)
@@ -1229,7 +1275,7 @@ pub async fn get_bridge_block_by_span(
 ) -> crate::Result<Option<BridgeBlock>> {
     let row = sqlx::query(
         r#"
-        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
         FROM bridge_blocks
         WHERE span_id = ?
         "#,
@@ -1254,6 +1300,8 @@ pub async fn get_bridge_block_by_span(
         let keywords: String = row.try_get("keywords").unwrap_or_default();
         let content_json: String = row.try_get("content_json").unwrap_or_default();
         let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+        let open_loops: String = row.try_get("open_loops").unwrap_or_default();
+        let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
 
         Ok(Some(BridgeBlock {
             block_id: parsed_block_id,
@@ -1266,6 +1314,8 @@ pub async fn get_bridge_block_by_span(
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
             created_at,
+            open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
+            decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
         }))
     } else {
         Ok(None)
@@ -1281,7 +1331,7 @@ pub async fn search_facts(
     let search_pattern = format!("%{query}%");
     let rows = sqlx::query(
         r#"
-        SELECT id, fact_key, fact_value, source_span, turn_id, observed_at, recency_score, metadata, agent_id
+        SELECT id, fact_key, fact_value, category, evidence_snippet, source_span, turn_id, source_chunk_id, source_paragraph_id, observed_at, recency_score, metadata, agent_id
         FROM facts
         WHERE fact_key LIKE ? OR fact_value LIKE ?
         ORDER BY recency_score DESC, observed_at DESC
@@ -1332,13 +1382,20 @@ pub async fn search_facts(
 
         let metadata: String = row.try_get("metadata").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+        let category_str: String = row
+            .try_get("category")
+            .unwrap_or_else(|_| "General".to_string());
 
         facts.push(FactRecord {
             id: parsed_id,
             fact_key: row.try_get("fact_key").unwrap_or_default(),
             fact_value: row.try_get("fact_value").unwrap_or_default(),
+            category: FactCategory::parse(&category_str),
+            evidence_snippet: row.try_get("evidence_snippet").ok().flatten(),
             source_span: row.try_get("source_span").ok().flatten(),
             turn_id: row.try_get("turn_id").ok().flatten(),
+            source_chunk_id: row.try_get("source_chunk_id").ok().flatten(),
+            source_paragraph_id: row.try_get("source_paragraph_id").ok().flatten(),
             observed_at,
             recency_score: row.try_get("recency_score").unwrap_or(0.0),
             metadata: serde_json::from_str(&metadata)

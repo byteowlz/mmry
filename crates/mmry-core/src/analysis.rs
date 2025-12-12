@@ -1,5 +1,7 @@
 use crate::agents::BridgeBlock;
 use crate::agents::FactRecord;
+use crate::hmlr::prompts::FilteringResult;
+use crate::hmlr::prompts::MemoryCandidate;
 use crate::Result;
 use async_trait::async_trait;
 
@@ -33,6 +35,21 @@ pub trait Analyzer: Send + Sync {
     async fn route(&self, _query: &str, _candidates: &[BridgeBlock]) -> Result<AnalyzerRouting> {
         Ok(AnalyzerRouting::new_topic())
     }
+
+    /// Filter memory candidates using 2-key validation (similarity + original query).
+    /// This catches false positives where high vector similarity doesn't mean relevance.
+    /// Example: "I love Python" vs "I hate Python" = 95% similar but OPPOSITE meaning.
+    async fn filter_memories(
+        &self,
+        _query: &str,
+        _candidates: &[MemoryCandidate],
+    ) -> Result<FilteringResult> {
+        // Default: return all candidates (no filtering)
+        Ok(FilteringResult {
+            relevant_indices: _candidates.iter().map(|c| c.index).collect(),
+            reasoning: None,
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -46,5 +63,17 @@ impl Analyzer for NoOpAnalyzer {
 
     async fn route(&self, _query: &str, _candidates: &[BridgeBlock]) -> Result<AnalyzerRouting> {
         Ok(AnalyzerRouting::new_topic())
+    }
+
+    async fn filter_memories(
+        &self,
+        _query: &str,
+        candidates: &[MemoryCandidate],
+    ) -> Result<FilteringResult> {
+        // NoOp: return all candidates
+        Ok(FilteringResult {
+            relevant_indices: candidates.iter().map(|c| c.index).collect(),
+            reasoning: None,
+        })
     }
 }
