@@ -122,7 +122,7 @@ impl Governor {
         _pool: &SqlitePool,
         memory: &Memory,
     ) -> Result<Vec<FactRecord>> {
-        self.fact_scrubber.extract(&memory.content)
+        self.fact_scrubber.extract(&memory.content).await
     }
 
     /// Run Scribe to update user profile (fire-and-forget)

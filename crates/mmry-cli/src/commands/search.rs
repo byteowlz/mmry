@@ -16,6 +16,7 @@ use mmry_core::service::client::DaemonClient;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use mmry_core::stores::search_all_stores;
 use mmry_core::stores::MemoryWithStore;
+use mmry_core::stores::SearchAllStoresOptions;
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum CliSearchMode {
@@ -100,17 +101,17 @@ pub async fn handle(
     let (resolved_mode, limit, rerank) = resolve_search_opts(&cmd, config);
 
     if cmd.all_stores {
-        let results = search_all_stores(
+        let results = search_all_stores(SearchAllStoresOptions {
             config,
-            &cmd.query,
-            cmd.category.as_deref(),
+            query: &cmd.query,
+            category: cmd.category.as_deref(),
             limit,
-            Some(resolved_mode),
-            Some(rerank),
+            mode: Some(resolved_mode),
+            rerank: Some(rerank),
             embeddings,
             sparse_embeddings,
             reranker,
-        )
+        })
         .await?;
 
         render_results_with_store(&results, resolved_mode, &cmd)?;

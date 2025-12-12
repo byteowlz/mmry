@@ -42,6 +42,9 @@ strsim = "0.11.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Async
+async-trait = "0.1"
+
 # Utilities
 regex = "1.12"
 once_cell = "1.19"

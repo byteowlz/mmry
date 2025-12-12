@@ -23,9 +23,9 @@ impl FactScrubber {
     ///
     /// When analyzer is enabled (LLM-backed), uses LLM for extraction.
     /// When analyzer is NoOp, falls back to heuristic extraction.
-    pub fn extract(&self, content: &str) -> Result<Vec<FactRecord>> {
+    pub async fn extract(&self, content: &str) -> Result<Vec<FactRecord>> {
         // Try analyzer first (may be NoOp which returns empty)
-        let mut facts = self.analyzer.extract_facts(content)?;
+        let mut facts = self.analyzer.extract_facts(content).await?;
 
         // If analyzer returned nothing, use heuristic extraction
         if facts.is_empty() {
@@ -250,11 +250,11 @@ mod tests {
         assert!(!is_capitalized_word("J")); // too short
     }
 
-    #[test]
-    fn test_fact_scrubber_with_noop() {
+    #[tokio::test]
+    async fn test_fact_scrubber_with_noop() {
         let scrubber = FactScrubber::new(Arc::new(NoOpAnalyzer));
         let content = "Sarah is the project lead. name: John";
-        let facts = scrubber.extract(content).unwrap();
+        let facts = scrubber.extract(content).await.unwrap();
 
         // Should find at least the "is" statement
         assert!(facts.iter().any(|f| f.fact_key == "sarah"));

@@ -12,6 +12,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Options for searching across all stores
+pub struct SearchAllStoresOptions<'a> {
+    pub config: &'a Config,
+    pub query: &'a str,
+    pub category: Option<&'a str>,
+    pub limit: i64,
+    pub mode: Option<SearchMode>,
+    pub rerank: Option<bool>,
+    pub embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
+    pub sparse_embeddings: Arc<SparseEmbeddingService>,
+    pub reranker: Arc<RerankerService>,
+}
+
 /// Information about a store
 #[derive(Debug, Clone)]
 pub struct StoreInfo {
@@ -163,17 +176,9 @@ pub struct MemoryWithStore {
 
 /// Search across all stores
 pub async fn search_all_stores(
-    config: &Config,
-    query: &str,
-    category: Option<&str>,
-    limit: i64,
-    mode: Option<SearchMode>,
-    rerank: Option<bool>,
-    embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
-    sparse_embeddings: Arc<SparseEmbeddingService>,
-    reranker: Arc<RerankerService>,
+    opts: SearchAllStoresOptions<'_>,
 ) -> crate::Result<Vec<MemoryWithStore>> {
-    let stores = list_stores(config)?;
+    let stores = list_stores(opts.config)?;
 
     if stores.is_empty() {
         return Ok(vec![]);
@@ -182,17 +187,23 @@ pub async fn search_all_stores(
     let mut all_results = Vec::new();
 
     for store_info in stores {
-        let db = Database::init_store(config, Some(&store_info.name)).await?;
+        let db = Database::init_store(opts.config, Some(&store_info.name)).await?;
         let search_service = SearchService::new(
             db.pool().clone(),
-            config.search.clone(),
-            Arc::clone(&embeddings),
-            Arc::clone(&sparse_embeddings),
-            Arc::clone(&reranker),
+            opts.config.search.clone(),
+            Arc::clone(&opts.embeddings),
+            Arc::clone(&opts.sparse_embeddings),
+            Arc::clone(&opts.reranker),
         );
 
         let results = search_service
-            .search_with_options(query, category, limit, mode, rerank)
+            .search_with_options(
+                opts.query,
+                opts.category,
+                opts.limit,
+                opts.mode,
+                opts.rerank,
+            )
             .await?;
 
         for memory in results {
@@ -207,7 +218,7 @@ pub async fn search_all_stores(
 
     // Sort by relevance (assuming search results are already scored, we keep insertion order)
     // Limit total results
-    all_results.truncate(limit as usize);
+    all_results.truncate(opts.limit as usize);
 
     Ok(all_results)
 }

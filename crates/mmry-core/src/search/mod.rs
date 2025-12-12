@@ -57,6 +57,25 @@ pub enum InactiveBlockStrategy {
     Deprioritize,
 }
 
+/// Options for executing a search query
+#[derive(Debug, Clone, Default)]
+pub struct ExecuteSearchOptions<'a> {
+    /// The search query text
+    pub query: &'a str,
+    /// Optional category filter
+    pub category: Option<&'a str>,
+    /// Maximum number of results
+    pub limit: i64,
+    /// Pre-computed dense embedding for the query
+    pub query_embedding: Option<Vec<f32>>,
+    /// Pre-computed sparse embedding for the query
+    pub query_sparse_embedding: Option<StoredSparseEmbedding>,
+    /// Override the default search mode
+    pub mode_override: Option<SearchMode>,
+    /// Override the default rerank setting
+    pub rerank_override: Option<bool>,
+}
+
 /// HMLR-enhanced search result with facts and bridge blocks
 #[derive(Debug, Clone)]
 pub struct HmlrSearchResult {
@@ -74,6 +93,10 @@ pub struct HmlrSearchResult {
 
 /// Helper function to parse a Memory from a database row  
 fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
+    let id_raw: String = row.try_get("id")?;
+    let id = Uuid::parse_str(&id_raw)
+        .map_err(|e| crate::Error::InvalidInput(format!("Invalid memory id '{id_raw}': {e}")))?;
+
     let embedding_bytes: Option<Vec<u8>> = row.try_get("embedding").ok();
     let embedding_vec =
         embedding_bytes.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
@@ -88,8 +111,26 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
     let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok());
 
+    let created_at_raw: String = row.try_get("created_at")?;
+    let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_raw)
+        .map_err(|e| {
+            crate::Error::InvalidInput(format!(
+                "Invalid created_at for memory {id} ({created_at_raw}): {e}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
+
+    let updated_at_raw: String = row.try_get("updated_at")?;
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_raw)
+        .map_err(|e| {
+            crate::Error::InvalidInput(format!(
+                "Invalid updated_at for memory {id} ({updated_at_raw}): {e}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
+
     Ok(Memory {
-        id: Uuid::parse_str(row.try_get("id")?).unwrap(),
+        id,
         memory_type: serde_json::from_str(row.try_get("type")?)?,
         content: row.try_get("content")?,
         embedding: embedding_vec,
@@ -98,12 +139,8 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         importance: row.try_get("importance")?,
         category: row.try_get("category")?,
         tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
-        created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-            .unwrap()
-            .with_timezone(&chrono::Utc),
+        created_at,
+        updated_at,
         parent_id,
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
@@ -144,29 +181,20 @@ impl SearchService {
         }
     }
 
-    async fn execute_search(
-        &self,
-        query: &str,
-        category: Option<&str>,
-        limit: i64,
-        query_embedding: Option<Vec<f32>>,
-        query_sparse_embedding: Option<StoredSparseEmbedding>,
-        mode_override: Option<SearchMode>,
-        rerank_override: Option<bool>,
-    ) -> Result<Vec<Memory>> {
+    async fn execute_search(&self, opts: ExecuteSearchOptions<'_>) -> Result<Vec<Memory>> {
         let mut vector_distance_hint: HashMap<Uuid, f32> = HashMap::new();
         let mut memories = {
             let mut candidate_ids = Vec::new();
             let mut seen = HashSet::new();
 
-            if let Some(query_vec) = query_embedding.as_ref() {
-                let vector_limit = (limit as usize)
+            if let Some(query_vec) = opts.query_embedding.as_ref() {
+                let vector_limit = (opts.limit as usize)
                     .max(self.config.default_limit)
                     .saturating_mul(VECTOR_CANDIDATE_MULTIPLIER)
                     .min(MAX_CANDIDATE_POOL);
 
                 let vector_candidates = self
-                    .vector_candidates(query_vec, category, vector_limit)
+                    .vector_candidates(query_vec, opts.category, vector_limit)
                     .await?;
 
                 for (id, distance) in vector_candidates {
@@ -179,7 +207,9 @@ impl SearchService {
 
             if candidate_ids.len() < MAX_CANDIDATE_POOL {
                 let fallback_limit = MAX_CANDIDATE_POOL - candidate_ids.len();
-                let recents = self.recent_candidate_ids(category, fallback_limit).await?;
+                let recents = self
+                    .recent_candidate_ids(opts.category, fallback_limit)
+                    .await?;
                 for id in recents {
                     if seen.insert(id) {
                         candidate_ids.push(id);
@@ -201,8 +231,8 @@ impl SearchService {
             return Ok(Vec::new());
         }
 
-        let search_mode = mode_override.unwrap_or(self.config.mode);
-        let query_lower = query.to_lowercase();
+        let search_mode = opts.mode_override.unwrap_or(self.config.mode);
+        let query_lower = opts.query.to_lowercase();
         let query_tokens: Vec<String> = query_lower
             .split_whitespace()
             .filter(|token| !token.is_empty())
@@ -232,14 +262,14 @@ impl SearchService {
 
         let embeddings_enabled = self.embeddings.lock().await.is_enabled();
         for mut memory in memories.drain(..) {
-            if query_embedding.is_some() && memory.embedding.is_none() && embeddings_enabled {
+            if opts.query_embedding.is_some() && memory.embedding.is_none() && embeddings_enabled {
                 let mut emb = self.embeddings.lock().await;
                 if let Some(vector) = emb.embed(&memory.content).await? {
                     memory.embedding = Some(vector);
                 }
             }
 
-            if query_sparse_embedding.is_some()
+            if opts.query_sparse_embedding.is_some()
                 && memory.sparse_embedding.is_none()
                 && self.sparse_embeddings.is_enabled()
             {
@@ -266,7 +296,7 @@ impl SearchService {
 
             let vector_score = match search_mode {
                 SearchMode::Semantic | SearchMode::Hybrid => {
-                    match (memory.embedding.as_ref(), query_embedding.as_ref()) {
+                    match (memory.embedding.as_ref(), opts.query_embedding.as_ref()) {
                         (Some(memory_vec), Some(query_vec)) => {
                             let similarity = cosine_similarity(memory_vec, query_vec);
                             if !similarity.is_finite() {
@@ -280,7 +310,7 @@ impl SearchService {
                             }
                         }
                         _ => {
-                            if query_embedding.is_some() {
+                            if opts.query_embedding.is_some() {
                                 vector_distance_hint
                                     .get(&memory.id)
                                     .copied()
@@ -312,7 +342,7 @@ impl SearchService {
                 SearchMode::SparseEmbedding | SearchMode::Hybrid => {
                     match (
                         memory.sparse_embedding.as_ref(),
-                        query_sparse_embedding.as_ref(),
+                        opts.query_sparse_embedding.as_ref(),
                     ) {
                         (Some(memory_sparse), Some(query_sparse)) => {
                             sparse_dot_product(memory_sparse, query_sparse)
@@ -366,7 +396,7 @@ impl SearchService {
                 .then_with(|| b.1.created_at.cmp(&a.1.created_at))
         });
 
-        let should_rerank = rerank_override.unwrap_or(self.config.rerank_enabled);
+        let should_rerank = opts.rerank_override.unwrap_or(self.config.rerank_enabled);
         if should_rerank && self.reranker.is_enabled() {
             let rerank_limit = self.config.rerank_top_k.max(1).min(scored_results.len());
 
@@ -376,7 +406,7 @@ impl SearchService {
                     .map(|(_, memory)| memory.content.clone())
                     .collect();
 
-                let order = self.reranker.rerank(query, &documents).await?;
+                let order = self.reranker.rerank(opts.query, &documents).await?;
                 let mut used = vec![false; rerank_limit];
                 let mut reordered = Vec::with_capacity(scored_results.len());
 
@@ -398,8 +428,8 @@ impl SearchService {
             }
         }
 
-        if limit > 0 && scored_results.len() > limit as usize {
-            scored_results.truncate(limit as usize);
+        if opts.limit > 0 && scored_results.len() > opts.limit as usize {
+            scored_results.truncate(opts.limit as usize);
         }
 
         let memories: Vec<Memory> = scored_results
@@ -526,15 +556,15 @@ impl SearchService {
             None
         };
 
-        self.execute_search(
+        self.execute_search(ExecuteSearchOptions {
             query,
             category,
             limit,
             query_embedding,
             query_sparse_embedding,
-            Some(mode),
-            rerank,
-        )
+            mode_override: Some(mode),
+            rerank_override: rerank,
+        })
         .await
     }
 
@@ -592,12 +622,12 @@ impl SearchService {
             }
 
             // Apply inactive block strategy
-            let include_memory = match (&options.inactive_block_strategy, &block_status) {
-                (InactiveBlockStrategy::Exclude, Some(status)) if status != "open" => false,
-                _ => true,
-            };
+            let exclude_memory = matches!(
+                (&options.inactive_block_strategy, &block_status),
+                (InactiveBlockStrategy::Exclude, Some(status)) if status != "open"
+            );
 
-            if !include_memory {
+            if exclude_memory {
                 continue;
             }
 
@@ -659,8 +689,16 @@ impl SearchService {
         limit: i64,
         query_embedding: Option<Vec<f32>>,
     ) -> Result<Vec<Memory>> {
-        self.execute_search(query, category, limit, query_embedding, None, None, None)
-            .await
+        self.execute_search(ExecuteSearchOptions {
+            query,
+            category,
+            limit,
+            query_embedding,
+            query_sparse_embedding: None,
+            mode_override: None,
+            rerank_override: None,
+        })
+        .await
     }
 
     async fn vector_candidates(
@@ -1028,9 +1066,10 @@ mod tests {
     }
 
     fn base_search_config() -> SearchConfig {
-        let mut config = SearchConfig::default();
-        config.rerank_enabled = false;
-        config
+        SearchConfig {
+            rerank_enabled: false,
+            ..Default::default()
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

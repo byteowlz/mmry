@@ -2,13 +2,14 @@ use config as config_rs;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::path::Path;
 use std::path::PathBuf;
 const SCHEMA_FILENAME: &str = "config.schema.json";
 const GLOBAL_CONFIG_BASENAME: &str = "config.toml";
 const LOCAL_CONFIG_BASENAME: &str = "mmry.config.toml";
 
 /// Expand tilde (~) and environment variables in a path
-fn expand_path(path: &PathBuf) -> PathBuf {
+fn expand_path(path: &Path) -> PathBuf {
     let path_str = path.to_string_lossy();
 
     // Expand tilde
@@ -16,12 +17,12 @@ fn expand_path(path: &PathBuf) -> PathBuf {
         if let Some(home) = dirs::home_dir() {
             home.join(path_str.strip_prefix("~/").unwrap())
         } else {
-            path.clone()
+            path.to_path_buf()
         }
     } else if path_str == "~" {
-        dirs::home_dir().unwrap_or_else(|| path.clone())
+        dirs::home_dir().unwrap_or_else(|| path.to_path_buf())
     } else {
-        path.clone()
+        path.to_path_buf()
     };
 
     // Expand environment variables
@@ -415,7 +416,7 @@ pub struct ExternalApiConfig {
     pub request_timeout_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct AnalyzerConfig {
     /// Enable analyzer-backed features (fact extraction, routing)
@@ -717,5 +718,216 @@ mod tests {
             .expect("repo root");
         let schema = schema_to_string().expect("schema");
         std::fs::write(target, schema).expect("write schema");
+    }
+
+    #[test]
+    fn test_config_layering_env_overrides_files() {
+        // Use a unique test-specific prefix to avoid parallel test pollution
+        // Other tests may set MMRY__ vars, so we use MMRYTEST__ for isolation
+        let test_prefix = "MMRYTEST";
+        let test_env_var = format!("{test_prefix}__SEARCH__DEFAULT_LIMIT");
+
+        // Create temp directories for config files
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let global_dir = temp_dir.path().join("global");
+        let local_dir = temp_dir.path().join("local");
+        std::fs::create_dir_all(&global_dir).expect("create global dir");
+        std::fs::create_dir_all(&local_dir).expect("create local dir");
+
+        // Write a global config with one value (use numeric field to avoid env parsing issues)
+        let global_config_content = r#"
+[search]
+default_limit = 5
+"#;
+        std::fs::write(global_dir.join("config.toml"), global_config_content)
+            .expect("write global");
+
+        // Write a local config with a different value
+        let local_config_content = r#"
+[search]
+default_limit = 10
+"#;
+        std::fs::write(local_dir.join("mmry.config.toml"), local_config_content)
+            .expect("write local");
+
+        // Set environment variable to override (use numeric field)
+        std::env::set_var(&test_env_var, "42");
+
+        // Build config manually with our test files using the test-specific prefix
+        let raw = config_rs::Config::builder()
+            .add_source(
+                config_rs::File::from(global_dir.join("config.toml"))
+                    .required(false)
+                    .format(config_rs::FileFormat::Toml),
+            )
+            .add_source(
+                config_rs::File::from(local_dir.join("mmry.config.toml"))
+                    .required(false)
+                    .format(config_rs::FileFormat::Toml),
+            )
+            .add_source(
+                config_rs::Environment::with_prefix(test_prefix)
+                    .separator("__")
+                    .try_parsing(true)
+                    .list_separator(","),
+            )
+            .build()
+            .expect("build config");
+
+        let config: Config = raw.try_deserialize().expect("deserialize");
+
+        // Environment should win over file configs
+        assert_eq!(config.search.default_limit, 42);
+
+        // Cleanup
+        std::env::remove_var(&test_env_var);
+    }
+
+    #[test]
+    fn test_config_layering_local_overrides_global() {
+        // Create temp directories for config files
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let global_dir = temp_dir.path().join("global");
+        let local_dir = temp_dir.path().join("local");
+        std::fs::create_dir_all(&global_dir).expect("create global dir");
+        std::fs::create_dir_all(&local_dir).expect("create local dir");
+
+        // Write a global config with one value
+        let global_config_content = r#"
+[memory]
+default_category = "from_global"
+"#;
+        std::fs::write(global_dir.join("config.toml"), global_config_content)
+            .expect("write global");
+
+        // Write a local config with a different value
+        let local_config_content = r#"
+[memory]
+default_category = "from_local"
+"#;
+        std::fs::write(local_dir.join("mmry.config.toml"), local_config_content)
+            .expect("write local");
+
+        // Build config manually with our test files
+        let raw = config_rs::Config::builder()
+            .add_source(
+                config_rs::File::from(global_dir.join("config.toml"))
+                    .required(false)
+                    .format(config_rs::FileFormat::Toml),
+            )
+            .add_source(
+                config_rs::File::from(local_dir.join("mmry.config.toml"))
+                    .required(false)
+                    .format(config_rs::FileFormat::Toml),
+            )
+            .build()
+            .expect("build config");
+
+        let config: Config = raw.try_deserialize().expect("deserialize");
+
+        // Local should win over global
+        assert_eq!(config.memory.default_category, "from_local");
+    }
+
+    #[test]
+    fn test_config_layering_cli_overrides_env() {
+        // Create temp directories for config files
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cli_dir = temp_dir.path().join("cli");
+        std::fs::create_dir_all(&cli_dir).expect("create cli dir");
+
+        // Write a CLI config with a specific value
+        let cli_config_content = r#"
+[memory]
+default_category = "from_cli"
+"#;
+        std::fs::write(cli_dir.join("cli.toml"), cli_config_content).expect("write cli");
+
+        // Set environment variable
+        std::env::set_var("MMRY__MEMORY__DEFAULT_CATEGORY", "from_env");
+
+        // Build config manually - CLI comes after env
+        let raw = config_rs::Config::builder()
+            .add_source(
+                config_rs::Environment::with_prefix("MMRY")
+                    .separator("__")
+                    .try_parsing(true)
+                    .list_separator(","),
+            )
+            .add_source(
+                config_rs::File::from(cli_dir.join("cli.toml"))
+                    .required(false)
+                    .format(config_rs::FileFormat::Toml),
+            )
+            .build()
+            .expect("build config");
+
+        let config: Config = raw.try_deserialize().expect("deserialize");
+
+        // CLI should win over environment
+        assert_eq!(config.memory.default_category, "from_cli");
+
+        // Cleanup
+        std::env::remove_var("MMRY__MEMORY__DEFAULT_CATEGORY");
+    }
+
+    #[test]
+    fn test_default_config_generated_with_schema_reference() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let schema_path = temp_dir.path().join(SCHEMA_FILENAME);
+
+        let config = Config::default();
+        write_config_file(&config, &config_path, &schema_path, false).expect("write config");
+
+        // Verify config file exists
+        assert!(config_path.exists());
+
+        // Verify schema file exists
+        assert!(schema_path.exists());
+
+        // Verify config file has schema reference
+        let content = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(content.starts_with("# @schema ./config.schema.json"));
+
+        // Verify schema is valid JSON
+        let schema_content = std::fs::read_to_string(&schema_path).expect("read schema");
+        let _: serde_json::Value = serde_json::from_str(&schema_content).expect("valid json");
+    }
+
+    #[test]
+    fn test_xdg_config_home_respected() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let custom_config_dir = temp_dir.path().join("custom_config");
+
+        std::env::set_var(
+            "XDG_CONFIG_HOME",
+            custom_config_dir.to_string_lossy().to_string(),
+        );
+
+        let result = global_config_dir();
+        assert!(result.is_ok());
+        let config_dir = result.unwrap();
+        assert!(config_dir.starts_with(&custom_config_dir));
+        assert!(config_dir.ends_with("mmry"));
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn test_xdg_data_home_respected() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let custom_data_dir = temp_dir.path().join("custom_data");
+
+        std::env::set_var(
+            "XDG_DATA_HOME",
+            custom_data_dir.to_string_lossy().to_string(),
+        );
+
+        let data_dir = default_data_dir();
+        assert!(data_dir.starts_with(&custom_data_dir));
+        assert!(data_dir.ends_with("mmry"));
+
+        std::env::remove_var("XDG_DATA_HOME");
     }
 }

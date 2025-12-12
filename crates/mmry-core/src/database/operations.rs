@@ -9,7 +9,21 @@ use crate::memory::Memory;
 use crate::sparse_embeddings::StoredSparseEmbedding;
 use sqlx::Row;
 use sqlx::SqlitePool;
+use tracing::warn;
 use uuid::Uuid;
+
+/// Helper function to parse a datetime from a raw string with proper error handling.
+fn parse_datetime(
+    raw: &str,
+    field: &str,
+    context: &str,
+) -> crate::Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid {field} for {context} ({raw}): {e}"))
+        })
+}
 
 /// Helper function to parse a Memory from a database row
 fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
@@ -19,26 +33,26 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
 
     let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
     let embedding_vec = match embedding {
-        Some(bytes) => match serde_json::from_slice::<Vec<f32>>(&bytes) {
+        Some(bytes) if !bytes.is_empty() => match serde_json::from_slice::<Vec<f32>>(&bytes) {
             Ok(vec) => Some(vec),
             Err(e) => {
                 tracing::warn!(memory_id = %id, error = %e, "Invalid dense embedding stored; skipping value");
                 None
             }
         },
-        None => None,
+        _ => None,
     };
 
     let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
     let sparse_embedding_vec = match sparse_embedding {
-        Some(bytes) => match serde_json::from_slice::<StoredSparseEmbedding>(&bytes) {
+        Some(bytes) if !bytes.is_empty() => match serde_json::from_slice::<StoredSparseEmbedding>(&bytes) {
             Ok(vec) => Some(vec),
             Err(e) => {
                 tracing::warn!(memory_id = %id, error = %e, "Invalid sparse embedding stored; skipping value");
                 None
             }
         },
-        None => None,
+        _ => None,
     };
 
     let parent_id: Option<String> = row.try_get("parent_id").ok().flatten();
@@ -195,7 +209,14 @@ pub async fn list_memories(
 
     let mut memories = Vec::new();
     for row in rows {
-        memories.push(memory_from_row(&row)?);
+        match memory_from_row(&row) {
+            Ok(memory) => memories.push(memory),
+            Err(e) => {
+                // Try to get the ID for logging, fall back to "unknown"
+                let id_str: String = row.try_get("id").unwrap_or_else(|_| "unknown".to_string());
+                warn!("Skipping corrupt memory row {id_str}: {e}");
+            }
+        }
     }
 
     Ok(memories)
@@ -370,12 +391,43 @@ pub async fn list_bridge_blocks_by_span(
 
     let mut blocks = Vec::new();
     for row in rows {
-        let keywords: String = row.try_get("keywords")?;
-        let content_json: String = row.try_get("content_json")?;
+        let raw_block_id: String = match row.try_get("block_id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping bridge block with missing block_id: {e}");
+                continue;
+            }
+        };
+        let block_id = match Uuid::parse_str(&raw_block_id) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping bridge block with invalid id '{raw_block_id}': {e}");
+                continue;
+            }
+        };
+
+        let created_at_raw: String = match row.try_get("created_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping bridge block {block_id} with missing created_at: {e}");
+                continue;
+            }
+        };
+        let created_at = match parse_datetime(
+            &created_at_raw,
+            "created_at",
+            &format!("bridge_block {block_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt bridge block {block_id}: {e}");
+                continue;
+            }
+        };
+
+        let keywords: String = row.try_get("keywords").unwrap_or_default();
+        let content_json: String = row.try_get("content_json").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
-        let raw_block_id: String = row.try_get("block_id")?;
-        let block_id = Uuid::parse_str(&raw_block_id)
-            .map_err(|e| crate::Error::Config(format!("Invalid bridge_block id: {e}")))?;
 
         blocks.push(BridgeBlock {
             block_id,
@@ -387,9 +439,7 @@ pub async fn list_bridge_blocks_by_span(
             content: serde_json::from_str(&content_json)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at,
         });
     }
 
@@ -452,22 +502,51 @@ pub async fn list_facts_by_key(
 
     let mut facts = Vec::new();
     for row in rows {
-        let metadata: String = row.try_get("metadata")?;
+        let raw_id: String = match row.try_get("id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping fact with missing id: {e}");
+                continue;
+            }
+        };
+        let parsed_id = match Uuid::parse_str(&raw_id) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping fact with invalid id '{raw_id}': {e}");
+                continue;
+            }
+        };
+
+        let observed_at_raw: String = match row.try_get("observed_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping fact {parsed_id} with missing observed_at: {e}");
+                continue;
+            }
+        };
+        let observed_at = match parse_datetime(
+            &observed_at_raw,
+            "observed_at",
+            &format!("fact {parsed_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt fact {parsed_id}: {e}");
+                continue;
+            }
+        };
+
+        let metadata: String = row.try_get("metadata").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
-        let raw_id: String = row.try_get("id")?;
-        let parsed_id = Uuid::parse_str(&raw_id)
-            .map_err(|e| crate::Error::Config(format!("Invalid fact id: {e}")))?;
 
         facts.push(FactRecord {
             id: parsed_id,
-            fact_key: row.try_get("fact_key")?,
-            fact_value: row.try_get("fact_value")?,
+            fact_key: row.try_get("fact_key").unwrap_or_default(),
+            fact_value: row.try_get("fact_value").unwrap_or_default(),
             source_span: row.try_get("source_span").ok().flatten(),
             turn_id: row.try_get("turn_id").ok().flatten(),
-            observed_at: chrono::DateTime::parse_from_rfc3339(row.try_get("observed_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            recency_score: row.try_get("recency_score")?,
+            observed_at,
+            recency_score: row.try_get("recency_score").unwrap_or(0.0),
             metadata: serde_json::from_str(&metadata)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
@@ -513,13 +592,15 @@ pub async fn get_user_profile(
 
     if let Some(row) = row {
         let profile: String = row.try_get("profile")?;
+        let updated_at_raw: String = row.try_get("updated_at")?;
+        let updated_at =
+            parse_datetime(&updated_at_raw, "updated_at", &format!("user_profile {id}"))?;
+
         return Ok(Some(UserProfileEntry {
             id,
             profile: serde_json::from_str(&profile)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            updated_at,
         }));
     }
 
@@ -580,22 +661,51 @@ pub async fn list_recent_facts(pool: &SqlitePool, limit: i64) -> crate::Result<V
 
     let mut facts = Vec::new();
     for row in rows {
-        let metadata: String = row.try_get("metadata")?;
+        let raw_id: String = match row.try_get("id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping fact with missing id: {e}");
+                continue;
+            }
+        };
+        let parsed_id = match Uuid::parse_str(&raw_id) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping fact with invalid id '{raw_id}': {e}");
+                continue;
+            }
+        };
+
+        let observed_at_raw: String = match row.try_get("observed_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping fact {parsed_id} with missing observed_at: {e}");
+                continue;
+            }
+        };
+        let observed_at = match parse_datetime(
+            &observed_at_raw,
+            "observed_at",
+            &format!("fact {parsed_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt fact {parsed_id}: {e}");
+                continue;
+            }
+        };
+
+        let metadata: String = row.try_get("metadata").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
-        let raw_id: String = row.try_get("id")?;
-        let parsed_id = Uuid::parse_str(&raw_id)
-            .map_err(|e| crate::Error::Config(format!("Invalid fact id: {e}")))?;
 
         facts.push(FactRecord {
             id: parsed_id,
-            fact_key: row.try_get("fact_key")?,
-            fact_value: row.try_get("fact_value")?,
+            fact_key: row.try_get("fact_key").unwrap_or_default(),
+            fact_value: row.try_get("fact_value").unwrap_or_default(),
             source_span: row.try_get("source_span").ok().flatten(),
             turn_id: row.try_get("turn_id").ok().flatten(),
-            observed_at: chrono::DateTime::parse_from_rfc3339(row.try_get("observed_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            recency_score: row.try_get("recency_score")?,
+            observed_at,
+            recency_score: row.try_get("recency_score").unwrap_or(0.0),
             metadata: serde_json::from_str(&metadata)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
@@ -620,29 +730,88 @@ pub async fn list_agent_events(pool: &SqlitePool, limit: i64) -> crate::Result<V
 
     let mut events = Vec::new();
     for row in rows {
-        let payload: String = row.try_get("payload")?;
+        let raw_id: String = match row.try_get("id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping agent_event with missing id: {e}");
+                continue;
+            }
+        };
+        let parsed_id = match Uuid::parse_str(&raw_id) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping agent_event with invalid id '{raw_id}': {e}");
+                continue;
+            }
+        };
+
+        let raw_agent: String = match row.try_get("agent_id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping agent_event {parsed_id} with missing agent_id: {e}");
+                continue;
+            }
+        };
+        let agent_id = match Uuid::parse_str(&raw_agent) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping agent_event {parsed_id} with invalid agent_id '{raw_agent}': {e}");
+                continue;
+            }
+        };
+
+        let created_at_raw: String = match row.try_get("created_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping agent_event {parsed_id} with missing created_at: {e}");
+                continue;
+            }
+        };
+        let created_at = match parse_datetime(
+            &created_at_raw,
+            "created_at",
+            &format!("agent_event {parsed_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt agent_event {parsed_id}: {e}");
+                continue;
+            }
+        };
+
+        let updated_at_raw: String = match row.try_get("updated_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping agent_event {parsed_id} with missing updated_at: {e}");
+                continue;
+            }
+        };
+        let updated_at = match parse_datetime(
+            &updated_at_raw,
+            "updated_at",
+            &format!("agent_event {parsed_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt agent_event {parsed_id}: {e}");
+                continue;
+            }
+        };
+
+        let payload: String = row.try_get("payload").unwrap_or_default();
         let memory_id: Option<String> = row.try_get("memory_id").ok().flatten();
 
-        let raw_id: String = row.try_get("id")?;
-        let raw_agent: String = row.try_get("agent_id")?;
-
         events.push(AgentEvent {
-            id: Uuid::parse_str(&raw_id)
-                .map_err(|e| crate::Error::Config(format!("Invalid agent_event id: {e}")))?,
-            agent_id: Uuid::parse_str(&raw_agent)
-                .map_err(|e| crate::Error::Config(format!("Invalid agent_event agent_id: {e}")))?,
-            event_type: row.try_get("event_type")?,
+            id: parsed_id,
+            agent_id,
+            event_type: row.try_get("event_type").unwrap_or_default(),
             status: row.try_get("status").ok().flatten(),
             payload: serde_json::from_str(&payload)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             span_id: row.try_get("span_id").ok().flatten(),
             memory_id: memory_id.and_then(|m| Uuid::parse_str(&m).ok()),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at,
+            updated_at,
         });
     }
 
@@ -667,22 +836,26 @@ pub async fn get_agent_by_name(
 
     if let Some(row) = row {
         let raw_id: String = row.try_get("id")?;
-        let metadata: String = row.try_get("metadata")?;
+        let id = Uuid::parse_str(&raw_id)
+            .map_err(|e| crate::Error::InvalidInput(format!("Invalid agent id '{raw_id}': {e}")))?;
+
+        let created_at_raw: String = row.try_get("created_at")?;
+        let created_at = parse_datetime(&created_at_raw, "created_at", &format!("agent {id}"))?;
+
+        let updated_at_raw: String = row.try_get("updated_at")?;
+        let updated_at = parse_datetime(&updated_at_raw, "updated_at", &format!("agent {id}"))?;
+
+        let metadata: String = row.try_get("metadata").unwrap_or_default();
 
         Ok(Some(AgentRecord {
-            id: Uuid::parse_str(&raw_id)
-                .map_err(|e| crate::Error::Config(format!("Invalid agent id: {e}")))?,
+            id,
             name: row.try_get("name")?,
             kind: row.try_get("kind")?,
             description: row.try_get("description").ok().flatten(),
             metadata: serde_json::from_str(&metadata)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at,
+            updated_at,
         }))
     } else {
         Ok(None)
@@ -693,7 +866,7 @@ pub async fn get_agent_by_name(
 pub async fn get_agent(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<AgentRecord>> {
     let row = sqlx::query(
         r#"
-        SELECT id, name, kind, description, metadata, created_at, updated_at
+        SELECT id, name, kind, description, created_at, updated_at, metadata
         FROM agents
         WHERE id = ?
         "#,
@@ -704,22 +877,28 @@ pub async fn get_agent(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Agen
 
     if let Some(row) = row {
         let raw_id: String = row.try_get("id")?;
-        let metadata: String = row.try_get("metadata")?;
+        let parsed_id = Uuid::parse_str(&raw_id)
+            .map_err(|e| crate::Error::InvalidInput(format!("Invalid agent id '{raw_id}': {e}")))?;
+
+        let created_at_raw: String = row.try_get("created_at")?;
+        let created_at =
+            parse_datetime(&created_at_raw, "created_at", &format!("agent {parsed_id}"))?;
+
+        let updated_at_raw: String = row.try_get("updated_at")?;
+        let updated_at =
+            parse_datetime(&updated_at_raw, "updated_at", &format!("agent {parsed_id}"))?;
+
+        let metadata: String = row.try_get("metadata").unwrap_or_default();
 
         Ok(Some(AgentRecord {
-            id: Uuid::parse_str(&raw_id)
-                .map_err(|e| crate::Error::Config(format!("Invalid agent id: {e}")))?,
+            id: parsed_id,
             name: row.try_get("name")?,
             kind: row.try_get("kind")?,
             description: row.try_get("description").ok().flatten(),
             metadata: serde_json::from_str(&metadata)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at,
+            updated_at,
         }))
     } else {
         Ok(None)
@@ -748,12 +927,43 @@ pub async fn get_recent_bridge_blocks_for_agent(
 
     let mut blocks = Vec::new();
     for row in rows {
-        let keywords: String = row.try_get("keywords")?;
-        let content_json: String = row.try_get("content_json")?;
+        let raw_block_id: String = match row.try_get("block_id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping bridge block with missing block_id: {e}");
+                continue;
+            }
+        };
+        let block_id = match Uuid::parse_str(&raw_block_id) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping bridge block with invalid id '{raw_block_id}': {e}");
+                continue;
+            }
+        };
+
+        let created_at_raw: String = match row.try_get("created_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping bridge block {block_id} with missing created_at: {e}");
+                continue;
+            }
+        };
+        let created_at = match parse_datetime(
+            &created_at_raw,
+            "created_at",
+            &format!("bridge_block {block_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt bridge block {block_id}: {e}");
+                continue;
+            }
+        };
+
+        let keywords: String = row.try_get("keywords").unwrap_or_default();
+        let content_json: String = row.try_get("content_json").unwrap_or_default();
         let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
-        let raw_block_id: String = row.try_get("block_id")?;
-        let block_id = Uuid::parse_str(&raw_block_id)
-            .map_err(|e| crate::Error::Config(format!("Invalid bridge_block id: {e}")))?;
 
         blocks.push(BridgeBlock {
             block_id,
@@ -765,9 +975,7 @@ pub async fn get_recent_bridge_blocks_for_agent(
             content: serde_json::from_str(&content_json)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at,
         });
     }
 
@@ -791,12 +999,21 @@ pub async fn get_bridge_block(
     .await?;
 
     if let Some(row) = row {
-        let keywords: String = row.try_get("keywords")?;
-        let content_json: String = row.try_get("content_json")?;
-        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
         let raw_block_id: String = row.try_get("block_id")?;
-        let parsed_block_id = Uuid::parse_str(&raw_block_id)
-            .map_err(|e| crate::Error::Config(format!("Invalid bridge_block id: {e}")))?;
+        let parsed_block_id = Uuid::parse_str(&raw_block_id).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid bridge_block id '{raw_block_id}': {e}"))
+        })?;
+
+        let created_at_raw: String = row.try_get("created_at")?;
+        let created_at = parse_datetime(
+            &created_at_raw,
+            "created_at",
+            &format!("bridge_block {parsed_block_id}"),
+        )?;
+
+        let keywords: String = row.try_get("keywords").unwrap_or_default();
+        let content_json: String = row.try_get("content_json").unwrap_or_default();
+        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
 
         Ok(Some(BridgeBlock {
             block_id: parsed_block_id,
@@ -808,9 +1025,7 @@ pub async fn get_bridge_block(
             content: serde_json::from_str(&content_json)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at,
         }))
     } else {
         Ok(None)
@@ -841,22 +1056,51 @@ pub async fn get_facts_for_memory(
 
     let mut facts = Vec::new();
     for row in rows {
-        let metadata: String = row.try_get("metadata")?;
+        let raw_id: String = match row.try_get("id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping fact with missing id: {e}");
+                continue;
+            }
+        };
+        let parsed_id = match Uuid::parse_str(&raw_id) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping fact with invalid id '{raw_id}': {e}");
+                continue;
+            }
+        };
+
+        let observed_at_raw: String = match row.try_get("observed_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping fact {parsed_id} with missing observed_at: {e}");
+                continue;
+            }
+        };
+        let observed_at = match parse_datetime(
+            &observed_at_raw,
+            "observed_at",
+            &format!("fact {parsed_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt fact {parsed_id}: {e}");
+                continue;
+            }
+        };
+
+        let metadata: String = row.try_get("metadata").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
-        let raw_id: String = row.try_get("id")?;
-        let parsed_id = Uuid::parse_str(&raw_id)
-            .map_err(|e| crate::Error::Config(format!("Invalid fact id: {e}")))?;
 
         facts.push(FactRecord {
             id: parsed_id,
-            fact_key: row.try_get("fact_key")?,
-            fact_value: row.try_get("fact_value")?,
+            fact_key: row.try_get("fact_key").unwrap_or_default(),
+            fact_value: row.try_get("fact_value").unwrap_or_default(),
             source_span: row.try_get("source_span").ok().flatten(),
             turn_id: row.try_get("turn_id").ok().flatten(),
-            observed_at: chrono::DateTime::parse_from_rfc3339(row.try_get("observed_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            recency_score: row.try_get("recency_score")?,
+            observed_at,
+            recency_score: row.try_get("recency_score").unwrap_or(0.0),
             metadata: serde_json::from_str(&metadata)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
@@ -888,29 +1132,88 @@ pub async fn get_agent_events_for_memory(
 
     let mut events = Vec::new();
     for row in rows {
-        let payload: String = row.try_get("payload")?;
+        let raw_id: String = match row.try_get("id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping agent_event with missing id: {e}");
+                continue;
+            }
+        };
+        let parsed_id = match Uuid::parse_str(&raw_id) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping agent_event with invalid id '{raw_id}': {e}");
+                continue;
+            }
+        };
+
+        let raw_agent: String = match row.try_get("agent_id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping agent_event {parsed_id} with missing agent_id: {e}");
+                continue;
+            }
+        };
+        let agent_id = match Uuid::parse_str(&raw_agent) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping agent_event {parsed_id} with invalid agent_id '{raw_agent}': {e}");
+                continue;
+            }
+        };
+
+        let created_at_raw: String = match row.try_get("created_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping agent_event {parsed_id} with missing created_at: {e}");
+                continue;
+            }
+        };
+        let created_at = match parse_datetime(
+            &created_at_raw,
+            "created_at",
+            &format!("agent_event {parsed_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt agent_event {parsed_id}: {e}");
+                continue;
+            }
+        };
+
+        let updated_at_raw: String = match row.try_get("updated_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping agent_event {parsed_id} with missing updated_at: {e}");
+                continue;
+            }
+        };
+        let updated_at = match parse_datetime(
+            &updated_at_raw,
+            "updated_at",
+            &format!("agent_event {parsed_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt agent_event {parsed_id}: {e}");
+                continue;
+            }
+        };
+
+        let payload: String = row.try_get("payload").unwrap_or_default();
         let mem_id: Option<String> = row.try_get("memory_id").ok().flatten();
 
-        let raw_id: String = row.try_get("id")?;
-        let raw_agent: String = row.try_get("agent_id")?;
-
         events.push(AgentEvent {
-            id: Uuid::parse_str(&raw_id)
-                .map_err(|e| crate::Error::Config(format!("Invalid agent_event id: {e}")))?,
-            agent_id: Uuid::parse_str(&raw_agent)
-                .map_err(|e| crate::Error::Config(format!("Invalid agent_event agent_id: {e}")))?,
-            event_type: row.try_get("event_type")?,
+            id: parsed_id,
+            agent_id,
+            event_type: row.try_get("event_type").unwrap_or_default(),
             status: row.try_get("status").ok().flatten(),
             payload: serde_json::from_str(&payload)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             span_id: row.try_get("span_id").ok().flatten(),
             memory_id: mem_id.and_then(|m| Uuid::parse_str(&m).ok()),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            updated_at: chrono::DateTime::parse_from_rfc3339(row.try_get("updated_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at,
+            updated_at,
         });
     }
 
@@ -934,12 +1237,21 @@ pub async fn get_bridge_block_by_span(
     .await?;
 
     if let Some(row) = row {
-        let keywords: String = row.try_get("keywords")?;
-        let content_json: String = row.try_get("content_json")?;
-        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
         let raw_block_id: String = row.try_get("block_id")?;
-        let parsed_block_id = Uuid::parse_str(&raw_block_id)
-            .map_err(|e| crate::Error::Config(format!("Invalid bridge_block id: {e}")))?;
+        let parsed_block_id = Uuid::parse_str(&raw_block_id).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid bridge_block id '{raw_block_id}': {e}"))
+        })?;
+
+        let created_at_raw: String = row.try_get("created_at")?;
+        let created_at = parse_datetime(
+            &created_at_raw,
+            "created_at",
+            &format!("bridge_block {parsed_block_id}"),
+        )?;
+
+        let keywords: String = row.try_get("keywords").unwrap_or_default();
+        let content_json: String = row.try_get("content_json").unwrap_or_default();
+        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
 
         Ok(Some(BridgeBlock {
             block_id: parsed_block_id,
@@ -951,9 +1263,7 @@ pub async fn get_bridge_block_by_span(
             content: serde_json::from_str(&content_json)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
-            created_at: chrono::DateTime::parse_from_rfc3339(row.try_get("created_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at,
         }))
     } else {
         Ok(None)
@@ -984,22 +1294,51 @@ pub async fn search_facts(
 
     let mut facts = Vec::new();
     for row in rows {
-        let metadata: String = row.try_get("metadata")?;
+        let raw_id: String = match row.try_get("id") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping fact with missing id: {e}");
+                continue;
+            }
+        };
+        let parsed_id = match Uuid::parse_str(&raw_id) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Skipping fact with invalid id '{raw_id}': {e}");
+                continue;
+            }
+        };
+
+        let observed_at_raw: String = match row.try_get("observed_at") {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Skipping fact {parsed_id} with missing observed_at: {e}");
+                continue;
+            }
+        };
+        let observed_at = match parse_datetime(
+            &observed_at_raw,
+            "observed_at",
+            &format!("fact {parsed_id}"),
+        ) {
+            Ok(dt) => dt,
+            Err(e) => {
+                warn!("Skipping corrupt fact {parsed_id}: {e}");
+                continue;
+            }
+        };
+
+        let metadata: String = row.try_get("metadata").unwrap_or_default();
         let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
-        let raw_id: String = row.try_get("id")?;
-        let parsed_id = Uuid::parse_str(&raw_id)
-            .map_err(|e| crate::Error::Config(format!("Invalid fact id: {e}")))?;
 
         facts.push(FactRecord {
             id: parsed_id,
-            fact_key: row.try_get("fact_key")?,
-            fact_value: row.try_get("fact_value")?,
+            fact_key: row.try_get("fact_key").unwrap_or_default(),
+            fact_value: row.try_get("fact_value").unwrap_or_default(),
             source_span: row.try_get("source_span").ok().flatten(),
             turn_id: row.try_get("turn_id").ok().flatten(),
-            observed_at: chrono::DateTime::parse_from_rfc3339(row.try_get("observed_at")?)
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            recency_score: row.try_get("recency_score")?,
+            observed_at,
+            recency_score: row.try_get("recency_score").unwrap_or(0.0),
             metadata: serde_json::from_str(&metadata)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
             agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),

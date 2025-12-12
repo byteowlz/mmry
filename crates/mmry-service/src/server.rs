@@ -1,9 +1,11 @@
 use crate::state::ServiceState;
 use anyhow::Result;
+use async_trait::async_trait;
 use axum::extract::State as AxumState;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::routing::get;
 use axum::routing::post;
 use axum::Json;
 use axum::Router;
@@ -22,7 +24,6 @@ use mmry_core::reranker::RerankScore;
 use mmry_core::search::SearchService;
 use rig::client::CompletionClient;
 use rig::completion::AssistantContent;
-use rig::completion::CompletionError;
 use rig::completion::CompletionModel;
 use rig::completion::CompletionResponse as RigCompletionResponse;
 use rig::message::Message as RigMessage;
@@ -32,12 +33,10 @@ use rig::providers::openai;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
-use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
-use tokio::task::spawn_blocking;
 use tokio::time::timeout;
 use tonic::transport::Server;
 use tonic::Request;
@@ -111,6 +110,22 @@ struct RerankItem {
     index: usize,
     document: Option<String>,
     relevance_score: f32,
+}
+
+/// OpenAI-compatible models list response
+#[derive(Debug, Serialize)]
+struct ModelsListResponse {
+    object: &'static str,
+    data: Vec<ModelData>,
+}
+
+/// OpenAI-compatible model data
+#[derive(Debug, Serialize)]
+struct ModelData {
+    id: String,
+    object: &'static str,
+    created: u64,
+    owned_by: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,12 +230,13 @@ impl RigAnalyzer {
     }
 }
 
+#[async_trait]
 impl Analyzer for RigAnalyzer {
-    fn extract_facts(&self, _content: &str) -> mmry_core::Result<Vec<FactRecord>> {
+    async fn extract_facts(&self, _content: &str) -> mmry_core::Result<Vec<FactRecord>> {
         Ok(Vec::new())
     }
 
-    fn route(
+    async fn route(
         &self,
         _query: &str,
         _candidates: &[BridgeBlock],
@@ -248,11 +264,9 @@ impl Analyzer for RigAnalyzer {
             .temperature(0.0)
             .build();
 
-        let fut = {
-            let model = model.clone();
-            async move { model.completion(request).await }
-        };
-        let response: RigCompletionResponse<_> = block_on_in_place(fut)
+        let response: RigCompletionResponse<_> = model
+            .completion(request)
+            .await
             .map_err(|e| mmry_core::Error::Service(format!("Rig completion failed: {e}")))?;
 
         let routing = response
@@ -723,6 +737,62 @@ async fn rerank_handler(
     }))
 }
 
+/// OpenAI-compatible /v1/models endpoint
+async fn models_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<ModelsListResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let mut models = Vec::new();
+
+    // Add embedding model
+    let embedding_model = app_state.state.config.embeddings.model.clone();
+    if !embedding_model.is_empty() && app_state.state.config.embeddings.enabled {
+        models.push(ModelData {
+            id: embedding_model,
+            object: "model",
+            created: 0,
+            owned_by: "mmry",
+        });
+    }
+
+    // Add reranker model if enabled
+    if let Some(rerank_model) = app_state.state.config.search.rerank_model.clone() {
+        if app_state.state.config.search.rerank_enabled {
+            models.push(ModelData {
+                id: rerank_model,
+                object: "model",
+                created: 0,
+                owned_by: "mmry",
+            });
+        }
+    }
+
+    // Add sparse embedding model if enabled
+    if app_state.state.config.sparse_embeddings.enabled {
+        let sparse_model = app_state.state.config.sparse_embeddings.model.clone();
+        if !sparse_model.is_empty() {
+            models.push(ModelData {
+                id: sparse_model,
+                object: "model",
+                created: 0,
+                owned_by: "mmry",
+            });
+        }
+    }
+
+    Ok(Json(ModelsListResponse {
+        object: "list",
+        data: models,
+    }))
+}
+
 async fn agent_memory_create_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
     headers: HeaderMap,
@@ -919,6 +989,8 @@ async fn agent_route_handler(
         .max(1);
     let limit = std::cmp::min(requested_limit, app_state.api_config.max_batch_size as i64);
 
+    let timeout_duration = Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
+
     let mut agent = AgentRecord::new("agent", "external");
     if let Some(agent_id) = payload
         .agent_id
@@ -940,16 +1012,19 @@ async fn agent_route_handler(
         Arc::clone(&app_state.state.reranker),
     );
 
-    let memories = search_service
-        .search_with_options(
+    let memories = timeout(
+        timeout_duration,
+        search_service.search_with_options(
             &payload.query,
             payload.category.as_deref(),
             limit,
             None,
             None,
-        )
-        .await
-        .map_err(|e| ApiError::internal(format!("Search failed: {e}")))?;
+        ),
+    )
+    .await
+    .map_err(|_| ApiError::timeout("Search request timed out"))?
+    .map_err(|e| ApiError::internal(format!("Search failed: {e}")))?;
 
     let contexts: Vec<AgentMemory> = memories.into_iter().map(AgentMemory::from).collect();
 
@@ -965,14 +1040,13 @@ async fn agent_route_handler(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to load facts: {e}")))?;
 
-    let analyzer = Arc::clone(&app_state.analyzer);
-    let query = payload.query.clone();
-    let blocks_for_route = bridge_blocks.clone();
-
-    let routing = spawn_blocking(move || analyzer.route(&query, &blocks_for_route))
-        .await
-        .map_err(|e| ApiError::internal(format!("Routing task failed: {e}")))?
-        .map_err(|e| ApiError::internal(format!("Routing failed: {e}")))?;
+    let routing = timeout(
+        timeout_duration,
+        app_state.analyzer.route(&payload.query, &bridge_blocks),
+    )
+    .await
+    .map_err(|_| ApiError::timeout("Routing request timed out"))?
+    .map_err(|e| ApiError::internal(format!("Routing failed: {e}")))?;
 
     let mut event = AgentEvent::new(agent.id, "route");
     event.span_id = payload.span_id.clone();
@@ -1062,6 +1136,7 @@ async fn run_http_api(
     };
 
     let app = Router::new()
+        .route("/v1/models", get(models_handler))
         .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/rerank", post(rerank_handler))
         .route("/v1/agents/route", post(agent_route_handler))
@@ -1126,31 +1201,6 @@ fn to_routing_payload(routing: AnalyzerRouting) -> AgentRoutingPayload {
         chosen_block: routing.chosen_block.map(|id| id.to_string()),
         is_new_topic: routing.is_new_topic,
         rationale: routing.rationale,
-    }
-}
-
-fn block_on_in_place<F, T>(fut: F) -> Result<T, CompletionError>
-where
-    F: std::future::Future<Output = Result<T, CompletionError>> + Send + 'static,
-    T: Send + 'static,
-{
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(fut))
-    } else {
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| CompletionError::RequestError(Box::new(e)))?;
-            rt.block_on(fut)
-        });
-
-        match handle.join() {
-            Ok(result) => result,
-            Err(_) => Err(CompletionError::RequestError(Box::new(io::Error::other(
-                "analyzer thread panicked",
-            )))),
-        }
     }
 }
 
@@ -1420,6 +1470,7 @@ mod tests {
                 "Route this Thursday query. Respond with JSON only as instructed.",
                 &[candidate],
             )
+            .await
             .expect("local rig completion should succeed");
 
         assert!(
@@ -1475,5 +1526,399 @@ mod tests {
         });
 
         (addr, tx, ready_rx)
+    }
+
+    // Input validation tests
+
+    #[test]
+    fn validate_batch_rejects_oversized_batch() {
+        let cfg = ExternalApiConfig {
+            max_batch_size: 2,
+            max_input_chars: 100,
+            ..Default::default()
+        };
+
+        let inputs = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let result = validate_batch(&inputs, &cfg, "input");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("max batch size"));
+    }
+
+    #[test]
+    fn validate_batch_rejects_oversized_input() {
+        let cfg = ExternalApiConfig {
+            max_batch_size: 10,
+            max_input_chars: 5,
+            ..Default::default()
+        };
+
+        let inputs = vec!["short".to_string(), "this is too long".to_string()];
+        let result = validate_batch(&inputs, &cfg, "documents");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("documents[1]"));
+        assert!(err.message.contains("max length"));
+    }
+
+    #[test]
+    fn validate_batch_accepts_valid_input() {
+        let cfg = ExternalApiConfig {
+            max_batch_size: 10,
+            max_input_chars: 100,
+            ..Default::default()
+        };
+
+        let inputs = vec!["hello".to_string(), "world".to_string()];
+        let result = validate_batch(&inputs, &cfg, "input");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_text_len_rejects_oversized_text() {
+        let cfg = ExternalApiConfig {
+            max_input_chars: 10,
+            ..Default::default()
+        };
+
+        let text = "this is definitely too long for the limit";
+        let result = validate_text_len(text, &cfg, "query");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("query"));
+        assert!(err.message.contains("max length"));
+    }
+
+    #[test]
+    fn validate_text_len_accepts_valid_text() {
+        let cfg = ExternalApiConfig {
+            max_input_chars: 100,
+            ..Default::default()
+        };
+
+        let text = "short query";
+        let result = validate_text_len(text, &cfg, "query");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn enforce_api_key_rejects_missing_key_when_required() {
+        let result = enforce_api_key(true, &Some("secret".to_string()), &HeaderMap::new());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn enforce_api_key_rejects_wrong_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer wrong".parse().unwrap());
+
+        let result = enforce_api_key(true, &Some("secret".to_string()), &headers);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn enforce_api_key_accepts_correct_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+
+        let result = enforce_api_key(true, &Some("secret".to_string()), &headers);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn enforce_api_key_accepts_no_key_when_not_required() {
+        let result = enforce_api_key(false, &None, &HeaderMap::new());
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embeddings_rejects_empty_input() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let payload = EmbeddingRequestPayload {
+            model: None,
+            input: EmbeddingInput::Multiple(vec![]),
+        };
+
+        let result =
+            embeddings_handler(AxumState(external_state), HeaderMap::new(), Json(payload)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("empty"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embeddings_rejects_oversized_batch() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.external_api.max_batch_size = 2;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let payload = EmbeddingRequestPayload {
+            model: None,
+            input: EmbeddingInput::Multiple(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ]),
+        };
+
+        let result =
+            embeddings_handler(AxumState(external_state), HeaderMap::new(), Json(payload)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("max batch size"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rerank_rejects_empty_documents() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let payload = RerankRequestPayload {
+            query: "test".to_string(),
+            documents: vec![],
+            top_n: None,
+            model: None,
+        };
+
+        let result =
+            rerank_handler(AxumState(external_state), HeaderMap::new(), Json(payload)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("empty"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_memory_create_rejects_empty_content() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let payload = AgentMemoryCreateRequest {
+            content: "".to_string(),
+            category: None,
+            memory_type: None,
+            tags: None,
+            importance: None,
+            agent_id: None,
+            span_id: None,
+            query: None,
+            conversation_history: None,
+        };
+
+        let result =
+            agent_memory_create_handler(AxumState(external_state), HeaderMap::new(), Json(payload))
+                .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("empty"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_memory_create_rejects_oversized_content() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.external_api.max_input_chars = 10;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let payload = AgentMemoryCreateRequest {
+            content: "this is definitely too long for the configured limit".to_string(),
+            category: None,
+            memory_type: None,
+            tags: None,
+            importance: None,
+            agent_id: None,
+            span_id: None,
+            query: None,
+            conversation_history: None,
+        };
+
+        let result =
+            agent_memory_create_handler(AxumState(external_state), HeaderMap::new(), Json(payload))
+                .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("content"));
+        assert!(err.message.contains("max length"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_route_rejects_oversized_query() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.external_api.max_input_chars = 5;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let payload = AgentRouteRequest {
+            query: "this query is much too long for the limit".to_string(),
+            limit: Some(5),
+            category: None,
+            span_id: None,
+            agent_id: None,
+        };
+
+        let result =
+            agent_route_handler(AxumState(external_state), HeaderMap::new(), Json(payload)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("query"));
+        assert!(err.message.contains("max length"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn models_endpoint_returns_configured_models() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = true;
+        config.embeddings.model = "test-embedding-model".to_string();
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let result = models_handler(AxumState(external_state), HeaderMap::new()).await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.object, "list");
+        assert!(!response.data.is_empty());
+        assert!(response.data.iter().any(|m| m.id == "test-embedding-model"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn models_endpoint_respects_auth() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.external_api.require_api_key = true;
+        config.external_api.api_key = Some("secret".to_string());
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: Some("secret".to_string()),
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        // Without auth header
+        let result = models_handler(AxumState(external_state.clone()), HeaderMap::new()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+
+        // With correct auth header
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        let result = models_handler(AxumState(external_state), headers).await;
+        assert!(result.is_ok());
     }
 }
