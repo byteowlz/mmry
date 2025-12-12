@@ -45,13 +45,15 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
 
     let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
     let sparse_embedding_vec = match sparse_embedding {
-        Some(bytes) if !bytes.is_empty() => match serde_json::from_slice::<StoredSparseEmbedding>(&bytes) {
-            Ok(vec) => Some(vec),
-            Err(e) => {
-                tracing::warn!(memory_id = %id, error = %e, "Invalid sparse embedding stored; skipping value");
-                None
+        Some(bytes) if !bytes.is_empty() => {
+            match serde_json::from_slice::<StoredSparseEmbedding>(&bytes) {
+                Ok(vec) => Some(vec),
+                Err(e) => {
+                    tracing::warn!(memory_id = %id, error = %e, "Invalid sparse embedding stored; skipping value");
+                    None
+                }
             }
-        },
+        }
         _ => None,
     };
 

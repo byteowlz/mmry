@@ -453,16 +453,6 @@ impl Default for ExternalApiConfig {
     }
 }
 
-impl Default for AnalyzerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: None,
-            endpoint: None,
-        }
-    }
-}
-
 /// Configuration for HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
