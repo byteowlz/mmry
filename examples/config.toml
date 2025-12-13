@@ -1,3 +1,4 @@
+"$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/mmry/mmry.config.schema.json"
 # @schema ./config.schema.json
 # Example mmry configuration file
 # Place this at ~/.config/mmry/config.toml or $XDG_CONFIG_HOME/mmry/config.toml
@@ -78,15 +79,15 @@ rerank_top_k = 20
 #   - "jinaai/jina-reranker-v2-base-multilingual" (multilingual)
 rerank_model = "BAAI/bge-reranker-base"
 # Scoring weights for hybrid mode (should sum to ~0.8-1.0 before recency/importance)
-keyword_weight = 0.4             # Exact/partial keyword matches
-fuzzy_weight = 0.2               # Fuzzy string matching
-vector_weight = 0.35             # Dense embeddings similarity
-bm25_weight = 0.0                # BM25 statistical scoring (set to 0.2-0.3 to enable)
-sparse_embedding_weight = 0.0    # SPLADE++ sparse embeddings (set to 0.2-0.3 to enable)
-importance_weight = 0.05         # Memory importance boost
+keyword_weight = 0.4          # Exact/partial keyword matches
+fuzzy_weight = 0.2            # Fuzzy string matching
+vector_weight = 0.35          # Dense embeddings similarity
+bm25_weight = 0.0             # BM25 statistical scoring (set to 0.2-0.3 to enable)
+sparse_embedding_weight = 0.0 # SPLADE++ sparse embeddings (set to 0.2-0.3 to enable)
+importance_weight = 0.05      # Memory importance boost
 # BM25 parameters (for bm25 search mode or hybrid with bm25_weight > 0)
-bm25_k1 = 1.2                   # Term frequency saturation (1.2-2.0 typical)
-bm25_b = 0.75                   # Length normalization (0.0-1.0, 0.75 typical)
+bm25_k1 = 1.2 # Term frequency saturation (1.2-2.0 typical)
+bm25_b = 0.75 # Length normalization (0.0-1.0, 0.75 typical)
 
 [memory]
 # Default category for memories
