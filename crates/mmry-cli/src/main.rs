@@ -86,6 +86,9 @@ enum Commands {
 
     /// HMLR enrichment operations (backfill, stats)
     Hmlr(commands::hmlr::HmlrCmd),
+
+    /// Ingest files and directories into memories
+    Ingest(commands::ingest::IngestCmd),
 }
 
 fn main() {
@@ -216,6 +219,17 @@ async fn async_main() -> anyhow::Result<()> {
             commands::reextract::handle(cmd, &config, &db, Arc::clone(&ner)).await
         }
         Commands::Hmlr(cmd) => commands::hmlr::handle(cmd, &config, &db).await,
+        Commands::Ingest(cmd) => {
+            commands::ingest::handle(
+                cmd,
+                &config,
+                &db,
+                Arc::clone(&embeddings),
+                Arc::clone(&sparse_embeddings),
+                Arc::clone(&ner),
+            )
+            .await
+        }
         Commands::Models(_)
         | Commands::Rerankers(_)
         | Commands::Init(_)

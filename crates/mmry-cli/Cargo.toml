@@ -35,6 +35,12 @@ crossterm = "0.28"
 # Interactive selection
 dialoguer = "0.11"
 
+# Ingestion dependencies
+notify = "7.0"
+walkdir = "2.5"
+serde_yaml = "0.9"
+futures = "0.3"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
