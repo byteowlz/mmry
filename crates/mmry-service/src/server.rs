@@ -224,6 +224,35 @@ struct AgentMemoryCreateResponse {
     created_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AgentEnrichRequest {
+    /// ID of the existing memory to enrich
+    memory_id: String,
+    /// Agent ID (UUID) - if not provided, creates/uses "human" agent
+    #[serde(default)]
+    agent_id: Option<String>,
+    /// Optional query/prompt context for routing
+    #[serde(default)]
+    query: Option<String>,
+    /// Previous memories in conversation (for HMLR routing)
+    #[serde(default)]
+    conversation_history: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentEnrichResponse {
+    /// Memory ID that was enriched
+    memory_id: String,
+    /// Facts extracted
+    facts_extracted: usize,
+    /// Extracted facts details
+    facts: Vec<FactRecord>,
+    /// Bridge block ID (if routing active)
+    bridge_block_id: Option<String>,
+    /// Whether this started a new topic
+    is_new_topic: bool,
+}
+
 #[derive(Debug, Clone)]
 struct RigAnalyzer {
     model_name: String,
@@ -419,6 +448,13 @@ impl ApiError {
     fn timeout<M: Into<String>>(msg: M) -> Self {
         Self {
             status: StatusCode::GATEWAY_TIMEOUT,
+            message: msg.into(),
+        }
+    }
+
+    fn not_found<M: Into<String>>(msg: M) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
             message: msg.into(),
         }
     }
@@ -1045,6 +1081,127 @@ async fn agent_memory_create_handler(
     }))
 }
 
+/// Enrich an existing memory with HMLR (fact extraction, bridge block routing)
+/// This endpoint does NOT create a new memory - use /v1/agents/memories for that.
+async fn agent_enrich_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<AgentEnrichRequest>,
+) -> Result<Json<AgentEnrichResponse>, ApiError> {
+    use mmry_core::hmlr::HmlrContext;
+    use mmry_core::hmlr::HmlrPipeline;
+
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    // Parse memory ID
+    let memory_id = Uuid::parse_str(&payload.memory_id)
+        .map_err(|_| ApiError::bad_request("Invalid memory_id format"))?;
+
+    // Fetch the existing memory
+    let memory = operations::get_memory(app_state.state.db.pool(), memory_id)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to fetch memory: {e}")))?
+        .ok_or_else(|| ApiError::not_found("Memory not found"))?;
+
+    // Get or create agent
+    let mut agent = AgentRecord::new("human", "cli");
+    if let Some(agent_id) = payload
+        .agent_id
+        .as_ref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+    {
+        agent.id = agent_id;
+    }
+    operations::upsert_agent(app_state.state.db.pool(), &agent)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to upsert agent: {e}")))?;
+
+    // HMLR enrichment
+    let mut facts_extracted = 0;
+    let mut facts = Vec::new();
+    let mut bridge_block_id = None;
+    let mut is_new_topic = true;
+
+    if app_state.state.config.hmlr.enabled {
+        // Load conversation history memories if provided
+        let conversation_history = if let Some(history_ids) = payload.conversation_history {
+            if history_ids.len() > app_state.api_config.max_batch_size {
+                return Err(ApiError::bad_request(format!(
+                    "conversation_history exceeds max batch size of {}",
+                    app_state.api_config.max_batch_size
+                )));
+            }
+            let mut memories = Vec::new();
+            for id_str in history_ids {
+                if let Ok(id) = Uuid::parse_str(&id_str) {
+                    if let Ok(Some(mem)) =
+                        operations::get_memory(app_state.state.db.pool(), id).await
+                    {
+                        memories.push(mem);
+                    }
+                }
+            }
+            memories
+        } else {
+            Vec::new()
+        };
+
+        let context = HmlrContext::for_agent(agent.id, payload.query, conversation_history);
+        let pipeline = HmlrPipeline::new(
+            app_state.state.config.hmlr.clone(),
+            app_state.analyzer.clone(),
+        );
+
+        match pipeline
+            .enrich_memory(app_state.state.db.pool(), &memory, context)
+            .await
+        {
+            Ok(result) => {
+                facts_extracted = result.facts.len();
+                facts = result.facts;
+                if let Some(block) = result.bridge_block {
+                    bridge_block_id = Some(block.block_id.to_string());
+                    is_new_topic = block
+                        .content
+                        .get("memory_ids")
+                        .is_none_or(|ids| ids.as_array().is_none_or(|arr| arr.len() <= 1));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("HMLR enrichment failed: {e}");
+            }
+        }
+    } else {
+        return Err(ApiError::bad_request(
+            "HMLR is not enabled. Enable [hmlr] enabled = true in config.",
+        ));
+    }
+
+    // Record agent event
+    let mut event = AgentEvent::new(agent.id, "memory_enriched");
+    event.memory_id = Some(memory.id);
+    event.payload = serde_json::json!({
+        "facts_extracted": facts_extracted,
+        "bridge_block_id": bridge_block_id,
+    });
+    operations::record_agent_event(app_state.state.db.pool(), &event)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to record event: {e}")))?;
+
+    Ok(Json(AgentEnrichResponse {
+        memory_id: memory.id.to_string(),
+        facts_extracted,
+        facts,
+        bridge_block_id,
+        is_new_topic,
+    }))
+}
+
 async fn agent_route_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
     headers: HeaderMap,
@@ -1272,6 +1429,7 @@ async fn run_http_api(
         .route("/v1/rerank", post(rerank_handler))
         .route("/v1/agents/route", post(agent_route_handler))
         .route("/v1/agents/memories", post(agent_memory_create_handler))
+        .route("/v1/agents/enrich", post(agent_enrich_handler))
         .with_state(external_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

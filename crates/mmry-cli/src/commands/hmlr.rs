@@ -8,6 +8,8 @@ use mmry_core::database::Database;
 use mmry_core::hmlr::get_or_create_human_agent;
 use mmry_core::hmlr::HmlrContext;
 use mmry_core::hmlr::HmlrPipeline;
+use mmry_core::service::client::DaemonClient;
+use mmry_core::service::client::EnrichExistingMemoryRequest;
 
 #[derive(Parser)]
 pub struct HmlrCmd {
@@ -81,8 +83,38 @@ async fn handle_backfill(cmd: BackfillCmd, config: &Config, db: &Database) -> an
     // Get or create human agent for backfill operations
     let human_id = get_or_create_human_agent(db.pool(), config).await?;
 
+    // Try to use service client for LLM-backed enrichment, fall back to local pipeline
+    let service_client = if config.external_api.enable {
+        match DaemonClient::new() {
+            Ok(client) => {
+                if client.is_api_available().await {
+                    if !cmd.json {
+                        println!("Using service API for LLM-backed enrichment");
+                    }
+                    Some(client)
+                } else {
+                    if !cmd.json {
+                        println!("Service API not available, using local pipeline (no LLM)");
+                    }
+                    None
+                }
+            }
+            Err(_) => {
+                if !cmd.json {
+                    println!("Could not create service client, using local pipeline (no LLM)");
+                }
+                None
+            }
+        }
+    } else {
+        if !cmd.json {
+            println!("External API disabled, using local pipeline (no LLM)");
+        }
+        None
+    };
+
     // Create local HMLR pipeline (fallback when service unavailable)
-    let pipeline = HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer));
+    let local_pipeline = HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer));
 
     // Fetch memories to process
     if !cmd.json {
@@ -184,36 +216,75 @@ async fn handle_backfill(cmd: BackfillCmd, config: &Config, db: &Database) -> an
                 continue;
             }
 
-            // Use local pipeline to enrich existing memories
-            // Note: We use local pipeline here because the service API's /v1/agents/memories
-            // endpoint creates new memories. For backfilling existing memories, we only want
-            // to add HMLR metadata (facts, bridge blocks, events) without duplicating.
-            let context = HmlrContext::for_human(human_id);
-            match pipeline.enrich_memory(db.pool(), memory, context).await {
-                Ok(result) => {
-                    let facts_count = result.facts.len();
-                    let has_block = result.bridge_block.is_some();
+            // Try service first (LLM-backed), fall back to local pipeline
+            if let Some(ref client) = service_client {
+                // Use service API for LLM-backed enrichment
+                let request = EnrichExistingMemoryRequest {
+                    memory_id: memory.id.to_string(),
+                    agent_id: Some(human_id.to_string()),
+                    query: None,
+                    conversation_history: None,
+                };
+                match client.enrich_existing_memory(request).await {
+                    Ok(result) => {
+                        let facts_count = result.facts_extracted;
+                        let has_block = result.bridge_block_id.is_some();
 
-                    total_facts += facts_count;
-                    if has_block {
-                        total_blocks += 1;
+                        total_facts += facts_count;
+                        if has_block {
+                            total_blocks += 1;
+                        }
+
+                        if cmd.verbose && !cmd.json {
+                            println!(
+                                "Processed {}: {} facts, bridge_block={}",
+                                &memory.id.to_string()[..8],
+                                facts_count,
+                                has_block
+                            );
+                            for fact in &result.facts {
+                                println!("  - {}: {}", fact.fact_key, fact.fact_value);
+                            }
+                        }
                     }
-
-                    if cmd.verbose && !cmd.json {
-                        println!(
-                            "Processed {}: {} facts, bridge_block={}",
-                            &memory.id.to_string()[..8],
-                            facts_count,
-                            has_block
-                        );
-                        for fact in &result.facts {
-                            println!("  - {}: {}", fact.fact_key, fact.fact_value);
+                    Err(e) => {
+                        if !cmd.json {
+                            eprintln!("Failed to enrich {}: {}", &memory.id.to_string()[..8], e);
                         }
                     }
                 }
-                Err(e) => {
-                    if !cmd.json {
-                        eprintln!("Failed to enrich {}: {}", &memory.id.to_string()[..8], e);
+            } else {
+                // Use local pipeline (no LLM)
+                let context = HmlrContext::for_human(human_id);
+                match local_pipeline
+                    .enrich_memory(db.pool(), memory, context)
+                    .await
+                {
+                    Ok(result) => {
+                        let facts_count = result.facts.len();
+                        let has_block = result.bridge_block.is_some();
+
+                        total_facts += facts_count;
+                        if has_block {
+                            total_blocks += 1;
+                        }
+
+                        if cmd.verbose && !cmd.json {
+                            println!(
+                                "Processed {}: {} facts, bridge_block={}",
+                                &memory.id.to_string()[..8],
+                                facts_count,
+                                has_block
+                            );
+                            for fact in &result.facts {
+                                println!("  - {}: {}", fact.fact_key, fact.fact_value);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if !cmd.json {
+                            eprintln!("Failed to enrich {}: {}", &memory.id.to_string()[..8], e);
+                        }
                     }
                 }
             }

@@ -45,7 +45,7 @@ pub struct EnrichMemoryRequest {
     pub query: Option<String>,
 }
 
-/// Response from HMLR memory enrichment
+/// Response from HMLR memory enrichment (create new memory)
 #[derive(Debug, Deserialize)]
 pub struct EnrichMemoryResponse {
     /// Created memory ID
@@ -66,6 +66,37 @@ pub struct EnrichMemoryResponse {
     pub is_new_topic: bool,
     /// Created timestamp
     pub created_at: String,
+}
+
+/// Request payload for enriching an existing memory via external API
+#[derive(Debug, Serialize)]
+pub struct EnrichExistingMemoryRequest {
+    /// ID of the existing memory to enrich
+    pub memory_id: String,
+    /// Agent ID (UUID)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Optional query/prompt context for routing
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Previous memories in conversation (for HMLR routing)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_history: Option<Vec<String>>,
+}
+
+/// Response from enriching an existing memory
+#[derive(Debug, Deserialize)]
+pub struct EnrichExistingMemoryResponse {
+    /// Memory ID that was enriched
+    pub memory_id: String,
+    /// Facts extracted
+    pub facts_extracted: usize,
+    /// Extracted facts details
+    pub facts: Vec<crate::agents::FactRecord>,
+    /// Bridge block ID (if routing active)
+    pub bridge_block_id: Option<String>,
+    /// Whether this started a new topic
+    pub is_new_topic: bool,
 }
 
 pub struct DaemonClient {
@@ -178,6 +209,46 @@ impl DaemonClient {
 
         response
             .json::<EnrichMemoryResponse>()
+            .await
+            .map_err(|e| crate::Error::Service(format!("Failed to parse response: {e}")))
+    }
+
+    /// Enrich an existing memory using the external API's HMLR pipeline (with LLM support)
+    ///
+    /// This calls the service's /v1/agents/enrich endpoint which uses the
+    /// configured LLM analyzer for fact extraction and routing on an existing memory.
+    /// Unlike enrich_memory(), this does NOT create a new memory.
+    pub async fn enrich_existing_memory(
+        &self,
+        request: EnrichExistingMemoryRequest,
+    ) -> Result<EnrichExistingMemoryResponse> {
+        let base_url = self.get_api_url()?;
+        let url = format!("{base_url}/v1/agents/enrich");
+
+        let mut req = self.http_client.post(&url).json(&request);
+
+        if let Some(auth) = self.get_auth_header() {
+            req = req.header("Authorization", auth);
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|e| crate::Error::Service(format!("HTTP request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(crate::Error::Service(format!(
+                "API error ({status}): {body}"
+            )));
+        }
+
+        response
+            .json::<EnrichExistingMemoryResponse>()
             .await
             .map_err(|e| crate::Error::Service(format!("Failed to parse response: {e}")))
     }
