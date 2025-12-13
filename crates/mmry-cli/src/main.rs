@@ -89,6 +89,9 @@ enum Commands {
 
     /// Ingest files and directories into memories
     Ingest(commands::ingest::IngestCmd),
+
+    /// Remove duplicate memories (keeping the oldest)
+    Prune(commands::prune::PruneCmd),
 }
 
 fn main() {
@@ -230,6 +233,7 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await
         }
+        Commands::Prune(cmd) => commands::prune::handle(cmd, &config, &db).await,
         Commands::Models(_)
         | Commands::Rerankers(_)
         | Commands::Init(_)
