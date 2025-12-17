@@ -9,7 +9,7 @@ use mmry_core::agents::AgentEvent;
 use mmry_core::agents::AgentRecord;
 use mmry_core::agents::BridgeBlock;
 use mmry_core::agents::FactRecord;
-use mmry_core::analysis::NoOpAnalyzer;
+use mmry_core::analysis::build_analyzer;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::graph_ops;
@@ -1340,8 +1340,8 @@ impl App {
                         // HMLR enrichment (if enabled)
                         let mut hmlr_info = String::new();
                         if self.config.hmlr.enabled {
-                            let pipeline =
-                                HmlrPipeline::new(self.config.hmlr.clone(), Arc::new(NoOpAnalyzer));
+                            let analyzer = build_analyzer(&self.config);
+                            let pipeline = HmlrPipeline::new(self.config.hmlr.clone(), analyzer);
                             if let Ok(human_id) =
                                 get_or_create_human_agent(self.db.pool(), &self.config).await
                             {

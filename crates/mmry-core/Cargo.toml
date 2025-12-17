@@ -33,6 +33,7 @@ tokenizers = { workspace = true }
 ureq = { version = "2.10", optional = true }
 schemars = { workspace = true }
 reqwest = { workspace = true, optional = true }
+rig-core = { version = "0.26.0", default-features = false, features = ["reqwest-tls"], optional = true }
 
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
@@ -40,7 +41,7 @@ sysinfo = { version = "0.32", optional = true }
 
 [features]
 default = ["service"]
-service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "dep:reqwest"]
+service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "dep:reqwest", "dep:rig-core"]
 ner = []
 
 [build-dependencies]

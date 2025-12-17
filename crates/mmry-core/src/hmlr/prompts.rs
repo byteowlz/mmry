@@ -264,6 +264,50 @@ impl Default for RoutingDecision {
     }
 }
 
+/// Generate a prompt for creating a topic label for a new bridge block
+///
+/// The topic label should be concise (3-6 words) and capture the main subject.
+pub fn topic_label_prompt(content: &str) -> String {
+    format!(
+        r#"Generate a short topic label (3-6 words) for this memory content.
+
+CONTENT:
+{content}
+
+The topic label should:
+- Be concise and descriptive (3-6 words max)
+- Capture the main subject/domain
+- Use title case (e.g., "Docker Container Setup", "Python API Design")
+- NOT include dates, specific values, or personal names unless they are the main topic
+
+Examples:
+- "We visited the castle in Altena today" -> "Travel - Altena Castle Visit"
+- "Setting up Docker containers for the project" -> "Docker Container Setup"
+- "Discussed Python async patterns with the team" -> "Python Async Patterns"
+- "My API key for OpenAI is sk-123" -> "OpenAI API Configuration"
+
+Return ONLY the topic label, no other text or formatting:"#
+    )
+}
+
+/// Parse a topic label response from the LLM
+pub fn parse_topic_label_response(response: &str) -> Option<String> {
+    let trimmed = response.trim();
+
+    // Remove any markdown formatting
+    let cleaned = trimmed
+        .trim_start_matches(['`', '"', '\''])
+        .trim_end_matches(['`', '"', '\''])
+        .trim();
+
+    // Validate: should be 1-10 words, not empty
+    if cleaned.is_empty() || cleaned.split_whitespace().count() > 10 {
+        return None;
+    }
+
+    Some(cleaned.to_string())
+}
+
 /// Generate a prompt for summarizing a bridge block (for synthesis)
 pub fn synthesis_prompt(block: &BridgeBlock, memories_content: &[String]) -> String {
     let memories_str = memories_content

@@ -38,6 +38,7 @@ pub struct GovernorDecision {
 /// Governor orchestrates HMLR parallel tasks and makes routing decisions
 pub struct Governor {
     config: HmlrConfig,
+    analyzer: Arc<dyn Analyzer>,
     fact_scrubber: FactScrubber,
     scribe: Scribe,
     lattice_crawler: LatticeCrawler,
@@ -48,7 +49,8 @@ impl Governor {
     pub fn new(config: HmlrConfig, analyzer: Arc<dyn Analyzer>) -> Self {
         Self {
             config: config.clone(),
-            fact_scrubber: FactScrubber::new(analyzer.clone()),
+            analyzer: analyzer.clone(),
+            fact_scrubber: FactScrubber::new(analyzer),
             scribe: Scribe::new(),
             lattice_crawler: LatticeCrawler::new(),
         }
@@ -208,6 +210,20 @@ impl Governor {
 
         // Extract keywords from memory content
         block.keywords = extract_keywords(&memory.content);
+
+        // Generate topic label using LLM
+        match self.analyzer.generate_topic_label(&memory.content).await {
+            Ok(Some(label)) => {
+                tracing::debug!(topic_label = %label, "Generated topic label for bridge block");
+                block.topic_label = Some(label);
+            }
+            Ok(None) => {
+                tracing::debug!("No topic label generated (analyzer returned None)");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to generate topic label: {e}");
+            }
+        }
 
         // Store memory ID in content JSON
         block.content = serde_json::json!({

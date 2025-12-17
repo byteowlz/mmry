@@ -3,7 +3,8 @@ use std::io::Read;
 use std::io::{self};
 use std::sync::Arc;
 
-use mmry_core::analysis::NoOpAnalyzer;
+use mmry_core::analysis::build_analyzer;
+use mmry_core::analysis::Analyzer;
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
 use mmry_core::database::graph_ops;
@@ -71,6 +72,8 @@ pub async fn handle(
         anyhow::bail!("Content cannot be empty");
     }
 
+    let analyzer = build_analyzer(config);
+
     // Try to parse as JSON first
     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&input) {
         // Handle JSON input
@@ -82,6 +85,7 @@ pub async fn handle(
             embeddings,
             sparse_embeddings,
             ner,
+            analyzer.clone(),
         )
         .await;
     }
@@ -243,7 +247,7 @@ pub async fn handle(
 
         // HMLR enrichment (if enabled)
         let hmlr_result = if config.hmlr.enabled {
-            let pipeline = HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer));
+            let pipeline = HmlrPipeline::new(config.hmlr.clone(), analyzer.clone());
             let human_id = get_or_create_human_agent(db.pool(), config).await?;
             let context = HmlrContext::for_human(human_id);
             Some(pipeline.enrich_memory(db.pool(), &memory, context).await?)
@@ -349,11 +353,12 @@ async fn handle_json_input(
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     ner: Arc<NerService>,
+    analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
     // Prepare HMLR pipeline if enabled
     let hmlr_pipeline = if config.hmlr.enabled {
         Some((
-            HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer)),
+            HmlrPipeline::new(config.hmlr.clone(), analyzer.clone()),
             get_or_create_human_agent(db.pool(), config).await?,
         ))
     } else {

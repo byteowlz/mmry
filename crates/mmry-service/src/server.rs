@@ -1,6 +1,5 @@
 use crate::state::ServiceState;
 use anyhow::Result;
-use async_trait::async_trait;
 use axum::extract::State as AxumState;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
@@ -13,29 +12,16 @@ use mmry_core::agents::AgentEvent;
 use mmry_core::agents::AgentRecord;
 use mmry_core::agents::BridgeBlock;
 use mmry_core::agents::FactRecord;
+use mmry_core::analysis::build_analyzer;
 use mmry_core::analysis::Analyzer;
 use mmry_core::analysis::AnalyzerRouting;
-use mmry_core::analysis::NoOpAnalyzer;
 use mmry_core::config::Config;
 use mmry_core::config::ExternalApiConfig;
 use mmry_core::database::operations;
-use mmry_core::hmlr::prompts::fact_extraction_prompt;
-use mmry_core::hmlr::prompts::parse_facts_response;
-use mmry_core::hmlr::prompts::parse_filtering_response;
-use mmry_core::hmlr::prompts::two_key_filtering_prompt;
-use mmry_core::hmlr::prompts::FilteringResult;
 use mmry_core::hmlr::prompts::MemoryCandidate;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankScore;
 use mmry_core::search::SearchService;
-use rig::client::CompletionClient;
-use rig::completion::AssistantContent;
-use rig::completion::CompletionModel;
-use rig::completion::CompletionResponse as RigCompletionResponse;
-use rig::message::Message as RigMessage;
-use rig::message::UserContent;
-use rig::one_or_many::OneOrMany;
-use rig::providers::openai;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
@@ -251,157 +237,6 @@ struct AgentEnrichResponse {
     bridge_block_id: Option<String>,
     /// Whether this started a new topic
     is_new_topic: bool,
-}
-
-#[derive(Debug, Clone)]
-struct RigAnalyzer {
-    model_name: String,
-    client: openai::CompletionsClient,
-}
-
-impl RigAnalyzer {
-    fn new(model_name: String, client: openai::CompletionsClient) -> Self {
-        Self { model_name, client }
-    }
-}
-
-#[async_trait]
-impl Analyzer for RigAnalyzer {
-    async fn extract_facts(&self, content: &str) -> mmry_core::Result<Vec<FactRecord>> {
-        let prompt = fact_extraction_prompt(content);
-
-        let model = self.client.completion_model(self.model_name.clone());
-        let request = model
-            .completion_request(RigMessage::User {
-                content: OneOrMany::one(UserContent::text(prompt)),
-            })
-            .temperature(0.0)
-            .build();
-
-        let response: RigCompletionResponse<_> = model
-            .completion(request)
-            .await
-            .map_err(|e| mmry_core::Error::Service(format!("Rig completion failed: {e}")))?;
-
-        let facts = response
-            .choice
-            .iter()
-            .find_map(|content| match content {
-                AssistantContent::Text(t) => Some(parse_facts_response(&t.text)),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        Ok(facts)
-    }
-
-    async fn route(
-        &self,
-        _query: &str,
-        _candidates: &[BridgeBlock],
-    ) -> mmry_core::Result<AnalyzerRouting> {
-        let prompt = "You route user queries to conversation bridge blocks. Reply with JSON: {\"chosen_block\": \"<uuid-or-null>\", \"is_new_topic\": true|false, \"reason\": \"...\"}.";
-        let user_payload = json!({
-            "query": _query,
-            "bridge_blocks": _candidates.iter().map(|b| {
-                json!({
-                    "block_id": b.block_id.to_string(),
-                    "topic": b.topic_label,
-                    "keywords": b.keywords,
-                    "status": b.status,
-                })
-            }).collect::<Vec<_>>()
-        })
-        .to_string();
-
-        let model = self.client.completion_model(self.model_name.clone());
-        let request = model
-            .completion_request(RigMessage::User {
-                content: OneOrMany::one(UserContent::text(user_payload)),
-            })
-            .preamble(prompt.to_string())
-            .temperature(0.0)
-            .build();
-
-        let response: RigCompletionResponse<_> = model
-            .completion(request)
-            .await
-            .map_err(|e| mmry_core::Error::Service(format!("Rig completion failed: {e}")))?;
-
-        let routing = response
-            .choice
-            .iter()
-            .find_map(|content| match content {
-                AssistantContent::Text(t) => {
-                    serde_json::from_str::<serde_json::Value>(&t.text).ok()
-                }
-                _ => None,
-            })
-            .and_then(|val| parse_routing_from_content(&val));
-
-        Ok(routing.unwrap_or_else(AnalyzerRouting::new_topic))
-    }
-
-    async fn filter_memories(
-        &self,
-        query: &str,
-        candidates: &[MemoryCandidate],
-    ) -> mmry_core::Result<FilteringResult> {
-        if candidates.is_empty() {
-            return Ok(FilteringResult::default());
-        }
-
-        let prompt = two_key_filtering_prompt(query, candidates);
-
-        let model = self.client.completion_model(self.model_name.clone());
-        let request = model
-            .completion_request(RigMessage::User {
-                content: OneOrMany::one(UserContent::text(prompt)),
-            })
-            .temperature(0.0)
-            .build();
-
-        let response: RigCompletionResponse<_> = model
-            .completion(request)
-            .await
-            .map_err(|e| mmry_core::Error::Service(format!("Rig completion failed: {e}")))?;
-
-        let result = response
-            .choice
-            .iter()
-            .find_map(|content| match content {
-                AssistantContent::Text(t) => Some(parse_filtering_response(&t.text)),
-                _ => None,
-            })
-            .unwrap_or_else(|| FilteringResult {
-                relevant_indices: candidates.iter().map(|c| c.index).collect(),
-                reasoning: None,
-            });
-
-        Ok(result)
-    }
-}
-
-fn parse_routing_from_content(content: &serde_json::Value) -> Option<AnalyzerRouting> {
-    let chosen_block = content
-        .get("chosen_block")
-        .and_then(|v| v.as_str())
-        .and_then(|s| uuid::Uuid::parse_str(s).ok());
-    let is_new_topic = content
-        .get("is_new_topic")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let rationale = content
-        .get("reason")
-        .or_else(|| content.get("rationale"))
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string);
-
-    Some(AnalyzerRouting {
-        chosen_block,
-        is_new_topic,
-        rationale,
-    })
 }
 #[derive(Debug)]
 struct ApiError {
@@ -1490,69 +1325,6 @@ fn to_routing_payload(routing: AnalyzerRouting) -> AgentRoutingPayload {
         chosen_block: routing.chosen_block.map(|id| id.to_string()),
         is_new_topic: routing.is_new_topic,
         rationale: routing.rationale,
-    }
-}
-
-fn normalize_rig_base_url(raw: &str) -> Option<String> {
-    let trimmed = raw.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let base = if trimmed.ends_with("/chat/completions") {
-        trimmed
-            .trim_end_matches("/chat/completions")
-            .trim_end_matches('/')
-    } else {
-        trimmed
-    };
-
-    let base = if base.ends_with("/v1") {
-        base.to_string()
-    } else {
-        format!("{base}/v1")
-    };
-
-    Some(base)
-}
-
-fn build_analyzer(config: &Config) -> Arc<dyn Analyzer + Send + Sync> {
-    if !config.analyzer.enabled {
-        return Arc::new(NoOpAnalyzer);
-    }
-
-    let Some(base) = config
-        .analyzer
-        .endpoint
-        .as_deref()
-        .and_then(normalize_rig_base_url)
-    else {
-        tracing::warn!("Analyzer enabled but no endpoint configured");
-        return Arc::new(NoOpAnalyzer);
-    };
-
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| "mmry-local".to_string());
-
-    let builder = openai::CompletionsClient::builder()
-        .api_key(&api_key)
-        .base_url(&base);
-
-    match builder.build() {
-        Ok(client) => {
-            let model = config
-                .analyzer
-                .model
-                .clone()
-                .unwrap_or_else(|| "gpt-4o-mini".to_string());
-            Arc::new(RigAnalyzer::new(model, client))
-        }
-        Err(e) => {
-            tracing::warn!("Failed to build analyzer client: {e}");
-            Arc::new(NoOpAnalyzer)
-        }
     }
 }
 

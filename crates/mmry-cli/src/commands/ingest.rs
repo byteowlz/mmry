@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mmry_core::analysis::NoOpAnalyzer;
+use mmry_core::analysis::build_analyzer;
+use mmry_core::analysis::Analyzer;
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
 use mmry_core::database::graph_ops;
@@ -214,15 +215,44 @@ pub async fn handle(
     sparse_embeddings: Arc<SparseEmbeddingService>,
     ner: Arc<NerService>,
 ) -> anyhow::Result<()> {
+    let analyzer = build_analyzer(config);
+
     match cmd.command {
         IngestCommand::File(opts) => {
-            handle_file_ingest(opts, config, db, embeddings, sparse_embeddings, ner).await
+            handle_file_ingest(
+                opts,
+                config,
+                db,
+                embeddings,
+                sparse_embeddings,
+                ner,
+                analyzer,
+            )
+            .await
         }
         IngestCommand::Watch(opts) => {
-            handle_watch(opts, config, db, embeddings, sparse_embeddings, ner).await
+            handle_watch(
+                opts,
+                config,
+                db,
+                embeddings,
+                sparse_embeddings,
+                ner,
+                analyzer,
+            )
+            .await
         }
         IngestCommand::Stdin(opts) => {
-            handle_stdin(opts, config, db, embeddings, sparse_embeddings, ner).await
+            handle_stdin(
+                opts,
+                config,
+                db,
+                embeddings,
+                sparse_embeddings,
+                ner,
+                analyzer,
+            )
+            .await
         }
     }
 }
@@ -255,6 +285,7 @@ async fn handle_file_ingest(
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     ner: Arc<NerService>,
+    analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
     let extensions: Vec<String> = opts
         .extensions
@@ -315,6 +346,7 @@ async fn handle_file_ingest(
             &embeddings,
             &sparse_embeddings,
             &ner,
+            &analyzer,
         )
         .await
         {
@@ -368,6 +400,7 @@ async fn handle_watch(
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     ner: Arc<NerService>,
+    analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
     let extensions: Vec<String> = opts
         .extensions
@@ -409,6 +442,7 @@ async fn handle_watch(
                 &embeddings,
                 &sparse_embeddings,
                 &ner,
+                &analyzer,
             )
             .await
             {
@@ -509,6 +543,7 @@ async fn handle_watch(
                                 &embeddings,
                                 &sparse_embeddings,
                                 &ner,
+                                &analyzer,
                             )) {
                                 Ok(result) => {
                                     if opts.json {
@@ -576,6 +611,7 @@ async fn handle_stdin(
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     ner: Arc<NerService>,
+    analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
     let mut buffer = String::new();
     io::stdin().read_to_string(&mut buffer)?;
@@ -722,7 +758,7 @@ async fn handle_stdin(
 
         // HMLR enrichment
         if config.hmlr.enabled {
-            let pipeline = HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer));
+            let pipeline = HmlrPipeline::new(config.hmlr.clone(), analyzer.clone());
             let human_id = get_or_create_human_agent(db.pool(), config).await?;
             let context = HmlrContext::for_human(human_id);
             let _ = pipeline.enrich_memory(db.pool(), &memory, context).await;
@@ -762,6 +798,7 @@ async fn ingest_file(
     embeddings: &Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: &Arc<SparseEmbeddingService>,
     ner: &Arc<NerService>,
+    analyzer: &Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<IngestResult> {
     let content = std::fs::read_to_string(path)?;
 
@@ -920,7 +957,7 @@ async fn ingest_file(
 
         // HMLR enrichment
         if config.hmlr.enabled {
-            let pipeline = HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer));
+            let pipeline = HmlrPipeline::new(config.hmlr.clone(), analyzer.clone());
             let human_id = get_or_create_human_agent(db.pool(), config).await?;
             let context = HmlrContext::for_human(human_id);
             let _ = pipeline.enrich_memory(db.pool(), &memory, context).await;

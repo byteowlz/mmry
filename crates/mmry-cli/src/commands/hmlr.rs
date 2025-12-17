@@ -1,7 +1,6 @@
 use clap::Parser;
-use std::sync::Arc;
 
-use mmry_core::analysis::NoOpAnalyzer;
+use mmry_core::analysis::build_analyzer;
 use mmry_core::config::Config;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
@@ -83,38 +82,55 @@ async fn handle_backfill(cmd: BackfillCmd, config: &Config, db: &Database) -> an
     // Get or create human agent for backfill operations
     let human_id = get_or_create_human_agent(db.pool(), config).await?;
 
-    // Try to use service client for LLM-backed enrichment, fall back to local pipeline
+    // Build the analyzer (uses LLM if configured)
+    let analyzer = build_analyzer(config);
+    let llm_enabled = config.analyzer.enabled && config.analyzer.endpoint.is_some();
+
+    // Try to use service client for enrichment, fall back to local pipeline
     let service_client = if config.external_api.enable {
         match DaemonClient::new() {
             Ok(client) => {
                 if client.is_api_available().await {
                     if !cmd.json {
-                        println!("Using service API for LLM-backed enrichment");
+                        println!("Using service API for enrichment");
                     }
                     Some(client)
                 } else {
                     if !cmd.json {
-                        println!("Service API not available, using local pipeline (no LLM)");
+                        println!(
+                            "Service API not available, using local pipeline{}",
+                            if llm_enabled { " (LLM enabled)" } else { "" }
+                        );
                     }
                     None
                 }
             }
             Err(_) => {
                 if !cmd.json {
-                    println!("Could not create service client, using local pipeline (no LLM)");
+                    println!(
+                        "Could not create service client, using local pipeline{}",
+                        if llm_enabled { " (LLM enabled)" } else { "" }
+                    );
                 }
                 None
             }
         }
     } else {
         if !cmd.json {
-            println!("External API disabled, using local pipeline (no LLM)");
+            println!(
+                "Using local pipeline{}",
+                if llm_enabled {
+                    " (LLM enabled)"
+                } else {
+                    " (no LLM)"
+                }
+            );
         }
         None
     };
 
     // Create local HMLR pipeline (fallback when service unavailable)
-    let local_pipeline = HmlrPipeline::new(config.hmlr.clone(), Arc::new(NoOpAnalyzer));
+    let local_pipeline = HmlrPipeline::new(config.hmlr.clone(), analyzer);
 
     // Fetch memories to process
     if !cmd.json {
