@@ -6,6 +6,14 @@ use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+#[cfg(feature = "federation")]
+use mmry_core::federation::list_all_sources;
+#[cfg(feature = "federation")]
+use mmry_core::federation::search_federated;
+#[cfg(feature = "federation")]
+use mmry_core::federation::FederatedSearchOptions;
+#[cfg(feature = "federation")]
+use mmry_core::federation::StoreSource;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::HmlrSearchOptions;
@@ -14,9 +22,7 @@ use mmry_core::search::InactiveBlockStrategy;
 use mmry_core::search::SearchService;
 use mmry_core::service::client::DaemonClient;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
-use mmry_core::stores::search_all_stores;
 use mmry_core::stores::MemoryWithStore;
-use mmry_core::stores::SearchAllStoresOptions;
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum CliSearchMode {
@@ -74,6 +80,13 @@ pub struct SearchCmd {
     #[arg(long, short = 'A', help = "Search across all stores")]
     pub all_stores: bool,
 
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Search across selected sources (local store names or remote:<name>)"
+    )]
+    pub sources: Vec<String>,
+
     #[arg(long, help = "Include HMLR enrichments (facts, bridge blocks)")]
     pub hmlr: bool,
 
@@ -90,6 +103,12 @@ pub struct SearchCmd {
     pub inactive_blocks: Option<String>,
 }
 
+impl SearchCmd {
+    pub fn uses_federation(&self) -> bool {
+        self.all_stores || !self.sources.is_empty()
+    }
+}
+
 pub async fn handle(
     cmd: SearchCmd,
     config: &Config,
@@ -100,21 +119,40 @@ pub async fn handle(
 ) -> anyhow::Result<()> {
     let (resolved_mode, limit, rerank) = resolve_search_opts(&cmd, config);
 
-    if cmd.all_stores {
-        let results = search_all_stores(SearchAllStoresOptions {
-            config,
-            query: &cmd.query,
-            category: cmd.category.as_deref(),
-            limit,
-            mode: Some(resolved_mode),
-            rerank: Some(rerank),
-            embeddings,
-            sparse_embeddings,
-            reranker,
-        })
-        .await?;
+    if cmd.uses_federation() {
+        if cmd.hmlr {
+            anyhow::bail!("--hmlr is only supported for single-store searches");
+        }
 
-        render_results_with_store(&results, resolved_mode, &cmd)?;
+        #[cfg(not(feature = "federation"))]
+        {
+            anyhow::bail!("Federated search requires building with the 'federation' feature");
+        }
+
+        #[cfg(feature = "federation")]
+        {
+            let sources = if cmd.all_stores {
+                list_all_sources(config)?
+            } else {
+                parse_sources(&cmd.sources)?
+            };
+
+            let results = search_federated(FederatedSearchOptions {
+                config,
+                sources,
+                query: &cmd.query,
+                category: cmd.category.as_deref(),
+                limit,
+                mode: resolved_mode,
+                rerank,
+                embeddings,
+                sparse_embeddings,
+                reranker,
+            })
+            .await?;
+
+            render_results_with_store(&results, resolved_mode, &cmd)?;
+        }
     } else if cmd.hmlr {
         // HMLR-enhanced search
         let search_service = SearchService::new(
@@ -186,6 +224,42 @@ pub async fn handle_remote(cmd: SearchCmd, config: &Config) -> anyhow::Result<()
     render_results(&results, resolved_mode, &cmd)?;
 
     Ok(())
+}
+
+#[cfg(feature = "federation")]
+fn parse_sources(values: &[String]) -> anyhow::Result<Vec<StoreSource>> {
+    let mut out = Vec::new();
+    for raw in values {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+
+        if let Some(remote) = raw.strip_prefix("remote:") {
+            out.push(StoreSource::Remote {
+                remote: remote.to_string(),
+            });
+            continue;
+        }
+        if let Some(local) = raw.strip_prefix("local:") {
+            mmry_core::stores::validate_store_name(local)?;
+            out.push(StoreSource::Local {
+                store: local.to_string(),
+            });
+            continue;
+        }
+
+        mmry_core::stores::validate_store_name(raw)?;
+        out.push(StoreSource::Local {
+            store: raw.to_string(),
+        });
+    }
+
+    if out.is_empty() {
+        anyhow::bail!("No valid sources specified");
+    }
+
+    Ok(out)
 }
 
 fn resolve_search_opts(cmd: &SearchCmd, config: &Config) -> (SearchMode, i64, bool) {

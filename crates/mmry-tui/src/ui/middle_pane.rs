@@ -35,24 +35,24 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
         .enumerate()
         .map(|(idx, memory)| {
             let is_selected = app.middle_selection.is_selected(idx);
-            let type_str = match memory.memory_type {
+            let type_str = match memory.memory.memory_type {
                 MemoryType::Episodic => "E",
                 MemoryType::Semantic => "S",
                 MemoryType::Procedural => "P",
             };
 
-            let type_color = match memory.memory_type {
+            let type_color = match memory.memory.memory_type {
                 MemoryType::Episodic => Color::Cyan,
                 MemoryType::Semantic => Color::Green,
                 MemoryType::Procedural => Color::Yellow,
             };
 
-            let date_str = memory.created_at.format("%Y-%m-%d").to_string();
+            let date_str = memory.memory.created_at.format("%Y-%m-%d").to_string();
 
-            let content_preview_full = if memory.content.len() > 60 {
-                format!("{}...", &memory.content[..60])
+            let content_preview_full = if memory.memory.content.len() > 60 {
+                format!("{}...", &memory.memory.content[..60])
             } else {
-                memory.content.clone()
+                memory.memory.content.clone()
             };
             let content_preview = content_preview_full
                 .lines()
@@ -60,8 +60,8 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
                 .unwrap_or("")
                 .to_string();
 
-            let tags_str = if !memory.tags.is_empty() {
-                format!(" [{}]", memory.tags.join(", "))
+            let tags_str = if !memory.memory.tags.is_empty() {
+                format!(" [{}]", memory.memory.tags.join(", "))
             } else {
                 String::new()
             };
@@ -89,24 +89,22 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
             ];
 
             // Show store name when viewing all stores
-            if app.viewing_all_stores {
-                if let Some(store_name) = app.get_memory_store(memory.id) {
-                    line1_spans.push(Span::raw(" "));
-                    line1_spans.push(Span::styled(
-                        format!("@{store_name}"),
-                        Style::default().fg(Color::Magenta),
-                    ));
-                }
+            if app.viewing_all_stores || memory.store != app.current_store {
+                line1_spans.push(Span::raw(" "));
+                line1_spans.push(Span::styled(
+                    format!("@{}", memory.store),
+                    Style::default().fg(Color::Magenta),
+                ));
             }
 
             line1_spans.push(Span::raw(" | "));
             line1_spans.push(Span::styled(
-                &memory.category,
+                &memory.memory.category,
                 Style::default().fg(Color::Green),
             ));
             line1_spans.push(Span::raw(" | "));
             line1_spans.push(Span::styled(
-                format!("★{}", memory.importance),
+                format!("★{}", memory.memory.importance),
                 Style::default().fg(Color::Yellow),
             ));
 

@@ -54,6 +54,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             format!("[{}]", app.current_store_display()),
             Style::default().fg(Color::Magenta),
         ),
+        Span::raw(" "),
+        Span::styled(
+            app.search_scope_display()
+                .as_deref()
+                .map(|s| format!("(scope: {s})"))
+                .unwrap_or_default(),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::raw(" | "),
         Span::raw(format!("Memories: {} ", app.memories.len())),
     ];

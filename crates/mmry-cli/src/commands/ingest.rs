@@ -287,6 +287,15 @@ async fn handle_file_ingest(
     ner: Arc<NerService>,
     analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
+    let ctx = IngestContext {
+        config,
+        db,
+        embeddings: &embeddings,
+        sparse_embeddings: &sparse_embeddings,
+        ner: &ner,
+        analyzer: &analyzer,
+    };
+
     let extensions: Vec<String> = opts
         .extensions
         .split(',')
@@ -338,18 +347,7 @@ async fn handle_file_ingest(
     let mut results = Vec::new();
 
     for path in paths {
-        match ingest_file(
-            &path,
-            &opts,
-            config,
-            db,
-            &embeddings,
-            &sparse_embeddings,
-            &ner,
-            &analyzer,
-        )
-        .await
-        {
+        match ingest_file(&path, &opts, &ctx).await {
             Ok(result) => {
                 if !opts.json {
                     let chunk_info = if result.chunks > 1 {
@@ -402,6 +400,15 @@ async fn handle_watch(
     ner: Arc<NerService>,
     analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
+    let ctx = IngestContext {
+        config,
+        db,
+        embeddings: &embeddings,
+        sparse_embeddings: &sparse_embeddings,
+        ner: &ner,
+        analyzer: &analyzer,
+    };
+
     let extensions: Vec<String> = opts
         .extensions
         .split(',')
@@ -434,18 +441,7 @@ async fn handle_watch(
                 max_chunk_tokens: opts.max_chunk_tokens,
             };
 
-            match ingest_file(
-                &path,
-                &file_opts,
-                config,
-                db,
-                &embeddings,
-                &sparse_embeddings,
-                &ner,
-                &analyzer,
-            )
-            .await
-            {
+            match ingest_file(&path, &file_opts, &ctx).await {
                 Ok(result) => {
                     if opts.json {
                         println!(
@@ -535,16 +531,8 @@ async fn handle_watch(
                                 max_chunk_tokens: opts.max_chunk_tokens,
                             };
 
-                            match futures::executor::block_on(ingest_file(
-                                &path,
-                                &file_opts,
-                                config,
-                                db,
-                                &embeddings,
-                                &sparse_embeddings,
-                                &ner,
-                                &analyzer,
-                            )) {
+                            match futures::executor::block_on(ingest_file(&path, &file_opts, &ctx))
+                            {
                                 Ok(result) => {
                                     if opts.json {
                                         println!(
@@ -790,16 +778,27 @@ async fn handle_stdin(
     Ok(())
 }
 
+struct IngestContext<'a> {
+    config: &'a Config,
+    db: &'a Database,
+    embeddings: &'a Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
+    sparse_embeddings: &'a Arc<SparseEmbeddingService>,
+    ner: &'a Arc<NerService>,
+    analyzer: &'a Arc<dyn Analyzer + Send + Sync>,
+}
+
 async fn ingest_file(
     path: &PathBuf,
     opts: &FileIngestOpts,
-    config: &Config,
-    db: &Database,
-    embeddings: &Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
-    sparse_embeddings: &Arc<SparseEmbeddingService>,
-    ner: &Arc<NerService>,
-    analyzer: &Arc<dyn Analyzer + Send + Sync>,
+    ctx: &IngestContext<'_>,
 ) -> anyhow::Result<IngestResult> {
+    let config = ctx.config;
+    let db = ctx.db;
+    let embeddings = ctx.embeddings;
+    let sparse_embeddings = ctx.sparse_embeddings;
+    let ner = ctx.ner;
+    let analyzer = ctx.analyzer;
+
     let content = std::fs::read_to_string(path)?;
 
     if content.trim().is_empty() {

@@ -1,6 +1,7 @@
 mod app;
 mod editor;
 mod events;
+mod fuzzy;
 mod state;
 mod ui;
 

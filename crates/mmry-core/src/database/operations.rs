@@ -275,6 +275,47 @@ pub async fn update_memory_embeddings(
     Ok(())
 }
 
+pub async fn update_memory_fields(
+    pool: &SqlitePool,
+    memory: &Memory,
+    clear_embeddings: bool,
+) -> crate::Result<()> {
+    let chunk_method_str = memory.chunk_method.as_ref().and_then(|cm| {
+        serde_json::to_string(cm)
+            .ok()
+            .map(|s| s.trim_matches('"').to_string())
+    });
+
+    sqlx::query(
+        r#"
+        UPDATE memories
+        SET type = ?, content = ?, metadata = ?, importance = ?, category = ?, tags = ?,
+            updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(serde_json::to_string(&memory.memory_type)?)
+    .bind(&memory.content)
+    .bind(memory.metadata.to_string())
+    .bind(memory.importance)
+    .bind(&memory.category)
+    .bind(serde_json::to_string(&memory.tags)?)
+    .bind(memory.updated_at.to_rfc3339())
+    .bind(memory.parent_id.map(|id| id.to_string()))
+    .bind(memory.chunk_index)
+    .bind(memory.total_chunks)
+    .bind(chunk_method_str)
+    .bind(memory.id.to_string())
+    .execute(pool)
+    .await?;
+
+    if clear_embeddings {
+        update_memory_embeddings(pool, &memory.id, None, None).await?;
+    }
+
+    Ok(())
+}
+
 pub async fn upsert_agent(pool: &SqlitePool, agent: &AgentRecord) -> crate::Result<()> {
     sqlx::query(
         r#"

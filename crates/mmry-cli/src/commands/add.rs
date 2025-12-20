@@ -76,18 +76,17 @@ pub async fn handle(
 
     // Try to parse as JSON first
     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&input) {
-        // Handle JSON input
-        return handle_json_input(
-            json_value,
-            cmd,
+        let ctx = AddContext {
             config,
             db,
-            embeddings,
-            sparse_embeddings,
-            ner,
-            analyzer.clone(),
-        )
-        .await;
+            embeddings: &embeddings,
+            sparse_embeddings: &sparse_embeddings,
+            ner: &ner,
+            analyzer: &analyzer,
+        };
+
+        // Handle JSON input
+        return handle_json_input(json_value, cmd, &ctx).await;
     }
 
     // Plain text input
@@ -345,21 +344,25 @@ async fn extract_and_link_entities(
     Ok(extracted.len())
 }
 
+struct AddContext<'a> {
+    config: &'a Config,
+    db: &'a Database,
+    embeddings: &'a Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
+    sparse_embeddings: &'a Arc<SparseEmbeddingService>,
+    ner: &'a Arc<NerService>,
+    analyzer: &'a Arc<dyn Analyzer + Send + Sync>,
+}
+
 async fn handle_json_input(
     json_value: serde_json::Value,
     cmd: AddCmd,
-    config: &Config,
-    db: &Database,
-    embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
-    sparse_embeddings: Arc<SparseEmbeddingService>,
-    ner: Arc<NerService>,
-    analyzer: Arc<dyn Analyzer + Send + Sync>,
+    ctx: &AddContext<'_>,
 ) -> anyhow::Result<()> {
     // Prepare HMLR pipeline if enabled
-    let hmlr_pipeline = if config.hmlr.enabled {
+    let hmlr_pipeline = if ctx.config.hmlr.enabled {
         Some((
-            HmlrPipeline::new(config.hmlr.clone(), analyzer.clone()),
-            get_or_create_human_agent(db.pool(), config).await?,
+            HmlrPipeline::new(ctx.config.hmlr.clone(), ctx.analyzer.clone()),
+            get_or_create_human_agent(ctx.db.pool(), ctx.config).await?,
         ))
     } else {
         None
@@ -369,15 +372,23 @@ async fn handle_json_input(
     if let Some(array) = json_value.as_array() {
         let mut results = Vec::new();
         for item in array {
-            let memory =
-                process_json_memory(item, &cmd, config, &embeddings, &sparse_embeddings).await?;
-            operations::insert_memory(db.pool(), &memory).await?;
+            let memory = process_json_memory(
+                item,
+                &cmd,
+                ctx.config,
+                ctx.embeddings,
+                ctx.sparse_embeddings,
+            )
+            .await?;
+            operations::insert_memory(ctx.db.pool(), &memory).await?;
             // Extract entities for each memory
-            extract_and_link_entities(db, &ner, &memory, true).await?;
+            extract_and_link_entities(ctx.db, ctx.ner, &memory, true).await?;
             // HMLR enrichment
             if let Some((ref pipeline, human_id)) = hmlr_pipeline {
                 let context = HmlrContext::for_human(human_id);
-                let _ = pipeline.enrich_memory(db.pool(), &memory, context).await;
+                let _ = pipeline
+                    .enrich_memory(ctx.db.pool(), &memory, context)
+                    .await;
             }
             results.push(memory);
         }
@@ -412,15 +423,25 @@ async fn handle_json_input(
     }
 
     // Handle single object
-    let memory =
-        process_json_memory(&json_value, &cmd, config, &embeddings, &sparse_embeddings).await?;
-    operations::insert_memory(db.pool(), &memory).await?;
+    let memory = process_json_memory(
+        &json_value,
+        &cmd,
+        ctx.config,
+        ctx.embeddings,
+        ctx.sparse_embeddings,
+    )
+    .await?;
+    operations::insert_memory(ctx.db.pool(), &memory).await?;
     // Extract entities
-    extract_and_link_entities(db, &ner, &memory, cmd.json).await?;
+    extract_and_link_entities(ctx.db, ctx.ner, &memory, cmd.json).await?;
     // HMLR enrichment
     let hmlr_result = if let Some((ref pipeline, human_id)) = hmlr_pipeline {
         let context = HmlrContext::for_human(human_id);
-        Some(pipeline.enrich_memory(db.pool(), &memory, context).await?)
+        Some(
+            pipeline
+                .enrich_memory(ctx.db.pool(), &memory, context)
+                .await?,
+        )
     } else {
         None
     };

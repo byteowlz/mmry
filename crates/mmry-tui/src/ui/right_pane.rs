@@ -32,7 +32,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Right;
 
     let content = if let Some(memory) = app.selected_memory() {
-        let type_str = match memory.memory_type {
+        let type_str = match memory.memory.memory_type {
             MemoryType::Episodic => "Episodic",
             MemoryType::Semantic => "Semantic",
             MemoryType::Procedural => "Procedural",
@@ -41,7 +41,11 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("ID: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(memory.id.to_string()),
+                Span::raw(memory.memory.id.to_string()),
+            ]),
+            Line::from(vec![
+                Span::styled("Store: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(&memory.store, Style::default().fg(Color::Magenta)),
             ]),
             Line::from(""),
             Line::from(vec![
@@ -50,7 +54,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("Category: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(&memory.category, Style::default().fg(Color::Green)),
+                Span::styled(&memory.memory.category, Style::default().fg(Color::Green)),
             ]),
             Line::from(vec![
                 Span::styled(
@@ -58,26 +62,41 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("{}/10", memory.importance),
+                    format!("{}/10", memory.memory.importance),
                     Style::default().fg(Color::Yellow),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("Created: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(memory.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+                Span::raw(
+                    memory
+                        .memory
+                        .created_at
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string(),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Updated: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(memory.updated_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+                Span::raw(
+                    memory
+                        .memory
+                        .updated_at
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string(),
+                ),
             ]),
             Line::from(""),
         ];
 
-        if !memory.tags.is_empty() {
+        if !memory.memory.tags.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("Tags: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(memory.tags.join(", "), Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    memory.memory.tags.join(", "),
+                    Style::default().fg(Color::Magenta),
+                ),
             ]));
             lines.push(Line::from(""));
         }
@@ -88,7 +107,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         )));
         lines.push(Line::from(""));
 
-        for line in memory.content.lines() {
+        for line in memory.memory.content.lines() {
             lines.push(Line::from(line));
         }
 
@@ -100,7 +119,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                 "Dense Embedding: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            if memory.embedding.is_some() {
+            if memory.memory.embedding.is_some() {
                 Span::styled("[yes]", Style::default().fg(Color::Green))
             } else {
                 Span::styled("[no]", Style::default().fg(Color::Red))
@@ -112,7 +131,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                 "Sparse Embedding: ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            if memory.sparse_embedding.is_some() {
+            if memory.memory.sparse_embedding.is_some() {
                 Span::styled("[yes]", Style::default().fg(Color::Green))
             } else {
                 Span::styled("[no]", Style::default().fg(Color::Red))
@@ -409,7 +428,7 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Right;
 
     let content = if let Some(memory) = app.selected_memory() {
-        let memory_id_short = memory.id.to_string()[..8].to_string();
+        let memory_id_short = memory.memory.id.to_string()[..8].to_string();
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("Memory: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -470,11 +489,11 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(""));
 
         // Show first 200 chars of content
-        let preview: String = memory.content.chars().take(200).collect();
+        let preview: String = memory.memory.content.chars().take(200).collect();
         for line in preview.lines() {
             lines.push(Line::from(line.to_string()));
         }
-        if memory.content.len() > 200 {
+        if memory.memory.content.len() > 200 {
             lines.push(Line::from("..."));
         }
 

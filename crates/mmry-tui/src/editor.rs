@@ -113,11 +113,7 @@ pub fn parse_edited_memory(content: &str, original_id: Option<Uuid>) -> Result<M
         }
 
         if in_content {
-            let content_line = if line.starts_with("  ") {
-                &line[2..]
-            } else {
-                line
-            };
+            let content_line = line.strip_prefix("  ").unwrap_or(line);
             memory_content.push_str(content_line);
             memory_content.push('\n');
             continue;

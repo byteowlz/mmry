@@ -119,6 +119,8 @@ pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub stores: StoresConfig,
+    #[serde(default)]
+    pub federation: FederationConfig,
     pub embeddings: EmbeddingsConfig,
     pub sparse_embeddings: SparseEmbeddingsConfig,
     pub search: SearchConfig,
@@ -147,6 +149,26 @@ pub struct StoresConfig {
     pub default: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct FederationConfig {
+    pub enabled: bool,
+    pub remotes: Vec<FederationRemoteConfig>,
+    pub request_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FederationRemoteConfig {
+    /// Stable name for this remote (used as source id in results)
+    pub name: String,
+    /// Base URL to mmry-service external API (e.g. "http://127.0.0.1:8081")
+    pub base_url: String,
+    /// Optional API key (Authorization: Bearer ...)
+    pub api_key: Option<String>,
+    /// Optional store name on the remote (defaults to remote's default store)
+    pub store: Option<String>,
+}
+
 impl Default for StoresConfig {
     fn default() -> Self {
         let data_dir = default_data_dir().join("stores");
@@ -154,6 +176,16 @@ impl Default for StoresConfig {
         Self {
             directory: data_dir,
             default: "default".to_string(),
+        }
+    }
+}
+
+impl Default for FederationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            remotes: Vec::new(),
+            request_timeout_seconds: 10,
         }
     }
 }
@@ -487,9 +519,9 @@ impl Default for HmlrConfig {
 impl Default for NerConfig {
     fn default() -> Self {
         Self {
-            enabled: true, // Enabled by default when ner feature is compiled in
+            enabled: false,
             model: "urchade/gliner_multi-v2.1".to_string(), // Multilingual GLiNER
-            confidence_threshold: 0.5, // GLiNER works well with 0.5
+            confidence_threshold: 0.5,                      // GLiNER works well with 0.5
             labels: default_ner_labels(),
         }
     }

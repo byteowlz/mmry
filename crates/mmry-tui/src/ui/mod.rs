@@ -14,6 +14,8 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::state::AppMode;
+use crate::state::MemoryKey;
+use crate::state::StoreSelectState;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -40,14 +42,14 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     match &app.mode {
         AppMode::Help => help::draw(f, app),
-        AppMode::Delete(id) => draw_delete_confirmation(f, *id),
+        AppMode::Delete(key) => draw_delete_confirmation(f, key),
         AppMode::DeleteMultiple(ids) => draw_delete_multiple_confirmation(f, ids.len()),
         AppMode::Sort => draw_sort_menu(f, app),
         AppMode::Search(_) => command_palette::draw(f, app),
         AppMode::WhichKey(context) => whichkey::draw(f, context),
         AppMode::CategoryInput(_, ref input) => whichkey::draw_category_input(f, input),
         AppMode::CategorySelect(idx) => whichkey::draw_category_select(f, &app.categories, *idx),
-        AppMode::StoreSelect(idx) => draw_store_select(f, app, *idx),
+        AppMode::StoreSelect(state) => draw_store_select(f, app, state),
         AppMode::StoreCreate(ref input) => draw_store_create(f, input),
         AppMode::MoveToStore(_, idx) => draw_move_to_store(f, app, *idx),
         AppMode::Export(all) => draw_export_dialog(f, app, *all),
@@ -55,7 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_delete_confirmation(f: &mut Frame, id: uuid::Uuid) {
+fn draw_delete_confirmation(f: &mut Frame, key: &MemoryKey) {
     use ratatui::style::Color;
     use ratatui::style::Style;
     use ratatui::widgets::Block;
@@ -72,7 +74,10 @@ fn draw_delete_confirmation(f: &mut Frame, id: uuid::Uuid) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
 
-    let text = format!("Delete memory {id}?\n\nPress 'y' to confirm, ESC to cancel");
+    let text = format!(
+        "Delete memory {} from store '{}'?\n\nPress 'y' to confirm, ESC to cancel",
+        key.id, key.store
+    );
     let paragraph = Paragraph::new(text).block(block).style(Style::default());
 
     f.render_widget(paragraph, area);
@@ -255,8 +260,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn draw_store_select(f: &mut Frame, app: &App, selected_idx: usize) {
-    use mmry_core::stores::format_size;
+fn draw_store_select(f: &mut Frame, app: &App, state: &StoreSelectState) {
     use ratatui::style::Color;
     use ratatui::style::Modifier;
     use ratatui::style::Style;
@@ -272,88 +276,71 @@ fn draw_store_select(f: &mut Frame, app: &App, selected_idx: usize) {
 
     f.render_widget(Clear, area);
 
+    let filtered = app.store_select_items(&state.query);
+
     let mut items: Vec<ListItem> = Vec::new();
 
-    // "All Stores" option at index 0
-    {
-        let is_selected = selected_idx == 0;
-        let is_current = app.viewing_all_stores;
-
-        let prefix = if is_selected { "> " } else { "  " };
-        let suffix = if is_current { " (current)" } else { "" };
-
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else if is_current {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::Cyan)
-        };
-
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled("0. ", Style::default().fg(Color::DarkGray)),
-            Span::styled("All Stores", style),
-            Span::styled(suffix, Style::default().fg(Color::DarkGray)),
-        ])));
-    }
-
-    // Individual stores (indices 1+)
-    for (i, store) in app.available_stores.iter().enumerate() {
-        let list_idx = i + 1; // +1 because "All Stores" is at 0
-        let is_selected = list_idx == selected_idx;
-        let is_current = !app.viewing_all_stores && store.name == app.current_store;
-
-        let prefix = if is_selected { "> " } else { "  " };
-        let suffix = if is_current { " (current)" } else { "" };
-        let number = if i < 9 {
-            format!("{}. ", i + 1)
-        } else {
-            "   ".to_string()
-        };
-
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else if is_current {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default()
-        };
-
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(number, Style::default().fg(Color::DarkGray)),
-            Span::styled(&store.name, style),
-            Span::styled(suffix, Style::default().fg(Color::DarkGray)),
-            Span::raw(" - "),
-            Span::styled(
-                format_size(store.size_bytes),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ])));
-    }
-
-    // Add hint for creating new store
     items.push(ListItem::new(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("---", Style::default().fg(Color::DarkGray)),
+        Span::styled("Filter: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(&state.query, Style::default().fg(Color::Cyan)),
+        Span::styled("_", Style::default().fg(Color::Gray)),
     ])));
+    items.push(ListItem::new(Line::from("")));
+
+    for (idx, item) in filtered.iter().enumerate() {
+        let is_cursor = idx == state.cursor;
+        let is_selected = state.selected.contains(&item.id);
+        let is_current = if item.id == "__all_local__" {
+            app.viewing_all_stores
+        } else {
+            !app.viewing_all_stores && item.id == app.current_store
+        };
+
+        let cursor_prefix = if is_cursor { "> " } else { "  " };
+        let checkbox = if is_selected { "[x] " } else { "[ ] " };
+        let current_suffix = if is_current { " (current)" } else { "" };
+
+        let base_style = if is_cursor {
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD)
+        } else if is_current {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default()
+        };
+
+        let mut spans = vec![
+            Span::styled(cursor_prefix, base_style),
+            Span::styled(checkbox, Style::default().fg(Color::Yellow)),
+            Span::styled(&item.title, base_style),
+            Span::styled(current_suffix, Style::default().fg(Color::DarkGray)),
+        ];
+        if let Some(detail) = item.detail.as_ref() {
+            spans.push(Span::raw(" - "));
+            spans.push(Span::styled(detail, Style::default().fg(Color::DarkGray)));
+        }
+
+        items.push(ListItem::new(Line::from(spans)));
+    }
+
+    items.push(ListItem::new(Line::from("")));
     items.push(ListItem::new(Line::from(vec![
-        Span::raw("  "),
+        Span::styled("Type", Style::default().fg(Color::Cyan)),
+        Span::raw(" filter • "),
+        Span::styled("Space", Style::default().fg(Color::Yellow)),
+        Span::raw(" toggle • "),
+        Span::styled("Enter", Style::default().fg(Color::Green)),
+        Span::raw(" apply • "),
+        Span::styled("Esc", Style::default().fg(Color::Red)),
+        Span::raw(" cancel • "),
         Span::styled("n", Style::default().fg(Color::Yellow)),
-        Span::styled(" - Create new store", Style::default().fg(Color::DarkGray)),
+        Span::raw(" new store"),
     ])));
 
     let list = List::new(items).block(
         Block::default()
-            .title(format!(
-                " Select Store (current: {}) ",
-                app.current_store_display()
-            ))
+            .title(" Store Scope ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Magenta)),
     );

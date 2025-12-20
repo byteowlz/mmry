@@ -1,3 +1,18 @@
+use crate::editor;
+use crate::events::parse_key_event;
+use crate::events::AppEvent;
+use crate::events::KeyAction;
+use crate::fuzzy::fuzzy_score;
+use crate::state::sort::SortMode;
+use crate::state::AppMode;
+use crate::state::FilterState;
+use crate::state::MemoryKey;
+use crate::state::MiddleView;
+use crate::state::Pane;
+use crate::state::RightPaneView;
+use crate::state::Selection;
+use crate::state::SortState;
+use crate::state::StoreSelectState;
 use anyhow::Result;
 use crossterm::cursor;
 use crossterm::execute;
@@ -16,6 +31,10 @@ use mmry_core::database::graph_ops;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::federation::list_all_sources;
+use mmry_core::federation::search_federated;
+use mmry_core::federation::FederatedSearchOptions;
+use mmry_core::federation::StoreSource;
 use mmry_core::graph::Entity;
 use mmry_core::hmlr::get_or_create_human_agent;
 use mmry_core::hmlr::HmlrContext;
@@ -32,27 +51,13 @@ use mmry_core::stores::move_memory_to_store;
 use mmry_core::stores::store_exists;
 use mmry_core::stores::validate_store_name;
 use mmry_core::stores::write_export_to_file;
+use mmry_core::stores::MemoryWithStore;
 use mmry_core::stores::StoreInfo;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Write;
 use std::io::{self};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use uuid::Uuid;
-
-use crate::editor;
-use crate::events::parse_key_event;
-use crate::events::AppEvent;
-use crate::events::KeyAction;
-use crate::state::sort::SortMode;
-use crate::state::AppMode;
-use crate::state::FilterState;
-use crate::state::MiddleView;
-use crate::state::Pane;
-use crate::state::RightPaneView;
-use crate::state::Selection;
-use crate::state::SortState;
 
 const SEARCH_MODES: [SearchMode; 6] = [
     SearchMode::Hybrid,
@@ -70,6 +75,15 @@ const SORT_MODES: [SortMode; 6] = [
     SortMode::Category,
     SortMode::Type,
 ];
+
+const ALL_LOCAL_STORES_ID: &str = "__all_local__";
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoreSelectItem {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) detail: Option<String>,
+}
 
 pub enum LeftPaneItem {
     FilterAll,
@@ -89,8 +103,8 @@ pub struct App {
     search_service: SearchService,
     search_mode_index: usize,
     sort_menu_index: usize,
-    search_backup: Option<Vec<Memory>>,
-    pub memories: Vec<Memory>,
+    search_backup: Option<Vec<MemoryWithStore>>,
+    pub memories: Vec<MemoryWithStore>,
     pub bridge_blocks: Vec<BridgeBlock>,
     pub facts: Vec<FactRecord>,
     pub agent_events: Vec<AgentEvent>,
@@ -116,21 +130,21 @@ pub struct App {
     /// Cached entities for the currently selected memory
     pub selected_memory_entities: Vec<Entity>,
     /// ID of the memory whose entities are cached
-    cached_entity_memory_id: Option<Uuid>,
+    cached_entity_memory_id: Option<MemoryKey>,
 
     /// HMLR enrichments for the currently selected memory
     pub selected_memory_facts: Vec<FactRecord>,
     pub selected_memory_bridge_block: Option<BridgeBlock>,
     pub selected_memory_creator_agent: Option<AgentRecord>,
     /// ID of the memory whose HMLR data is cached
-    cached_hmlr_memory_id: Option<Uuid>,
+    cached_hmlr_memory_id: Option<MemoryKey>,
 
     /// Current store name (empty string means "All Stores")
     pub current_store: String,
     /// Whether we're viewing all stores
     pub viewing_all_stores: bool,
-    /// Map from memory ID to store name (used when viewing all stores)
-    pub memory_store_map: HashMap<Uuid, String>,
+    /// Optional override for search scope (local/remote sources)
+    search_scope_override: Option<Vec<StoreSource>>,
     /// Available stores (cached)
     pub available_stores: Vec<StoreInfo>,
     /// Shared embedding service (kept across store switches)
@@ -195,7 +209,7 @@ impl App {
             cached_hmlr_memory_id: None,
             current_store,
             viewing_all_stores: false,
-            memory_store_map: HashMap::new(),
+            search_scope_override: None,
             available_stores,
             embeddings,
             sparse_embeddings,
@@ -230,7 +244,6 @@ impl App {
         self.search_service = new_search_service;
         self.current_store = store_name.to_string();
         self.viewing_all_stores = false;
-        self.memory_store_map.clear();
 
         // Refresh data
         self.refresh_current_view().await?;
@@ -251,16 +264,10 @@ impl App {
     /// Switch to viewing all stores
     pub async fn switch_to_all_stores(&mut self) -> Result<()> {
         self.viewing_all_stores = true;
-        self.memory_store_map.clear();
 
         // Load memories from all stores
         let results = list_all_stores(&self.config, None, 1000).await?;
-
-        self.memories.clear();
-        for item in results {
-            self.memory_store_map.insert(item.memory.id, item.store);
-            self.memories.push(item.memory);
-        }
+        self.memories = results;
 
         self.sort_state.sort_memories(&mut self.memories);
         self.update_categories_and_tags();
@@ -276,6 +283,33 @@ impl App {
         self.status_message = Some("Viewing all stores".to_string());
 
         Ok(())
+    }
+
+    fn is_remote_store(store: &str) -> bool {
+        store.starts_with("remote:")
+    }
+
+    fn boxed<'a, T>(
+        fut: impl std::future::Future<Output = Result<T>> + 'a,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>> {
+        Box::pin(fut)
+    }
+
+    async fn with_store_db<T, F>(&self, store: &str, f: F) -> Result<T>
+    where
+        F: for<'db> FnOnce(
+            &'db Database,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'db>>,
+    {
+        if store == self.current_store {
+            return f(&self.db).await;
+        }
+
+        let db = Database::init_store(&self.config, Some(store)).await?;
+        let result = f(&db).await?;
+        db.close().await;
+        Ok(result)
     }
 
     /// Create a new store
@@ -297,11 +331,6 @@ impl App {
         self.status_message = Some(format!("Created store '{name}'"));
 
         Ok(())
-    }
-
-    /// Get the store name for a memory (when viewing all stores)
-    pub fn get_memory_store(&self, memory_id: Uuid) -> Option<&str> {
-        self.memory_store_map.get(&memory_id).map(|s| s.as_str())
     }
 
     /// Get index of current store in available_stores (0 = All Stores)
@@ -327,19 +356,90 @@ impl App {
         }
     }
 
+    pub fn search_scope_display(&self) -> Option<String> {
+        let scope = self.search_scope_override.as_ref()?;
+        if scope.is_empty() {
+            return None;
+        }
+
+        let mut ids: Vec<String> = scope.iter().map(StoreSource::id).collect();
+        ids.sort();
+        ids.dedup();
+
+        if ids.len() <= 3 {
+            Some(ids.join(", "))
+        } else {
+            Some(format!("{} sources", ids.len()))
+        }
+    }
+
+    pub(crate) fn store_select_items(&self, query: &str) -> Vec<StoreSelectItem> {
+        let mut items = Vec::new();
+
+        items.push(StoreSelectItem {
+            id: ALL_LOCAL_STORES_ID.to_string(),
+            title: "All local stores".to_string(),
+            detail: Some(format!("{} store(s)", self.available_stores.len())),
+        });
+
+        for store in &self.available_stores {
+            items.push(StoreSelectItem {
+                id: store.name.clone(),
+                title: store.name.clone(),
+                detail: Some(mmry_core::stores::format_size(store.size_bytes)),
+            });
+        }
+
+        if self.config.federation.enabled {
+            for remote in &self.config.federation.remotes {
+                let id = format!("remote:{}", remote.name);
+                items.push(StoreSelectItem {
+                    id: id.clone(),
+                    title: id,
+                    detail: Some(remote.base_url.clone()),
+                });
+            }
+        }
+
+        let query = query.trim();
+        if query.is_empty() {
+            return items;
+        }
+
+        let mut scored: Vec<(StoreSelectItem, i64)> = items
+            .into_iter()
+            .filter_map(|item| {
+                let haystack = if let Some(detail) = item.detail.as_ref() {
+                    format!("{} {}", item.title, detail)
+                } else {
+                    item.title.clone()
+                };
+                fuzzy_score(query, &haystack).map(|score| (item, score))
+            })
+            .collect();
+
+        scored.sort_by(|(a, a_score), (b, b_score)| {
+            b_score.cmp(a_score).then_with(|| a.id.cmp(&b.id))
+        });
+
+        scored.into_iter().map(|(item, _)| item).collect()
+    }
+
     pub async fn refresh_current_view(&mut self) -> Result<()> {
         match self.middle_view {
             MiddleView::Memories => {
                 if self.viewing_all_stores {
-                    self.memory_store_map.clear();
                     let results = list_all_stores(&self.config, None, 1000).await?;
-                    self.memories.clear();
-                    for item in results {
-                        self.memory_store_map.insert(item.memory.id, item.store);
-                        self.memories.push(item.memory);
-                    }
+                    self.memories = results;
                 } else {
-                    self.memories = operations::list_memories(self.db.pool(), None, 1000).await?;
+                    let memories = operations::list_memories(self.db.pool(), None, 1000).await?;
+                    self.memories = memories
+                        .into_iter()
+                        .map(|memory| MemoryWithStore {
+                            memory,
+                            store: self.current_store.clone(),
+                        })
+                        .collect();
                 }
                 self.sort_state.sort_memories(&mut self.memories);
                 self.update_categories_and_tags();
@@ -380,8 +480,8 @@ impl App {
         let mut tags = HashSet::new();
 
         for memory in &self.memories {
-            categories.insert(memory.category.clone());
-            for tag in &memory.tags {
+            categories.insert(memory.memory.category.clone());
+            for tag in &memory.memory.tags {
                 tags.insert(tag.clone());
             }
         }
@@ -393,7 +493,7 @@ impl App {
         self.tags.sort();
     }
 
-    pub fn selected_memory(&self) -> Option<&Memory> {
+    pub fn selected_memory(&self) -> Option<&MemoryWithStore> {
         if self.middle_view != MiddleView::Memories {
             return None;
         }
@@ -426,13 +526,29 @@ impl App {
     /// Fetch entities for the currently selected memory (if not already cached)
     pub async fn fetch_selected_memory_entities(&mut self) -> Result<()> {
         if let Some(memory) = self.selected_memory() {
-            let memory_id = memory.id;
+            let key = MemoryKey {
+                id: memory.memory.id,
+                store: memory.store.clone(),
+            };
+
+            if Self::is_remote_store(&key.store) {
+                self.selected_memory_entities.clear();
+                self.cached_entity_memory_id = None;
+                return Ok(());
+            }
 
             // Only fetch if we haven't cached this memory's entities
-            if self.cached_entity_memory_id != Some(memory_id) {
-                self.selected_memory_entities =
-                    graph_ops::get_memory_entities(self.db.pool(), memory_id).await?;
-                self.cached_entity_memory_id = Some(memory_id);
+            if self.cached_entity_memory_id.as_ref() != Some(&key) {
+                let id = key.id;
+                let store = key.store.clone();
+                self.selected_memory_entities = self
+                    .with_store_db(&store, move |db| {
+                        Self::boxed(async move {
+                            Ok(graph_ops::get_memory_entities(db.pool(), id).await?)
+                        })
+                    })
+                    .await?;
+                self.cached_entity_memory_id = Some(key);
             }
         } else {
             self.selected_memory_entities.clear();
@@ -444,17 +560,44 @@ impl App {
     /// Fetch HMLR enrichments for the currently selected memory (if not already cached)
     pub async fn fetch_selected_memory_hmlr(&mut self) -> Result<()> {
         if let Some(memory) = self.selected_memory() {
-            let memory_id = memory.id;
+            let key = MemoryKey {
+                id: memory.memory.id,
+                store: memory.store.clone(),
+            };
+
+            if Self::is_remote_store(&key.store) {
+                self.selected_memory_facts.clear();
+                self.selected_memory_bridge_block = None;
+                self.selected_memory_creator_agent = None;
+                self.cached_hmlr_memory_id = None;
+                return Ok(());
+            }
 
             // Only fetch if we haven't cached this memory's HMLR data
-            if self.cached_hmlr_memory_id != Some(memory_id) {
+            if self.cached_hmlr_memory_id.as_ref() != Some(&key) {
+                let memory_id = key.id;
+                let store = key.store.clone();
+
                 // Get agent events for this memory to find associated facts and bridge blocks
-                let events =
-                    operations::get_agent_events_for_memory(self.db.pool(), memory_id, 10).await?;
+                let events = self
+                    .with_store_db(&store, move |db| {
+                        Self::boxed(async move {
+                            Ok(
+                                operations::get_agent_events_for_memory(db.pool(), memory_id, 10)
+                                    .await?,
+                            )
+                        })
+                    })
+                    .await?;
 
                 // Get facts for this memory
-                self.selected_memory_facts =
-                    operations::get_facts_for_memory(self.db.pool(), memory_id, 20).await?;
+                self.selected_memory_facts = self
+                    .with_store_db(&store, move |db| {
+                        Self::boxed(async move {
+                            Ok(operations::get_facts_for_memory(db.pool(), memory_id, 20).await?)
+                        })
+                    })
+                    .await?;
 
                 // Get bridge block if any event has a span_id
                 self.selected_memory_bridge_block = None;
@@ -482,7 +625,7 @@ impl App {
                     }
                 }
 
-                self.cached_hmlr_memory_id = Some(memory_id);
+                self.cached_hmlr_memory_id = Some(key);
             }
         } else {
             self.selected_memory_facts.clear();
@@ -493,24 +636,27 @@ impl App {
         Ok(())
     }
 
-    pub fn filtered_memories(&self) -> Vec<&Memory> {
+    pub fn filtered_memories(&self) -> Vec<&MemoryWithStore> {
         self.memories
             .iter()
             .filter(|m| {
                 // Category filter
-                if !self.filter_state.is_category_enabled(&m.category) {
+                if !self.filter_state.is_category_enabled(&m.memory.category) {
                     return false;
                 }
 
                 // Type filter
-                if !self.filter_state.is_type_enabled(&m.memory_type) {
+                if !self.filter_state.is_type_enabled(&m.memory.memory_type) {
                     return false;
                 }
 
                 // Tag filter - if any tags are filtered, at least one of the memory's tags must be enabled
                 if !self.filter_state.enabled_tags.is_empty() {
-                    let has_enabled_tag =
-                        m.tags.iter().any(|t| self.filter_state.is_tag_enabled(t));
+                    let has_enabled_tag = m
+                        .memory
+                        .tags
+                        .iter()
+                        .any(|t| self.filter_state.is_tag_enabled(t));
                     if !has_enabled_tag {
                         return false;
                     }
@@ -519,13 +665,13 @@ impl App {
                 // Recent filter (last 7 days)
                 if self.filter_state.show_recent {
                     let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
-                    if m.created_at < seven_days_ago {
+                    if m.memory.created_at < seven_days_ago {
                         return false;
                     }
                 }
 
                 // Important filter (importance > 7)
-                if self.filter_state.show_important && m.importance <= 7 {
+                if self.filter_state.show_important && m.memory.importance <= 7 {
                     return false;
                 }
 
@@ -663,7 +809,11 @@ impl App {
                     && self.right_pane_view == RightPaneView::Graph
                 {
                     if let Some(memory) = self.selected_memory() {
-                        if self.cached_entity_memory_id != Some(memory.id) {
+                        let key = MemoryKey {
+                            id: memory.memory.id,
+                            store: memory.store.clone(),
+                        };
+                        if self.cached_entity_memory_id.as_ref() != Some(&key) {
                             self.fetch_selected_memory_entities().await?;
                         }
                     }
@@ -673,7 +823,11 @@ impl App {
                     && self.right_pane_view == RightPaneView::Preview
                 {
                     if let Some(memory) = self.selected_memory() {
-                        if self.cached_hmlr_memory_id != Some(memory.id) {
+                        let key = MemoryKey {
+                            id: memory.memory.id,
+                            store: memory.store.clone(),
+                        };
+                        if self.cached_hmlr_memory_id.as_ref() != Some(&key) {
                             self.fetch_selected_memory_hmlr().await?;
                         }
                     }
@@ -732,15 +886,23 @@ impl App {
                     self.status_message = Some("Delete works only in Memories view".to_string());
                 } else if self.middle_selection.has_selections() {
                     let filtered = self.filtered_memories();
-                    let ids: Vec<Uuid> = self
+                    let keys: Vec<MemoryKey> = self
                         .middle_selection
                         .get_selected_indices()
                         .iter()
-                        .filter_map(|&idx| filtered.get(idx).map(|m| m.id))
+                        .filter_map(|&idx| {
+                            filtered.get(idx).map(|m| MemoryKey {
+                                id: m.memory.id,
+                                store: m.store.clone(),
+                            })
+                        })
                         .collect();
-                    self.mode = AppMode::DeleteMultiple(ids);
+                    self.mode = AppMode::DeleteMultiple(keys);
                 } else if let Some(memory) = self.selected_memory() {
-                    self.mode = AppMode::Delete(memory.id);
+                    self.mode = AppMode::Delete(MemoryKey {
+                        id: memory.memory.id,
+                        store: memory.store.clone(),
+                    });
                 }
             }
 
@@ -762,10 +924,9 @@ impl App {
                             None
                         };
                     }
-                } else if self.active_pane == Pane::Left {
-                    if self.middle_view == MiddleView::Memories {
-                        self.toggle_filter_item();
-                    }
+                } else if self.active_pane == Pane::Left && self.middle_view == MiddleView::Memories
+                {
+                    self.toggle_filter_item();
                 }
             }
 
@@ -794,7 +955,11 @@ impl App {
                     self.status_message =
                         Some("Editing is only available in Memories view".to_string());
                 } else if let Some(memory) = self.selected_memory() {
-                    self.edit_memory(memory.id).await?;
+                    self.edit_memory(MemoryKey {
+                        id: memory.memory.id,
+                        store: memory.store.clone(),
+                    })
+                    .await?;
                 }
             }
 
@@ -918,7 +1083,22 @@ impl App {
                         );
                     } else {
                         let current_idx = self.current_store_index();
-                        self.mode = AppMode::StoreSelect(current_idx);
+                        let mut selected = std::collections::BTreeSet::new();
+                        if self.search_scope_override.is_some() {
+                            for source in self.search_scope_override.as_ref().unwrap() {
+                                selected.insert(source.id());
+                            }
+                        } else if self.viewing_all_stores {
+                            selected.insert(ALL_LOCAL_STORES_ID.to_string());
+                        } else {
+                            selected.insert(self.current_store.clone());
+                        }
+
+                        self.mode = AppMode::StoreSelect(StoreSelectState {
+                            query: String::new(),
+                            cursor: current_idx,
+                            selected,
+                        });
                     }
                 }
             }
@@ -935,14 +1115,17 @@ impl App {
                         Some("Cannot move memories while viewing all stores".to_string());
                 } else {
                     // Get memory ID first to avoid borrow issues
-                    let memory_id = self.selected_memory().map(|m| m.id);
-                    if let Some(memory_id) = memory_id {
+                    let memory_key = self.selected_memory().map(|m| MemoryKey {
+                        id: m.memory.id,
+                        store: m.store.clone(),
+                    });
+                    if let Some(memory_key) = memory_key {
                         self.available_stores = list_stores(&self.config).unwrap_or_default();
                         if self.available_stores.len() < 2 {
                             self.status_message =
                                 Some("Need at least 2 stores to move memories".to_string());
                         } else {
-                            self.mode = AppMode::MoveToStore(memory_id, 0);
+                            self.mode = AppMode::MoveToStore(memory_key, 0);
                         }
                     } else {
                         self.status_message = Some("No memory selected".to_string());
@@ -1002,10 +1185,45 @@ impl App {
         }
         let limit = self.config.search.default_limit as i64;
         let mode = self.current_search_mode();
-        let results = self
-            .search_service
-            .search_with_options(query, None, limit, Some(mode), None)
-            .await?;
+        let sources = if let Some(scope) = self.search_scope_override.as_ref() {
+            scope.clone()
+        } else if self.viewing_all_stores {
+            list_all_sources(&self.config)?
+        } else {
+            vec![StoreSource::Local {
+                store: self.current_store.clone(),
+            }]
+        };
+
+        let results = if sources.len() == 1
+            && matches!(&sources[0], StoreSource::Local { store } if store == &self.current_store)
+        {
+            let results = self
+                .search_service
+                .search_with_options(query, None, limit, Some(mode), None)
+                .await?;
+            results
+                .into_iter()
+                .map(|memory| MemoryWithStore {
+                    memory,
+                    store: self.current_store.clone(),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            search_federated(FederatedSearchOptions {
+                config: &self.config,
+                sources,
+                query,
+                category: None,
+                limit,
+                mode,
+                rerank: false,
+                embeddings: Arc::clone(&self.embeddings),
+                sparse_embeddings: Arc::clone(&self.sparse_embeddings),
+                reranker: Arc::clone(&self.reranker),
+            })
+            .await?
+        };
 
         if results.is_empty() {
             self.status_message = Some(format!("No memories found for \"{query}\""));
@@ -1023,50 +1241,84 @@ impl App {
     }
 
     async fn handle_delete_mode(&mut self, action: KeyAction) -> Result<bool> {
-        if let AppMode::Delete(id) = self.mode {
-            match action {
-                KeyAction::Char('y') => {
-                    let deleted = operations::delete_memory(self.db.pool(), id).await?;
-                    if deleted {
-                        self.refresh_current_view().await?;
-                        self.status_message = Some(format!("Deleted memory {id}"));
-                    } else {
-                        self.status_message = Some(format!("Memory {id} not found"));
-                    }
+        let key = match &self.mode {
+            AppMode::Delete(key) => key.clone(),
+            _ => return Ok(true),
+        };
+
+        match action {
+            KeyAction::Char('y') => {
+                if Self::is_remote_store(&key.store) {
+                    self.status_message =
+                        Some("Cannot delete memories from remote stores".to_string());
                     self.mode = AppMode::Normal;
+                    return Ok(true);
                 }
-                KeyAction::Escape | KeyAction::Char('q') | KeyAction::Quit => {
-                    self.mode = AppMode::Normal;
+
+                let store = key.store.clone();
+                let id = key.id;
+                let deleted = self
+                    .with_store_db(&store, move |db| {
+                        Self::boxed(
+                            async move { Ok(operations::delete_memory(db.pool(), id).await?) },
+                        )
+                    })
+                    .await?;
+                if deleted {
+                    self.refresh_current_view().await?;
+                    self.status_message = Some(format!("Deleted memory {}", key.id));
+                } else {
+                    self.status_message = Some(format!("Memory {} not found", key.id));
                 }
-                _ => {}
+                self.mode = AppMode::Normal;
             }
+            KeyAction::Escape | KeyAction::Char('q') | KeyAction::Quit => {
+                self.mode = AppMode::Normal;
+            }
+            _ => {}
         }
         Ok(true)
     }
 
     async fn handle_delete_multiple_mode(&mut self, action: KeyAction) -> Result<bool> {
-        if let AppMode::DeleteMultiple(ref ids) = self.mode {
-            match action {
-                KeyAction::Char('y') => {
-                    let count = ids.len();
-                    let mut deleted_count = 0;
+        let keys = match &self.mode {
+            AppMode::DeleteMultiple(keys) => keys.clone(),
+            _ => return Ok(true),
+        };
 
-                    for id in ids {
-                        if operations::delete_memory(self.db.pool(), *id).await? {
-                            deleted_count += 1;
-                        }
+        match action {
+            KeyAction::Char('y') => {
+                let count = keys.len();
+                let mut deleted_count = 0;
+
+                for key in keys {
+                    if Self::is_remote_store(&key.store) {
+                        continue;
                     }
 
-                    self.middle_selection.deselect_all();
-                    self.refresh_current_view().await?;
-                    self.status_message = Some(format!("Deleted {deleted_count}/{count} memories"));
-                    self.mode = AppMode::Normal;
+                    let store = key.store.clone();
+                    let id = key.id;
+                    let deleted = self
+                        .with_store_db(&store, move |db| {
+                            Self::boxed(async move {
+                                Ok(operations::delete_memory(db.pool(), id).await?)
+                            })
+                        })
+                        .await?;
+                    if deleted {
+                        deleted_count += 1;
+                    }
                 }
-                KeyAction::Escape | KeyAction::Char('q') | KeyAction::Quit => {
-                    self.mode = AppMode::Normal;
-                }
-                _ => {}
+
+                self.middle_selection.deselect_all();
+                self.refresh_current_view().await?;
+                self.status_message = Some(format!("Deleted {deleted_count}/{count} memories"));
+                self.mode = AppMode::Normal;
             }
+            KeyAction::Escape | KeyAction::Char('q') | KeyAction::Quit => {
+                self.mode = AppMode::Normal;
+            }
+            _ => {}
         }
         Ok(true)
     }
@@ -1258,8 +1510,18 @@ impl App {
         };
     }
 
-    async fn edit_memory(&mut self, id: Uuid) -> Result<()> {
-        let memory = operations::get_memory(self.db.pool(), id)
+    async fn edit_memory(&mut self, key: MemoryKey) -> Result<()> {
+        if Self::is_remote_store(&key.store) {
+            self.status_message = Some("Remote stores are read-only in the TUI".to_string());
+            return Ok(());
+        }
+
+        let store = key.store.clone();
+        let id = key.id;
+        let memory = self
+            .with_store_db(&store, move |db| {
+                Self::boxed(async move { Ok(operations::get_memory(db.pool(), id).await?) })
+            })
             .await?
             .ok_or_else(|| anyhow::anyhow!("Memory not found"))?;
 
@@ -1284,14 +1546,28 @@ impl App {
                         updated_memory.created_at = memory.created_at;
                         updated_memory.updated_at = chrono::Utc::now();
 
-                        operations::delete_memory(self.db.pool(), id).await?;
-                        operations::insert_memory(self.db.pool(), &updated_memory).await?;
+                        let clear_embeddings = updated_memory.content != memory.content;
+                        self.with_store_db(&store, move |db| {
+                            Self::boxed(async move {
+                                operations::update_memory_fields(
+                                    db.pool(),
+                                    &updated_memory,
+                                    clear_embeddings,
+                                )
+                                .await?;
+                                Ok::<_, anyhow::Error>(())
+                            })
+                        })
+                        .await?;
 
                         self.refresh_current_view().await?;
 
                         // Find the edited memory and move cursor to it
                         self.active_pane = Pane::Middle;
-                        if let Some(pos) = self.filtered_memories().iter().position(|m| m.id == id)
+                        if let Some(pos) = self
+                            .filtered_memories()
+                            .iter()
+                            .position(|m| m.memory.id == id)
                         {
                             self.middle_selection.index = pos;
                             self.middle_selection.offset = pos.saturating_sub(10);
@@ -1365,8 +1641,10 @@ impl App {
 
                         // Find the new memory and move cursor to it
                         self.active_pane = Pane::Middle;
-                        if let Some(pos) =
-                            self.filtered_memories().iter().position(|m| m.id == new_id)
+                        if let Some(pos) = self
+                            .filtered_memories()
+                            .iter()
+                            .position(|m| m.memory.id == new_id)
                         {
                             self.middle_selection.index = pos;
                             self.middle_selection.offset = pos.saturating_sub(10);
@@ -1629,60 +1907,112 @@ impl App {
     }
 
     async fn handle_store_select_mode(&mut self, action: KeyAction) -> Result<bool> {
-        // Extract the current index first to avoid borrow issues
-        let current_index = if let AppMode::StoreSelect(idx) = self.mode {
-            idx
-        } else {
-            return Ok(true);
+        let mut state = match &self.mode {
+            AppMode::StoreSelect(state) => state.clone(),
+            _ => return Ok(true),
         };
 
-        // Total items: 1 (All Stores) + available_stores.len()
-        let total_items = 1 + self.available_stores.len();
+        let items = self.store_select_items(&state.query);
+        if items.is_empty() {
+            state.cursor = 0;
+        } else {
+            state.cursor = state.cursor.min(items.len().saturating_sub(1));
+        }
 
         match action {
-            KeyAction::Up | KeyAction::Char('k') => {
-                self.mode = AppMode::StoreSelect(current_index.saturating_sub(1));
-            }
-            KeyAction::Down | KeyAction::Char('j') => {
-                if current_index < total_items.saturating_sub(1) {
-                    self.mode = AppMode::StoreSelect(current_index + 1);
-                }
-            }
-            KeyAction::Select => {
-                self.mode = AppMode::Normal;
-                if current_index == 0 {
-                    // "All Stores" selected
-                    self.switch_to_all_stores().await?;
-                } else if let Some(store) = self.available_stores.get(current_index - 1) {
-                    let store_name = store.name.clone();
-                    self.switch_store(&store_name).await?;
-                }
-            }
             KeyAction::Escape => {
                 self.mode = AppMode::Normal;
+                return Ok(true);
             }
-            KeyAction::Char('n') => {
-                // Create new store
-                self.mode = AppMode::StoreCreate(String::new());
-            }
-            KeyAction::Char('0') => {
-                // 0 = All Stores
+            KeyAction::Select => {
+                let selected = state.selected.clone();
                 self.mode = AppMode::Normal;
-                self.switch_to_all_stores().await?;
-            }
-            KeyAction::Char('1'..='9') => {
-                if let KeyAction::Char(c) = action {
-                    let num = c.to_digit(10).unwrap() as usize;
-                    // num 1-9 maps to available_stores[0..8]
-                    if num <= self.available_stores.len() {
-                        let store_name = self.available_stores[num - 1].name.clone();
-                        self.mode = AppMode::Normal;
-                        self.switch_store(&store_name).await?;
+
+                if selected.is_empty() {
+                    return Ok(true);
+                }
+
+                if selected.len() == 1 && selected.contains(ALL_LOCAL_STORES_ID) {
+                    self.search_scope_override = None;
+                    self.switch_to_all_stores().await?;
+                    return Ok(true);
+                }
+
+                if selected.len() == 1 {
+                    let only = selected.iter().next().expect("len=1");
+                    if let Some(store) = only.strip_prefix("remote:") {
+                        self.search_scope_override = Some(vec![StoreSource::Remote {
+                            remote: store.to_string(),
+                        }]);
+                        self.status_message = Some(format!("Search scope set to: {only}"));
+                        return Ok(true);
                     }
+
+                    self.search_scope_override = None;
+                    self.switch_store(only).await?;
+                    return Ok(true);
+                }
+
+                let mut scope = Vec::new();
+                for id in selected {
+                    if let Some(remote) = id.strip_prefix("remote:") {
+                        scope.push(StoreSource::Remote {
+                            remote: remote.to_string(),
+                        });
+                    } else {
+                        scope.push(StoreSource::Local { store: id });
+                    }
+                }
+                self.search_scope_override = Some(scope);
+                self.status_message = Some("Search scope updated".to_string());
+                return Ok(true);
+            }
+            KeyAction::Backspace => {
+                state.query.pop();
+                state.cursor = 0;
+            }
+            KeyAction::Up | KeyAction::Char('k') => {
+                state.cursor = state.cursor.saturating_sub(1);
+            }
+            KeyAction::Down | KeyAction::Char('j') => {
+                if state.cursor < items.len().saturating_sub(1) {
+                    state.cursor += 1;
+                }
+            }
+            KeyAction::ToggleSelect => {
+                if let Some(item) = items.get(state.cursor) {
+                    if state.selected.contains(&item.id) {
+                        state.selected.remove(&item.id);
+                    } else if item.id == ALL_LOCAL_STORES_ID {
+                        state.selected.clear();
+                        state.selected.insert(item.id.clone());
+                    } else {
+                        state.selected.remove(ALL_LOCAL_STORES_ID);
+                        state.selected.insert(item.id.clone());
+                    }
+                }
+            }
+            KeyAction::Char('N') => {
+                self.mode = AppMode::StoreCreate(String::new());
+                return Ok(true);
+            }
+            KeyAction::Char(c) => {
+                if !c.is_control() {
+                    state.query.push(c);
+                    state.cursor = 0;
                 }
             }
             _ => {}
         }
+
+        let items = self.store_select_items(&state.query);
+        if items.is_empty() {
+            state.cursor = 0;
+        } else {
+            state.cursor = state.cursor.min(items.len().saturating_sub(1));
+        }
+
+        self.mode = AppMode::StoreSelect(state);
         Ok(true)
     }
 
@@ -1716,17 +2046,22 @@ impl App {
 
     async fn handle_move_to_store_mode(&mut self, action: KeyAction) -> Result<bool> {
         // Extract current state to avoid borrow issues
-        let (memory_id, current_index) = if let AppMode::MoveToStore(id, idx) = self.mode {
-            (id, idx)
-        } else {
-            return Ok(true);
+        let (memory_id, current_index) = match &self.mode {
+            AppMode::MoveToStore(id, idx) => (id.clone(), *idx),
+            _ => return Ok(true),
         };
+
+        if Self::is_remote_store(&memory_id.store) {
+            self.mode = AppMode::Normal;
+            self.status_message = Some("Remote stores are read-only in the TUI".to_string());
+            return Ok(true);
+        }
 
         // Filter out current store from available stores
         let other_stores: Vec<&StoreInfo> = self
             .available_stores
             .iter()
-            .filter(|s| s.name != self.current_store)
+            .filter(|s| s.name != memory_id.store)
             .collect();
 
         if other_stores.is_empty() {
@@ -1747,11 +2082,16 @@ impl App {
             KeyAction::Select => {
                 if let Some(target_store) = other_stores.get(current_index) {
                     let target_name = target_store.name.clone();
-                    let source_name = self.current_store.clone();
+                    let source_name = memory_id.store.clone();
                     self.mode = AppMode::Normal;
 
-                    match move_memory_to_store(&self.config, memory_id, &source_name, &target_name)
-                        .await
+                    match move_memory_to_store(
+                        &self.config,
+                        memory_id.id,
+                        &source_name,
+                        &target_name,
+                    )
+                    .await
                     {
                         Ok(_) => {
                             self.refresh_current_view().await?;
@@ -1774,12 +2114,12 @@ impl App {
                     let num = c.to_digit(10).unwrap() as usize - 1;
                     if num < other_stores.len() {
                         let target_name = other_stores[num].name.clone();
-                        let source_name = self.current_store.clone();
+                        let source_name = memory_id.store.clone();
                         self.mode = AppMode::Normal;
 
                         match move_memory_to_store(
                             &self.config,
-                            memory_id,
+                            memory_id.id,
                             &source_name,
                             &target_name,
                         )
@@ -1804,10 +2144,9 @@ impl App {
 
     async fn handle_export_mode(&mut self, action: KeyAction) -> Result<bool> {
         // Extract current state
-        let export_all = if let AppMode::Export(all) = self.mode {
-            all
-        } else {
-            return Ok(true);
+        let export_all = match &self.mode {
+            AppMode::Export(all) => *all,
+            _ => return Ok(true),
         };
 
         match action {
@@ -1871,29 +2210,50 @@ impl App {
         memory_type: mmry_core::memory::MemoryType,
     ) -> Result<()> {
         if let Some(memory) = self.selected_memory() {
-            let id = memory.id;
-            let mut updated = memory.clone();
-            updated.memory_type = memory_type.clone();
+            if Self::is_remote_store(&memory.store) {
+                self.status_message = Some("Remote stores are read-only in the TUI".to_string());
+                return Ok(());
+            }
+
+            let store = memory.store.clone();
+            let memory_type_label = format!("{memory_type:?}");
+            let mut updated = memory.memory.clone();
+            updated.memory_type = memory_type;
             updated.updated_at = chrono::Utc::now();
 
-            operations::delete_memory(self.db.pool(), id).await?;
-            operations::insert_memory(self.db.pool(), &updated).await?;
+            self.with_store_db(&store, move |db| {
+                Self::boxed(async move {
+                    operations::update_memory_fields(db.pool(), &updated, false).await?;
+                    Ok(())
+                })
+            })
+            .await?;
 
             self.refresh_current_view().await?;
-            self.status_message = Some(format!("Updated memory type to {memory_type:?}"));
+            self.status_message = Some(format!("Updated memory type to {memory_type_label}"));
         }
         Ok(())
     }
 
     async fn update_selected_memory_importance(&mut self, importance: i32) -> Result<()> {
         if let Some(memory) = self.selected_memory() {
-            let id = memory.id;
-            let mut updated = memory.clone();
+            if Self::is_remote_store(&memory.store) {
+                self.status_message = Some("Remote stores are read-only in the TUI".to_string());
+                return Ok(());
+            }
+
+            let store = memory.store.clone();
+            let mut updated = memory.memory.clone();
             updated.importance = importance;
             updated.updated_at = chrono::Utc::now();
 
-            operations::delete_memory(self.db.pool(), id).await?;
-            operations::insert_memory(self.db.pool(), &updated).await?;
+            self.with_store_db(&store, move |db| {
+                Self::boxed(async move {
+                    operations::update_memory_fields(db.pool(), &updated, false).await?;
+                    Ok(())
+                })
+            })
+            .await?;
 
             self.refresh_current_view().await?;
             self.status_message = Some(format!("Updated importance to {importance}"));
@@ -1903,29 +2263,50 @@ impl App {
 
     async fn change_selected_memory_importance(&mut self, delta: i32) -> Result<()> {
         if let Some(memory) = self.selected_memory() {
-            let id = memory.id;
-            let mut updated = memory.clone();
-            updated.importance = (updated.importance + delta).clamp(0, 9);
+            if Self::is_remote_store(&memory.store) {
+                self.status_message = Some("Remote stores are read-only in the TUI".to_string());
+                return Ok(());
+            }
+
+            let store = memory.store.clone();
+            let new_importance = (memory.memory.importance + delta).clamp(0, 9);
+            let mut updated = memory.memory.clone();
+            updated.importance = new_importance;
             updated.updated_at = chrono::Utc::now();
 
-            operations::delete_memory(self.db.pool(), id).await?;
-            operations::insert_memory(self.db.pool(), &updated).await?;
+            self.with_store_db(&store, move |db| {
+                Self::boxed(async move {
+                    operations::update_memory_fields(db.pool(), &updated, false).await?;
+                    Ok(())
+                })
+            })
+            .await?;
 
             self.refresh_current_view().await?;
-            self.status_message = Some(format!("Updated importance to {}", updated.importance));
+            self.status_message = Some(format!("Updated importance to {new_importance}"));
         }
         Ok(())
     }
 
     async fn update_selected_memory_category(&mut self, category: &str) -> Result<()> {
         if let Some(memory) = self.selected_memory() {
-            let id = memory.id;
-            let mut updated = memory.clone();
+            if Self::is_remote_store(&memory.store) {
+                self.status_message = Some("Remote stores are read-only in the TUI".to_string());
+                return Ok(());
+            }
+
+            let store = memory.store.clone();
+            let mut updated = memory.memory.clone();
             updated.category = category.to_string();
             updated.updated_at = chrono::Utc::now();
 
-            operations::delete_memory(self.db.pool(), id).await?;
-            operations::insert_memory(self.db.pool(), &updated).await?;
+            self.with_store_db(&store, move |db| {
+                Self::boxed(async move {
+                    operations::update_memory_fields(db.pool(), &updated, false).await?;
+                    Ok(())
+                })
+            })
+            .await?;
 
             self.refresh_current_view().await?;
             self.status_message = Some(format!("Updated category to {category}"));
@@ -2000,7 +2381,7 @@ mod tests {
             cached_hmlr_memory_id: None,
             current_store: "test".to_string(),
             viewing_all_stores: false,
-            memory_store_map: HashMap::new(),
+            search_scope_override: None,
             available_stores,
             embeddings,
             sparse_embeddings,
@@ -2020,7 +2401,7 @@ mod tests {
         memory_type: MemoryType,
         importance: i32,
         category: &str,
-    ) -> Result<Memory> {
+    ) -> Result<MemoryWithStore> {
         let memory = Memory::new(
             memory_type,
             "Test content".to_string(),
@@ -2029,7 +2410,10 @@ mod tests {
         let mut memory = memory;
         memory.importance = importance;
         operations::insert_memory(app.db.pool(), &memory).await?;
-        Ok(memory)
+        Ok(MemoryWithStore {
+            memory,
+            store: app.current_store.clone(),
+        })
     }
 
     #[tokio::test]
@@ -2046,7 +2430,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Episodic);
 
@@ -2067,7 +2451,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Semantic);
 
@@ -2088,7 +2472,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Procedural);
 
@@ -2109,7 +2493,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 7);
 
@@ -2130,7 +2514,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 6);
 
@@ -2151,7 +2535,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 4);
 
@@ -2171,7 +2555,7 @@ mod tests {
 
         assert!(result);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 9);
 
@@ -2191,7 +2575,7 @@ mod tests {
 
         assert!(result);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 0);
 
@@ -2286,7 +2670,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "new_category");
 
@@ -2346,7 +2730,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "cat2");
 
@@ -2377,7 +2761,7 @@ mod tests {
         app.update_selected_memory_type(MemoryType::Semantic)
             .await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Semantic);
 
@@ -2394,7 +2778,7 @@ mod tests {
 
         app.update_selected_memory_importance(8).await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 8);
 
@@ -2411,7 +2795,7 @@ mod tests {
 
         app.change_selected_memory_importance(2).await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 7);
 
@@ -2428,7 +2812,7 @@ mod tests {
 
         app.update_selected_memory_category("new_category").await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "new_category");
 

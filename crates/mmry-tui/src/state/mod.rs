@@ -31,23 +31,35 @@ pub enum RightPaneView {
     Graph,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryKey {
+    pub id: uuid::Uuid,
+    pub store: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreSelectState {
+    pub query: String,
+    pub cursor: usize,
+    pub selected: std::collections::BTreeSet<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
     Normal,
     Search(String),
-    Delete(uuid::Uuid),
-    DeleteMultiple(Vec<uuid::Uuid>),
+    Delete(MemoryKey),
+    DeleteMultiple(Vec<MemoryKey>),
     Help,
     Sort,
     WhichKey(WhichKeyContext),
     CategoryInput(CategoryInputContext, String),
     CategorySelect(usize),
-    /// Store selection mode (index into available stores, 0 = "All Stores")
-    StoreSelect(usize),
+    StoreSelect(StoreSelectState),
     /// Store creation mode (input buffer for new store name)
     StoreCreate(String),
     /// Move memory to another store (memory_id, selected store index)
-    MoveToStore(uuid::Uuid, usize),
+    MoveToStore(MemoryKey, usize),
     /// Export memories mode (whether to export all stores)
     Export(bool),
 }

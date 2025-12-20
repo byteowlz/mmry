@@ -5,6 +5,8 @@ pub mod config;
 pub mod database;
 pub mod embeddings;
 pub mod error;
+#[cfg(feature = "federation")]
+pub mod federation;
 pub mod graph;
 pub mod hmlr;
 pub mod integrations;

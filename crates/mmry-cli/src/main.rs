@@ -156,9 +156,11 @@ async fn async_main() -> anyhow::Result<()> {
     // Try service-backed search before starting local services
     if config.service.enabled {
         if let Commands::Search(cmd) = &command {
-            match commands::search::handle_remote(cmd.clone(), &config).await {
-                Ok(()) => return Ok(()),
-                Err(e) => tracing::warn!("Service search failed, falling back to local: {}", e),
+            if !cmd.uses_federation() {
+                match commands::search::handle_remote(cmd.clone(), &config).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => tracing::warn!("Service search failed, falling back to local: {}", e),
+                }
             }
         }
     }

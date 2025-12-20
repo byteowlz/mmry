@@ -749,6 +749,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_memory_fields_preserves_relations_and_optionally_clears_embeddings(
+    ) -> crate::Result<()> {
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("memories.db");
+
+        let db = Database::init(&db_path, TEST_DIM).await?;
+
+        let mut memory = Memory::new(
+            MemoryType::Episodic,
+            "original".to_string(),
+            "default".to_string(),
+        );
+        operations::insert_memory(db.pool(), &memory).await?;
+
+        // Add an entity relation that should survive updates.
+        let entity_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO entities (id, name, type, metadata) VALUES (?, ?, ?, ?)")
+            .bind(entity_id.to_string())
+            .bind("entity")
+            .bind("test")
+            .bind("{}")
+            .execute(db.pool())
+            .await?;
+        sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES (?, ?)")
+            .bind(memory.id.to_string())
+            .bind(entity_id.to_string())
+            .execute(db.pool())
+            .await?;
+
+        // Seed an embedding and ensure the vector table is populated.
+        let embedding = vec![0.3, 0.2, 0.1];
+        operations::update_memory_embeddings(db.pool(), &memory.id, Some(&embedding), None).await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_embeddings")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(count, 1);
+
+        // Update fields without clearing embeddings.
+        memory.category = "work".to_string();
+        memory.updated_at = Utc::now();
+        operations::update_memory_fields(db.pool(), &memory, false).await?;
+
+        let rel_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_entities")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(rel_count, 1);
+        let emb_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_embeddings")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(emb_count, 1);
+
+        // Update fields and clear embeddings.
+        memory.content = "changed".to_string();
+        memory.updated_at = Utc::now();
+        operations::update_memory_fields(db.pool(), &memory, true).await?;
+        let emb_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_embeddings")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(emb_count, 0);
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn backfill_populates_virtual_table_for_existing_rows() -> crate::Result<()> {
         ensure_sqlite_vec_loaded()?;
         let temp = tempdir().expect("create temp dir");

@@ -30,7 +30,6 @@ libsqlite3-sys = "0.30"
 shellexpand = "3.1"
 unicode-segmentation = "1.12"
 tokenizers = { workspace = true }
-ureq = { version = "2.10", optional = true }
 schemars = { workspace = true }
 reqwest = { workspace = true, optional = true }
 rig-core = { version = "0.26.0", default-features = false, features = ["reqwest-tls"], optional = true }
@@ -42,7 +41,7 @@ sysinfo = { version = "0.32", optional = true }
 [features]
 default = ["service"]
 service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "dep:reqwest", "dep:rig-core"]
-ner = []
+federation = ["dep:reqwest"]
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

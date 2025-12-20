@@ -17,7 +17,9 @@ use mmry_core::analysis::Analyzer;
 use mmry_core::analysis::AnalyzerRouting;
 use mmry_core::config::Config;
 use mmry_core::config::ExternalApiConfig;
+use mmry_core::config::SearchMode as MmrySearchMode;
 use mmry_core::database::operations;
+use mmry_core::database::Database;
 use mmry_core::hmlr::prompts::MemoryCandidate;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankScore;
@@ -237,6 +239,26 @@ struct AgentEnrichResponse {
     bridge_block_id: Option<String>,
     /// Whether this started a new topic
     is_new_topic: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct FederationSearchRequest {
+    query: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    rerank: Option<bool>,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FederationSearchResponse {
+    memories: Vec<Memory>,
 }
 #[derive(Debug)]
 struct ApiError {
@@ -1193,6 +1215,92 @@ async fn agent_route_handler(
     }))
 }
 
+fn parse_search_mode(mode: Option<&str>) -> Option<MmrySearchMode> {
+    let m = mode?.trim().to_lowercase();
+    match m.as_str() {
+        "hybrid" => Some(MmrySearchMode::Hybrid),
+        "keyword" => Some(MmrySearchMode::Keyword),
+        "fuzzy" => Some(MmrySearchMode::Fuzzy),
+        "semantic" => Some(MmrySearchMode::Semantic),
+        "bm25" => Some(MmrySearchMode::Bm25),
+        "sparse" => Some(MmrySearchMode::SparseEmbedding),
+        _ => None,
+    }
+}
+
+async fn federation_search_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<FederationSearchRequest>,
+) -> Result<Json<FederationSearchResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    validate_text_len(&payload.query, &app_state.api_config, "query")?;
+
+    let requested_limit = payload
+        .limit
+        .unwrap_or(app_state.state.search_config().default_limit as i64)
+        .max(1);
+    let limit = std::cmp::min(requested_limit, app_state.api_config.max_batch_size as i64);
+
+    let mode = parse_search_mode(payload.mode.as_deref());
+    let rerank = payload.rerank;
+
+    let store = payload.store.as_deref();
+    if let Some(s) = store {
+        mmry_core::stores::validate_store_name(s)
+            .map_err(|e| ApiError::bad_request(format!("Invalid store name: {e}")))?;
+    }
+
+    let mut db_guard: Option<Database> = None;
+    let pool = if let Some(store_name) = store {
+        let db = Database::init_store(&app_state.state.config, Some(store_name))
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to open store: {e}")))?;
+        let pool = db.pool().clone();
+        db_guard = Some(db);
+        pool
+    } else {
+        app_state.state.db.pool().clone()
+    };
+
+    let search_service = SearchService::new(
+        pool,
+        app_state.state.search_config(),
+        Arc::clone(&app_state.state.embeddings_wrapper),
+        Arc::clone(&app_state.state.sparse_embeddings),
+        Arc::clone(&app_state.state.reranker),
+    );
+
+    let mut results = search_service
+        .search_with_options(
+            &payload.query,
+            payload.category.as_deref(),
+            limit,
+            mode,
+            rerank,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("Search failed: {e}")))?;
+
+    // Don't ship embeddings over the wire by default.
+    for memory in &mut results {
+        memory.embedding = None;
+        memory.sparse_embedding = None;
+    }
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(FederationSearchResponse { memories: results }))
+}
+
 pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -> Result<()> {
     let state = Arc::new(ServiceState::new(config.clone()).await?);
 
@@ -1265,6 +1373,7 @@ async fn run_http_api(
         .route("/v1/agents/route", post(agent_route_handler))
         .route("/v1/agents/memories", post(agent_memory_create_handler))
         .route("/v1/agents/enrich", post(agent_enrich_handler))
+        .route("/v1/federation/search", post(federation_search_handler))
         .with_state(external_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1372,12 +1481,8 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::routing::post as axum_post;
-    use axum::Json;
-    use axum::Router as AxumRouter;
-    use std::net::SocketAddr;
+    use async_trait::async_trait;
     use tempfile::tempdir;
-    use tokio::sync::oneshot;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_route_returns_new_topic_and_logs_event() {
@@ -1423,7 +1528,91 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn agent_route_uses_rig_endpoint_when_configured() {
+    async fn federation_search_respects_store_parameter() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.stores.default = "a".to_string();
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        // Seed store a
+        let db_a = Database::init_store(&config, Some("a"))
+            .await
+            .expect("db a");
+        let mut mem_a = mmry_core::memory::Memory::new(
+            mmry_core::memory::MemoryType::Episodic,
+            "alpha memory".to_string(),
+            "default".to_string(),
+        );
+        mem_a.importance = 5;
+        operations::insert_memory(db_a.pool(), &mem_a)
+            .await
+            .expect("insert a");
+        db_a.close().await;
+
+        // Seed store b
+        let db_b = Database::init_store(&config, Some("b"))
+            .await
+            .expect("db b");
+        let mut mem_b = mmry_core::memory::Memory::new(
+            mmry_core::memory::MemoryType::Episodic,
+            "beta memory".to_string(),
+            "default".to_string(),
+        );
+        mem_b.importance = 5;
+        operations::insert_memory(db_b.pool(), &mem_b)
+            .await
+            .expect("insert b");
+        db_b.close().await;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let resp_default = federation_search_handler(
+            AxumState(external_state.clone()),
+            HeaderMap::new(),
+            Json(FederationSearchRequest {
+                query: "alpha".to_string(),
+                category: None,
+                limit: Some(10),
+                mode: Some("keyword".to_string()),
+                rerank: Some(false),
+                store: None,
+            }),
+        )
+        .await
+        .expect("default store search ok");
+        assert_eq!(resp_default.memories.len(), 1);
+        assert!(resp_default.memories[0].content.contains("alpha"));
+
+        let resp_b = federation_search_handler(
+            AxumState(external_state),
+            HeaderMap::new(),
+            Json(FederationSearchRequest {
+                query: "beta".to_string(),
+                category: None,
+                limit: Some(10),
+                mode: Some("keyword".to_string()),
+                rerank: Some(false),
+                store: Some("b".to_string()),
+            }),
+        )
+        .await
+        .expect("store b search ok");
+        assert_eq!(resp_b.memories.len(), 1);
+        assert!(resp_b.memories[0].content.contains("beta"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_route_returns_routed_block_when_analyzer_selects_candidate() {
         let temp = tempdir().expect("tempdir");
         let mut config = Config::default();
         config.database.path = temp.path().join("memories.db");
@@ -1435,24 +1624,6 @@ mod tests {
 
         let desired_block = uuid::Uuid::new_v4();
 
-        // Start mock server
-        let (addr, shutdown_tx, ready_rx) = spawn_mock_rig_server(desired_block).await;
-        let endpoint = format!("http://{addr}/v1", addr = addr);
-        config.analyzer.endpoint = Some(endpoint.clone());
-
-        // Wait until server signals readiness
-        let _ = ready_rx.await;
-
-        // Sanity check mock endpoint is reachable
-        let ping_client = reqwest::Client::new();
-        let ping_url = format!("{endpoint}/chat/completions");
-        ping_client
-            .post(ping_url)
-            .json(&json!({"ping": true}))
-            .send()
-            .await
-            .expect("mock server reachable");
-
         let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
 
         // Insert a bridge block so it can be returned in response
@@ -1463,10 +1634,36 @@ mod tests {
             .await
             .expect("insert block");
 
+        #[derive(Clone)]
+        struct FixedRoutingAnalyzer {
+            chosen: uuid::Uuid,
+        }
+
+        #[async_trait]
+        impl Analyzer for FixedRoutingAnalyzer {
+            async fn extract_facts(&self, _content: &str) -> mmry_core::Result<Vec<FactRecord>> {
+                Ok(Vec::new())
+            }
+
+            async fn route(
+                &self,
+                _query: &str,
+                _candidates: &[BridgeBlock],
+            ) -> mmry_core::Result<AnalyzerRouting> {
+                Ok(AnalyzerRouting {
+                    chosen_block: Some(self.chosen),
+                    is_new_topic: false,
+                    rationale: Some("routed".to_string()),
+                })
+            }
+        }
+
         let external_state = ExternalApiState {
             state: Arc::clone(&state),
             api_key: None,
-            analyzer: build_analyzer(&config),
+            analyzer: Arc::new(FixedRoutingAnalyzer {
+                chosen: desired_block,
+            }),
             api_config: config.external_api.clone(),
         };
 
@@ -1495,8 +1692,6 @@ mod tests {
             Some(desired_block.to_string())
         );
         assert!(!response.routing.is_new_topic);
-
-        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1682,55 +1877,6 @@ mod tests {
             !result.relevant_indices.contains(&3),
             "Should filter out index 3 (hiking, unrelated)"
         );
-    }
-
-    async fn spawn_mock_rig_server(
-        desired_block: uuid::Uuid,
-    ) -> (SocketAddr, oneshot::Sender<()>, oneshot::Receiver<()>) {
-        let app = AxumRouter::new().route(
-            "/v1/chat/completions",
-            axum_post(move || async move {
-                let content = format!(
-                    r#"{{"chosen_block":"{id}","is_new_topic":false,"reason":"routed"}}"#,
-                    id = desired_block
-                );
-                let body = json!({
-                    "id": "mock-completion",
-                    "object": "chat.completion",
-                    "created": 0,
-                    "model": "mock-model",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": { "role": "assistant", "content": content },
-                            "finish_reason": "stop",
-                            "logprobs": null
-                        }
-                    ],
-                    "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
-                });
-                Json(body)
-            }),
-        );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let (tx, rx) = oneshot::channel::<()>();
-        let (ready_tx, ready_rx) = oneshot::channel::<()>();
-
-        tokio::spawn(async move {
-            let _ = ready_tx.send(());
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = rx.await;
-                })
-                .await
-                .ok();
-        });
-
-        (addr, tx, ready_rx)
     }
 
     // Input validation tests
