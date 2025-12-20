@@ -1,8 +1,10 @@
 use crate::state::ServiceState;
 use anyhow::Result;
+use axum::extract::Query;
 use axum::extract::State as AxumState;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
+use axum::response::Html;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
@@ -18,10 +20,21 @@ use mmry_core::analysis::AnalyzerRouting;
 use mmry_core::config::Config;
 use mmry_core::config::ExternalApiConfig;
 use mmry_core::config::SearchMode as MmrySearchMode;
+use mmry_core::context_pack::build_context_pack;
+use mmry_core::context_pack::ContextPack;
+use mmry_core::context_pack::ContextPackBudgets;
+use mmry_core::context_pack::ContextPackOptions;
+use mmry_core::conversation::persist_summary;
+use mmry_core::conversation::summarize_and_prune;
+use mmry_core::conversation::ConversationTurn;
+use mmry_core::conversation::SummarizePruneOptions;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::hmlr::prompts::MemoryCandidate;
 use mmry_core::memory::Memory;
+use mmry_core::profile_blocks::ProfileBlock;
+use mmry_core::profile_blocks::ProfileBlockPatchOp;
+use mmry_core::profile_blocks::ProfileBlocksService;
 use mmry_core::reranker::RerankScore;
 use mmry_core::search::SearchService;
 use serde::Deserialize;
@@ -259,6 +272,158 @@ struct FederationSearchRequest {
 #[derive(Debug, Serialize)]
 struct FederationSearchResponse {
     memories: Vec<Memory>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileBlocksListRequest {
+    user_id: String,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileBlocksListResponse {
+    blocks: Vec<ProfileBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileBlocksGetRequest {
+    user_id: String,
+    block: String,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileBlocksGetResponse {
+    block: Option<ProfileBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileBlocksSetRequest {
+    user_id: String,
+    block: String,
+    content: String,
+    #[serde(default)]
+    actor_id: Option<String>,
+    #[serde(default)]
+    span_id: Option<String>,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileBlocksSetResponse {
+    block: ProfileBlock,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileBlocksPatchRequest {
+    user_id: String,
+    block: String,
+    ops: Vec<ProfileBlockPatchOp>,
+    #[serde(default)]
+    actor_id: Option<String>,
+    #[serde(default)]
+    span_id: Option<String>,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileBlocksPatchResponse {
+    block: ProfileBlock,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextPackRequest {
+    query: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    rerank: Option<bool>,
+    #[serde(default)]
+    owner_id: Option<String>,
+    #[serde(default)]
+    span_id: Option<String>,
+    #[serde(default)]
+    budgets: Option<ContextPackBudgets>,
+    #[serde(default)]
+    redact_secrets: Option<bool>,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextPackResponse {
+    pack: ContextPack,
+}
+
+#[derive(Debug, Deserialize)]
+struct SummarizePruneRequest {
+    turns: Vec<ConversationTurn>,
+    #[serde(default)]
+    max_turns: Option<usize>,
+    #[serde(default)]
+    summary_max_words: Option<usize>,
+    #[serde(default)]
+    per_turn_max_words: Option<usize>,
+    #[serde(default)]
+    persist: Option<bool>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    span_id: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SummarizePruneResponse {
+    summary: String,
+    retained: Vec<ConversationTurn>,
+    pruned_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persisted_memory_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persisted_event_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleDataQuery {
+    #[serde(default)]
+    store: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    redact_secrets: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConsoleServiceInfo {
+    store: String,
+    default_store: String,
+    embeddings_enabled: bool,
+    sparse_embeddings_enabled: bool,
+    analyzer_enabled: bool,
+    hmlr_enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConsoleDataResponse {
+    service: ConsoleServiceInfo,
+    agent_events: Vec<AgentEvent>,
+    bridge_blocks: Vec<BridgeBlock>,
+    facts: Vec<FactRecord>,
+    profile_blocks: Vec<ProfileBlock>,
 }
 #[derive(Debug)]
 struct ApiError {
@@ -1301,6 +1466,482 @@ async fn federation_search_handler(
     Ok(Json(FederationSearchResponse { memories: results }))
 }
 
+fn parse_uuid(field: &str, raw: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(raw).map_err(|e| ApiError::bad_request(format!("Invalid {field}: {e}")))
+}
+
+fn is_local_console_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+async fn pool_for_store(
+    app_state: &ExternalApiState,
+    store: Option<&str>,
+) -> Result<(sqlx::SqlitePool, Option<Database>), ApiError> {
+    if let Some(store_name) = store {
+        mmry_core::stores::validate_store_name(store_name)
+            .map_err(|e| ApiError::bad_request(format!("Invalid store name: {e}")))?;
+        let db = Database::init_store(&app_state.state.config, Some(store_name))
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to open store: {e}")))?;
+        Ok((db.pool().clone(), Some(db)))
+    } else {
+        Ok((app_state.state.db.pool().clone(), None))
+    }
+}
+
+async fn profile_blocks_list_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<ProfileBlocksListRequest>,
+) -> Result<Json<ProfileBlocksListResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let user_id = parse_uuid("user_id", &payload.user_id)?;
+    let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
+
+    let svc = ProfileBlocksService::from_config(&app_state.state.config);
+    let blocks = svc
+        .list_blocks(&pool, user_id)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to list profile blocks: {e}")))?;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+    Ok(Json(ProfileBlocksListResponse { blocks }))
+}
+
+async fn profile_blocks_get_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<ProfileBlocksGetRequest>,
+) -> Result<Json<ProfileBlocksGetResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let user_id = parse_uuid("user_id", &payload.user_id)?;
+    let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
+
+    let svc = ProfileBlocksService::from_config(&app_state.state.config);
+    let block = svc
+        .get_block(&pool, user_id, &payload.block)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to get profile block: {e}")))?;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+    Ok(Json(ProfileBlocksGetResponse { block }))
+}
+
+async fn profile_blocks_set_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<ProfileBlocksSetRequest>,
+) -> Result<Json<ProfileBlocksSetResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let user_id = parse_uuid("user_id", &payload.user_id)?;
+    let actor_id = payload
+        .actor_id
+        .as_deref()
+        .map(|s| parse_uuid("actor_id", s))
+        .transpose()?
+        .unwrap_or(user_id);
+
+    let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
+
+    let svc = ProfileBlocksService::from_config(&app_state.state.config);
+    let block = svc
+        .set_block(
+            &pool,
+            user_id,
+            &payload.block,
+            payload.content,
+            actor_id,
+            payload.span_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to set profile block: {e}")))?;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+    Ok(Json(ProfileBlocksSetResponse { block }))
+}
+
+async fn profile_blocks_patch_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<ProfileBlocksPatchRequest>,
+) -> Result<Json<ProfileBlocksPatchResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let user_id = parse_uuid("user_id", &payload.user_id)?;
+    let actor_id = payload
+        .actor_id
+        .as_deref()
+        .map(|s| parse_uuid("actor_id", s))
+        .transpose()?
+        .unwrap_or(user_id);
+
+    let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
+
+    let svc = ProfileBlocksService::from_config(&app_state.state.config);
+    let block = svc
+        .patch_block(
+            &pool,
+            user_id,
+            &payload.block,
+            payload.ops,
+            actor_id,
+            payload.span_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to patch profile block: {e}")))?;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+    Ok(Json(ProfileBlocksPatchResponse { block }))
+}
+
+async fn context_pack_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<ContextPackRequest>,
+) -> Result<Json<ContextPackResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    validate_text_len(&payload.query, &app_state.api_config, "query")?;
+
+    let requested_limit = payload
+        .limit
+        .unwrap_or(app_state.state.search_config().default_limit as i64)
+        .max(1);
+    let limit = std::cmp::min(requested_limit, 100);
+
+    let mode =
+        parse_search_mode(payload.mode.as_deref()).unwrap_or(app_state.state.search_config().mode);
+    let rerank = payload.rerank.unwrap_or(false);
+
+    let owner_id = payload
+        .owner_id
+        .as_deref()
+        .map(|s| parse_uuid("owner_id", s))
+        .transpose()?;
+    let span_id = payload.span_id.as_deref();
+
+    let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
+    let store_label = payload
+        .store
+        .as_deref()
+        .unwrap_or(&app_state.state.config.stores.default);
+
+    let search_service = SearchService::new(
+        pool.clone(),
+        app_state.state.search_config(),
+        Arc::clone(&app_state.state.embeddings_wrapper),
+        Arc::clone(&app_state.state.sparse_embeddings),
+        Arc::clone(&app_state.state.reranker),
+    );
+
+    let profile_blocks = ProfileBlocksService::from_config(&app_state.state.config);
+    let pack = build_context_pack(
+        &pool,
+        &profile_blocks,
+        &search_service,
+        ContextPackOptions {
+            query: &payload.query,
+            category: payload.category.as_deref(),
+            limit,
+            mode,
+            rerank,
+            store: Some(store_label),
+            owner_id,
+            span_id,
+            budgets: payload.budgets.unwrap_or_default(),
+            redact_secrets: payload.redact_secrets.unwrap_or(false),
+        },
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("Failed to build context pack: {e}")))?;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(ContextPackResponse { pack }))
+}
+
+async fn conversation_summarize_prune_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Json(payload): Json<SummarizePruneRequest>,
+) -> Result<Json<SummarizePruneResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let max_batch = app_state.api_config.max_batch_size.max(1);
+    if payload.turns.len() > max_batch {
+        return Err(ApiError::bad_request(format!(
+            "turns exceeds max_batch_size ({} > {})",
+            payload.turns.len(),
+            max_batch
+        )));
+    }
+
+    for (idx, turn) in payload.turns.iter().enumerate() {
+        validate_text_len(
+            &turn.content,
+            &app_state.api_config,
+            &format!("turns[{idx}].content"),
+        )?;
+    }
+
+    let mut opts = SummarizePruneOptions::default();
+    if let Some(max_turns) = payload.max_turns {
+        opts.max_turns = max_turns.max(1).min(max_batch);
+    }
+    if let Some(summary_max_words) = payload.summary_max_words {
+        opts.summary_max_words = summary_max_words;
+    }
+    if let Some(per_turn_max_words) = payload.per_turn_max_words {
+        opts.per_turn_max_words = per_turn_max_words;
+    }
+
+    let opts_snapshot = opts.clone();
+    let result = summarize_and_prune(payload.turns, opts);
+
+    let persist = payload.persist.unwrap_or(false);
+    let mut persisted_memory_id = None;
+    let mut persisted_event_id = None;
+
+    let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
+    if persist {
+        if result.summary.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "Nothing to persist: summary is empty (no pruning occurred)".to_string(),
+            ));
+        }
+
+        let agent_id = payload
+            .agent_id
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("agent_id is required when persist=true"))?;
+        let agent_id = parse_uuid("agent_id", agent_id)?;
+        let category = payload
+            .category
+            .unwrap_or_else(|| "conversation_summary".to_string());
+
+        let persisted = persist_summary(
+            &pool,
+            agent_id,
+            payload.span_id.clone(),
+            result.summary.clone(),
+            category,
+            json!({
+                "pruned_count": result.pruned_count,
+                "retained_count": result.retained.len(),
+                "summary_max_words": opts_snapshot.summary_max_words,
+                "per_turn_max_words": opts_snapshot.per_turn_max_words,
+            }),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to persist summary: {e}")))?;
+
+        persisted_memory_id = Some(persisted.memory.id.to_string());
+        persisted_event_id = Some(persisted.event.id.to_string());
+    }
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(SummarizePruneResponse {
+        summary: result.summary,
+        retained: result.retained,
+        pruned_count: result.pruned_count,
+        persisted_memory_id,
+        persisted_event_id,
+    }))
+}
+
+async fn console_handler(AxumState(app_state): AxumState<ExternalApiState>) -> Html<String> {
+    let redact_default = app_state.api_config.console_redact_secrets;
+    let default_store = &app_state.state.config.stores.default;
+    const CONSOLE_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>mmry agent console</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    input, select, button { padding: 6px 8px; }
+    pre { overflow: auto; padding: 12px; border: 1px solid rgba(127,127,127,0.35); border-radius: 8px; }
+    h2 { margin-top: 20px; }
+    .muted { opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <h1>mmry agent console</h1>
+  <div class="row">
+    <label>Store <input id="store" placeholder="__DEFAULT_STORE__" /></label>
+    <label>User ID <input id="userId" placeholder="(optional UUID)" size="40" /></label>
+    <label><input id="redact" type="checkbox" __REDACT_CHECKED__ /> Redact secrets</label>
+    <button id="refresh">Refresh</button>
+    <span id="status" class="muted"></span>
+  </div>
+
+  <h2>Service</h2>
+  <pre id="service"></pre>
+
+  <h2>Profile Blocks</h2>
+  <pre id="profile"></pre>
+
+  <h2>Agent Events</h2>
+  <pre id="events"></pre>
+
+  <h2>Bridge Blocks</h2>
+  <pre id="blocks"></pre>
+
+  <h2>Facts</h2>
+  <pre id="facts"></pre>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const qs = () => new URLSearchParams({
+      store: $("store").value || "",
+      user_id: $("userId").value || "",
+      redact_secrets: $("redact").checked ? "true" : "false",
+      limit: "50",
+    });
+
+    async function refresh() {
+      $("status").textContent = "Loading…";
+      try {
+        const resp = await fetch("/console/data?" + qs().toString());
+        const data = await resp.json();
+        $("service").textContent = JSON.stringify(data.service, null, 2);
+        $("profile").textContent = JSON.stringify(data.profile_blocks, null, 2);
+        $("events").textContent = JSON.stringify(data.agent_events, null, 2);
+        $("blocks").textContent = JSON.stringify(data.bridge_blocks, null, 2);
+        $("facts").textContent = JSON.stringify(data.facts, null, 2);
+        $("status").textContent = "OK";
+      } catch (e) {
+        $("status").textContent = "Error: " + e;
+      }
+    }
+
+    $("refresh").addEventListener("click", refresh);
+    refresh();
+  </script>
+</body>
+</html>"#;
+
+    let mut html = CONSOLE_HTML.replace("__DEFAULT_STORE__", default_store);
+    html = html.replace(
+        "__REDACT_CHECKED__",
+        if redact_default { "checked" } else { "" },
+    );
+    Html(html)
+}
+
+async fn console_data_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    Query(query): Query<ConsoleDataQuery>,
+) -> Result<Json<ConsoleDataResponse>, ApiError> {
+    app_state.state.record_activity().await;
+
+    let (pool, db_guard) = pool_for_store(&app_state, query.store.as_deref()).await?;
+    let store_label = query
+        .store
+        .as_deref()
+        .unwrap_or(&app_state.state.config.stores.default)
+        .to_string();
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 250);
+    let redact_secrets = query
+        .redact_secrets
+        .unwrap_or(app_state.api_config.console_redact_secrets);
+
+    let mut facts = operations::list_recent_facts(&pool, limit)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to list facts: {e}")))?;
+    if redact_secrets {
+        facts.retain(|f| f.category != mmry_core::agents::FactCategory::Secret);
+    }
+
+    let agent_events = operations::list_agent_events(&pool, limit)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to list agent events: {e}")))?;
+
+    let bridge_blocks = operations::list_bridge_blocks(&pool, limit)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to list bridge blocks: {e}")))?;
+
+    let profile_blocks = if let Some(user_id) = query.user_id.as_deref() {
+        let user_id = parse_uuid("user_id", user_id)?;
+        ProfileBlocksService::from_config(&app_state.state.config)
+            .list_blocks(&pool, user_id)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to list profile blocks: {e}")))?
+    } else {
+        Vec::new()
+    };
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(ConsoleDataResponse {
+        service: ConsoleServiceInfo {
+            store: store_label,
+            default_store: app_state.state.config.stores.default.clone(),
+            embeddings_enabled: app_state.state.config.embeddings.enabled,
+            sparse_embeddings_enabled: app_state.state.config.sparse_embeddings.enabled,
+            analyzer_enabled: app_state.state.config.analyzer.enabled,
+            hmlr_enabled: app_state.state.config.hmlr.enabled,
+        },
+        agent_events,
+        bridge_blocks,
+        facts,
+        profile_blocks,
+    }))
+}
+
 pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -> Result<()> {
     let state = Arc::new(ServiceState::new(config.clone()).await?);
 
@@ -1358,6 +1999,7 @@ async fn run_http_api(
     let api_key = normalize_api_key(&api_config.api_key);
     let addr: std::net::SocketAddr = format!("{}:{}", api_config.host, api_config.port).parse()?;
     let analyzer = build_analyzer(&state.config);
+    let console_enabled = api_config.console_enable && is_local_console_host(&api_config.host);
 
     let external_state = ExternalApiState {
         state,
@@ -1366,7 +2008,7 @@ async fn run_http_api(
         api_config,
     };
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/v1/models", get(models_handler))
         .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/rerank", post(rerank_handler))
@@ -1374,7 +2016,26 @@ async fn run_http_api(
         .route("/v1/agents/memories", post(agent_memory_create_handler))
         .route("/v1/agents/enrich", post(agent_enrich_handler))
         .route("/v1/federation/search", post(federation_search_handler))
-        .with_state(external_state);
+        .route("/v1/profile/blocks/list", post(profile_blocks_list_handler))
+        .route("/v1/profile/blocks/get", post(profile_blocks_get_handler))
+        .route("/v1/profile/blocks/set", post(profile_blocks_set_handler))
+        .route(
+            "/v1/profile/blocks/patch",
+            post(profile_blocks_patch_handler),
+        )
+        .route("/v1/context-pack", post(context_pack_handler))
+        .route(
+            "/v1/conversation/summarize-prune",
+            post(conversation_summarize_prune_handler),
+        );
+
+    if console_enabled {
+        app = app
+            .route("/console", get(console_handler))
+            .route("/console/data", get(console_data_handler));
+    }
+
+    let app = app.with_state(external_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
@@ -1482,6 +2143,7 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use mmry_core::agents::FactCategory;
     use tempfile::tempdir;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1609,6 +2271,340 @@ mod tests {
         .expect("store b search ok");
         assert_eq!(resp_b.memories.len(), 1);
         assert!(resp_b.memories[0].content.contains("beta"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn profile_blocks_endpoints_roundtrip() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let user_id = Uuid::new_v4();
+
+        let before = operations::count_agent_events(state.db.pool())
+            .await
+            .expect("count events");
+
+        let set_resp = profile_blocks_set_handler(
+            AxumState(external_state.clone()),
+            HeaderMap::new(),
+            Json(ProfileBlocksSetRequest {
+                user_id: user_id.to_string(),
+                block: "persona".to_string(),
+                content: "line1\nline2".to_string(),
+                actor_id: None,
+                span_id: None,
+                store: None,
+            }),
+        )
+        .await
+        .expect("set ok");
+
+        assert_eq!(set_resp.block.name, "persona");
+        assert_eq!(set_resp.block.content, "line1\nline2");
+
+        let get_resp = profile_blocks_get_handler(
+            AxumState(external_state.clone()),
+            HeaderMap::new(),
+            Json(ProfileBlocksGetRequest {
+                user_id: user_id.to_string(),
+                block: "persona".to_string(),
+                store: None,
+            }),
+        )
+        .await
+        .expect("get ok");
+        assert_eq!(
+            get_resp.block.as_ref().map(|b| b.name.as_str()),
+            Some("persona")
+        );
+
+        let list_resp = profile_blocks_list_handler(
+            AxumState(external_state.clone()),
+            HeaderMap::new(),
+            Json(ProfileBlocksListRequest {
+                user_id: user_id.to_string(),
+                store: None,
+            }),
+        )
+        .await
+        .expect("list ok");
+        assert_eq!(list_resp.blocks.len(), 1);
+
+        let patch_resp = profile_blocks_patch_handler(
+            AxumState(external_state.clone()),
+            HeaderMap::new(),
+            Json(ProfileBlocksPatchRequest {
+                user_id: user_id.to_string(),
+                block: "persona".to_string(),
+                ops: vec![ProfileBlockPatchOp::Insert {
+                    before_line: 2,
+                    text: "inserted".to_string(),
+                }],
+                actor_id: None,
+                span_id: None,
+                store: None,
+            }),
+        )
+        .await
+        .expect("patch ok");
+
+        assert_eq!(patch_resp.block.content, "line1\ninserted\nline2");
+
+        let after = operations::count_agent_events(state.db.pool())
+            .await
+            .expect("count events");
+        assert_eq!(after - before, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_pack_endpoint_redacts_secret_facts() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let owner = Uuid::new_v4();
+        let mut owner_agent = AgentRecord::new("owner", "human");
+        owner_agent.id = owner;
+        operations::upsert_agent(state.db.pool(), &owner_agent)
+            .await
+            .expect("upsert agent");
+
+        let mut memory = mmry_core::memory::Memory::new(
+            mmry_core::memory::MemoryType::Episodic,
+            "hello world".to_string(),
+            "default".to_string(),
+        );
+        memory.importance = 5;
+        operations::insert_memory(state.db.pool(), &memory)
+            .await
+            .expect("insert memory");
+
+        let mut event = AgentEvent::new(owner, "fact_extract");
+        event.id = Uuid::new_v4();
+        event.memory_id = Some(memory.id);
+        operations::record_agent_event(state.db.pool(), &event)
+            .await
+            .expect("record agent event");
+
+        let mut secret = FactRecord::new("api_key", "secret");
+        secret.category = FactCategory::Secret;
+        secret.turn_id = Some(event.id.to_string());
+        operations::upsert_fact(state.db.pool(), &secret)
+            .await
+            .expect("upsert secret");
+
+        let resp = context_pack_handler(
+            AxumState(external_state),
+            HeaderMap::new(),
+            Json(ContextPackRequest {
+                query: "hello".to_string(),
+                category: None,
+                limit: Some(5),
+                mode: Some("keyword".to_string()),
+                rerank: Some(false),
+                owner_id: Some(owner.to_string()),
+                span_id: None,
+                budgets: None,
+                redact_secrets: Some(true),
+                store: None,
+            }),
+        )
+        .await
+        .expect("context pack ok");
+
+        assert_eq!(resp.pack.redactions.redacted_facts, 1);
+        assert!(resp.pack.facts.is_empty());
+        assert_eq!(resp.pack.memories.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn summarize_prune_endpoint_prunes_and_summarizes() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let turns = (0..6)
+            .map(|idx| ConversationTurn {
+                role: Some(if idx % 2 == 0 { "user" } else { "assistant" }.to_string()),
+                content: format!("turn {idx} has a bunch of words for summarization"),
+            })
+            .collect::<Vec<_>>();
+
+        let resp = conversation_summarize_prune_handler(
+            AxumState(external_state),
+            HeaderMap::new(),
+            Json(SummarizePruneRequest {
+                turns,
+                max_turns: Some(2),
+                summary_max_words: Some(20),
+                per_turn_max_words: Some(5),
+                persist: Some(false),
+                agent_id: None,
+                span_id: None,
+                category: None,
+                store: None,
+            }),
+        )
+        .await
+        .expect("summarize/prune ok");
+
+        assert_eq!(resp.retained.len(), 2);
+        assert_eq!(resp.pruned_count, 4);
+        assert!(!resp.summary.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn summarize_prune_endpoint_can_persist_summary() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let turns = (0..6)
+            .map(|idx| ConversationTurn {
+                role: Some(if idx % 2 == 0 { "user" } else { "assistant" }.to_string()),
+                content: format!("turn {idx} has a bunch of words for summarization"),
+            })
+            .collect::<Vec<_>>();
+
+        let before_events = operations::count_agent_events(state.db.pool())
+            .await
+            .expect("count events");
+        let before_memories = operations::count_memories(state.db.pool())
+            .await
+            .expect("count memories");
+
+        let agent_id = Uuid::new_v4();
+        let resp = conversation_summarize_prune_handler(
+            AxumState(external_state),
+            HeaderMap::new(),
+            Json(SummarizePruneRequest {
+                turns,
+                max_turns: Some(2),
+                summary_max_words: Some(20),
+                per_turn_max_words: Some(5),
+                persist: Some(true),
+                agent_id: Some(agent_id.to_string()),
+                span_id: Some("span-1".to_string()),
+                category: None,
+                store: None,
+            }),
+        )
+        .await
+        .expect("summarize/prune ok");
+
+        assert!(resp.persisted_memory_id.is_some());
+        assert!(resp.persisted_event_id.is_some());
+
+        let after_events = operations::count_agent_events(state.db.pool())
+            .await
+            .expect("count events");
+        let after_memories = operations::count_memories(state.db.pool())
+            .await
+            .expect("count memories");
+
+        assert_eq!(after_events - before_events, 1);
+        assert_eq!(after_memories - before_memories, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn console_data_redacts_secret_facts_by_default() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+        config.external_api.console_redact_secrets = true;
+
+        let state = Arc::new(ServiceState::new(config.clone()).await.expect("state"));
+        let external_state = ExternalApiState {
+            state: Arc::clone(&state),
+            api_key: None,
+            analyzer: build_analyzer(&config),
+            api_config: config.external_api.clone(),
+        };
+
+        let mut secret = FactRecord::new("api_key", "secret");
+        secret.category = FactCategory::Secret;
+        operations::upsert_fact(state.db.pool(), &secret)
+            .await
+            .expect("upsert secret");
+
+        let redacted = console_data_handler(
+            AxumState(external_state.clone()),
+            Query(ConsoleDataQuery {
+                store: None,
+                user_id: None,
+                limit: Some(10),
+                redact_secrets: None,
+            }),
+        )
+        .await
+        .expect("console data ok");
+        assert!(redacted.facts.is_empty());
+
+        let unredacted = console_data_handler(
+            AxumState(external_state),
+            Query(ConsoleDataQuery {
+                store: None,
+                user_id: None,
+                limit: Some(10),
+                redact_secrets: Some(false),
+            }),
+        )
+        .await
+        .expect("console data ok");
+        assert_eq!(unredacted.facts.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

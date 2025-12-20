@@ -5,6 +5,7 @@ pub mod ingest;
 pub mod init;
 pub mod ls;
 pub mod models;
+pub mod profile;
 pub mod prune;
 pub mod reembed;
 pub mod reextract;

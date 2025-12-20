@@ -39,9 +39,10 @@ prost = { version = "0.13", optional = true }
 sysinfo = { version = "0.32", optional = true }
 
 [features]
-default = ["service"]
-service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "dep:reqwest", "dep:rig-core"]
-federation = ["dep:reqwest"]
+default = ["service", "remote-http"]
+remote-http = ["dep:reqwest"]
+service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "remote-http", "dep:rig-core"]
+federation = ["remote-http"]
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

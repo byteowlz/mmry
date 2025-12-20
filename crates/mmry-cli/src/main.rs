@@ -92,6 +92,9 @@ enum Commands {
 
     /// Remove duplicate memories (keeping the oldest)
     Prune(commands::prune::PruneCmd),
+
+    /// Manage user profile blocks
+    Profile(commands::profile::ProfileCmd),
 }
 
 fn main() {
@@ -236,6 +239,7 @@ async fn async_main() -> anyhow::Result<()> {
             .await
         }
         Commands::Prune(cmd) => commands::prune::handle(cmd, &config, &db).await,
+        Commands::Profile(cmd) => commands::profile::handle(cmd, &config, &db).await,
         Commands::Models(_)
         | Commands::Rerankers(_)
         | Commands::Init(_)

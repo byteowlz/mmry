@@ -128,6 +128,8 @@ pub struct Config {
     pub chunking: ChunkingConfig,
     pub entities: EntitiesConfig,
     #[serde(default)]
+    pub profile_blocks: ProfileBlocksConfig,
+    #[serde(default)]
     pub ner: NerConfig,
     pub cleanup: CleanupConfig,
     pub integrations: IntegrationsConfig,
@@ -213,6 +215,23 @@ pub struct EmbeddingsConfig {
     pub backend: String,
     pub dimension: usize,
     pub batch_size: usize,
+    #[serde(default)]
+    pub remote: Option<RemoteBackendConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RemoteBackendConfig {
+    /// Base URL for mmry-service external API (e.g. "http://127.0.0.1:8080")
+    pub base_url: String,
+    /// Optional API key for `Authorization: Bearer ...`
+    pub api_key: Option<String>,
+    /// Request timeout (seconds)
+    pub request_timeout_seconds: u64,
+    /// Hard limit for batch sizes sent to the remote backend
+    pub max_batch_size: usize,
+    /// If true, fail hard on remote errors; if false, allow local fallback
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -226,6 +245,8 @@ pub struct SearchConfig {
     pub rerank_enabled: bool,
     pub rerank_top_k: usize,
     pub rerank_model: Option<String>,
+    #[serde(default)]
+    pub remote_rerank: Option<RemoteBackendConfig>,
     pub keyword_weight: f32,
     pub fuzzy_weight: f32,
     pub vector_weight: f32,
@@ -319,6 +340,13 @@ pub struct LstIntegrationConfig {
     pub min_note_length: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ProfileBlocksConfig {
+    /// Maximum characters allowed in a single profile block
+    pub max_block_chars: usize,
+}
+
 impl Default for DatabaseConfig {
     fn default() -> Self {
         let data_dir = default_data_dir();
@@ -338,6 +366,19 @@ impl Default for EmbeddingsConfig {
             backend: "fastembed".to_string(),
             dimension: 384,
             batch_size: 32,
+            remote: None,
+        }
+    }
+}
+
+impl Default for RemoteBackendConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: None,
+            request_timeout_seconds: 30,
+            max_batch_size: 64,
+            required: false,
         }
     }
 }
@@ -432,6 +473,10 @@ pub struct ServiceConfig {
 pub struct ExternalApiConfig {
     /// Expose HTTP API for embeddings and reranking
     pub enable: bool,
+    /// Enable the local-only agent console UI endpoints (/console)
+    pub console_enable: bool,
+    /// Redact secrets by default in the console UI
+    pub console_redact_secrets: bool,
     /// Require Authorization: Bearer ... header (if false and api_key is set, key is still enforced)
     pub require_api_key: bool,
     /// Host to bind the external API server
@@ -474,6 +519,8 @@ impl Default for ExternalApiConfig {
     fn default() -> Self {
         Self {
             enable: false,
+            console_enable: false,
+            console_redact_secrets: true,
             require_api_key: false,
             host: "127.0.0.1".to_string(),
             port: 8081,
@@ -538,6 +585,7 @@ impl Default for SearchConfig {
             rerank_enabled: true,
             rerank_top_k: 20,
             rerank_model: Some("BAAI/bge-reranker-base".to_string()),
+            remote_rerank: None,
             keyword_weight: 0.4,
             fuzzy_weight: 0.2,
             vector_weight: 0.35,
@@ -546,6 +594,14 @@ impl Default for SearchConfig {
             importance_weight: 0.05,
             bm25_k1: 1.2,
             bm25_b: 0.75,
+        }
+    }
+}
+
+impl Default for ProfileBlocksConfig {
+    fn default() -> Self {
+        Self {
+            max_block_chars: 16_000,
         }
     }
 }
