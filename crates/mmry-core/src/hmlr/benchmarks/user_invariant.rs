@@ -4,6 +4,7 @@
 // Based on HMLR Test 7B: User Invariant Override
 // https://github.com/Sean-V-Dev/HMLR-Agentic-AI-Memory-System
 
+use super::compute_retrieval_metrics;
 use super::BenchmarkResult;
 use crate::agents::FactRecord;
 use crate::agents::UserProfileEntry;
@@ -11,7 +12,9 @@ use crate::database::operations;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
 use sqlx::SqlitePool;
+use std::collections::HashSet;
 use std::time::Instant;
+use uuid::Uuid;
 
 /// Test 7B: User Invariant Override
 ///
@@ -46,6 +49,7 @@ pub async fn test_user_invariant_override(pool: &SqlitePool) -> BenchmarkResult 
     // Also store as a fact for cross-referencing
     let mut fact = FactRecord::new("dietary_restriction", "vegetarian");
     fact.recency_score = 1.0; // High priority invariant
+    let expected_fact_id = fact.id;
     if let Err(e) = operations::upsert_fact(pool, &fact).await {
         return BenchmarkResult::failure(
             test_name,
@@ -89,7 +93,7 @@ pub async fn test_user_invariant_override(pool: &SqlitePool) -> BenchmarkResult 
             let faithfulness = if is_vegetarian { 1.0 } else { 0.0 };
 
             // Context recall: check if fact is still correct
-            match operations::list_facts_by_key(pool, "dietary_restriction", 1).await {
+            match operations::list_facts_by_key(pool, "dietary_restriction", 10).await {
                 Ok(facts) => {
                     let fact_correct = facts
                         .first()
@@ -97,12 +101,17 @@ pub async fn test_user_invariant_override(pool: &SqlitePool) -> BenchmarkResult 
                         .unwrap_or(false);
                     let context_recall = if fact_correct { 1.0 } else { 0.5 };
 
-                    BenchmarkResult::success(
+                    let relevant: HashSet<Uuid> = [expected_fact_id].into_iter().collect();
+                    let retrieved_ids: Vec<Uuid> = facts.iter().map(|f| f.id).collect();
+                    let retrieval = compute_retrieval_metrics(&retrieved_ids, &relevant, 1);
+
+                    let out = BenchmarkResult::success(
                         test_name,
                         faithfulness,
                         context_recall,
                         start.elapsed().as_millis() as u64,
-                    )
+                    );
+                    out.with_retrieval(retrieval)
                 }
                 Err(e) => BenchmarkResult::failure(
                     test_name,
@@ -151,6 +160,7 @@ pub async fn test_language_preference_persistence(pool: &SqlitePool) -> Benchmar
 
     let mut fact = FactRecord::new("language_preference", "German");
     fact.recency_score = 1.0;
+    let expected_fact_id = fact.id;
     if let Err(e) = operations::upsert_fact(pool, &fact).await {
         return BenchmarkResult::failure(
             test_name,
@@ -186,7 +196,7 @@ pub async fn test_language_preference_persistence(pool: &SqlitePool) -> Benchmar
 
             let faithfulness = if preferred_lang == "German" { 1.0 } else { 0.0 };
 
-            match operations::list_facts_by_key(pool, "language_preference", 1).await {
+            match operations::list_facts_by_key(pool, "language_preference", 10).await {
                 Ok(facts) => {
                     let fact_correct = facts
                         .first()
@@ -194,12 +204,17 @@ pub async fn test_language_preference_persistence(pool: &SqlitePool) -> Benchmar
                         .unwrap_or(false);
                     let context_recall = if fact_correct { 1.0 } else { 0.5 };
 
-                    BenchmarkResult::success(
+                    let relevant: HashSet<Uuid> = [expected_fact_id].into_iter().collect();
+                    let retrieved_ids: Vec<Uuid> = facts.iter().map(|f| f.id).collect();
+                    let retrieval = compute_retrieval_metrics(&retrieved_ids, &relevant, 1);
+
+                    let out = BenchmarkResult::success(
                         test_name,
                         faithfulness,
                         context_recall,
                         start.elapsed().as_millis() as u64,
-                    )
+                    );
+                    out.with_retrieval(retrieval)
                 }
                 Err(e) => BenchmarkResult::failure(
                     test_name,

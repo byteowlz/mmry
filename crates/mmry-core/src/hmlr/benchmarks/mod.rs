@@ -10,12 +10,25 @@
 // Based on HMLR's benchmark suite: https://github.com/Sean-V-Dev/HMLR-Agentic-AI-Memory-System
 
 mod multi_hop;
+mod system;
 mod temporal;
 mod user_invariant;
 
 pub use multi_hop::*;
+pub use system::*;
 pub use temporal::*;
 pub use user_invariant::*;
+
+use std::collections::HashSet;
+use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct RetrievalMetrics {
+    pub k: usize,
+    pub precision_at_k: f32,
+    pub recall_at_k: f32,
+    pub mrr: f32,
+}
 
 /// Benchmark result tracking
 #[derive(Debug, Clone)]
@@ -28,6 +41,12 @@ pub struct BenchmarkResult {
     pub faithfulness: f32,
     /// Context recall (0.0 - 1.0) - were the right memories retrieved?
     pub context_recall: f32,
+    /// Retrieval metrics when the benchmark returns ranked items
+    pub retrieval: Option<RetrievalMetrics>,
+    /// Whether secret data leaked in output (must be false under redaction)
+    pub secret_leaked: bool,
+    /// Stable hash of relevant output (used for determinism checks)
+    pub determinism_hash: Option<u64>,
     /// Optional error message if failed
     pub error: Option<String>,
     /// Execution time in milliseconds
@@ -41,6 +60,9 @@ impl BenchmarkResult {
             passed: faithfulness >= 0.9 && context_recall >= 0.9,
             faithfulness,
             context_recall,
+            retrieval: None,
+            secret_leaked: false,
+            determinism_hash: None,
             error: None,
             duration_ms,
         }
@@ -52,9 +74,58 @@ impl BenchmarkResult {
             passed: false,
             faithfulness: 0.0,
             context_recall: 0.0,
+            retrieval: None,
+            secret_leaked: false,
+            determinism_hash: None,
             error: Some(error.to_string()),
             duration_ms,
         }
+    }
+
+    pub fn with_retrieval(mut self, retrieval: RetrievalMetrics) -> Self {
+        self.retrieval = Some(retrieval);
+        self
+    }
+
+    pub fn with_secret_leak(mut self, secret_leaked: bool) -> Self {
+        self.secret_leaked = secret_leaked;
+        self
+    }
+
+    pub fn with_determinism_hash(mut self, hash: u64) -> Self {
+        self.determinism_hash = Some(hash);
+        self
+    }
+}
+
+pub fn compute_retrieval_metrics(
+    retrieved: &[Uuid],
+    relevant: &HashSet<Uuid>,
+    k: usize,
+) -> RetrievalMetrics {
+    let k = k.max(1);
+    let relevant_total = relevant.len().max(1) as f32;
+
+    let mut hits_in_top_k = 0usize;
+    let mut first_hit_rank: Option<usize> = None;
+    for (idx, id) in retrieved.iter().take(k).enumerate() {
+        if relevant.contains(id) {
+            hits_in_top_k += 1;
+            if first_hit_rank.is_none() {
+                first_hit_rank = Some(idx + 1);
+            }
+        }
+    }
+
+    let mrr = first_hit_rank.map(|rank| 1.0 / rank as f32).unwrap_or(0.0);
+    let precision_at_k = hits_in_top_k as f32 / k as f32;
+    let recall_at_k = hits_in_top_k as f32 / relevant_total;
+
+    RetrievalMetrics {
+        k,
+        precision_at_k,
+        recall_at_k,
+        mrr,
     }
 }
 
@@ -141,11 +212,46 @@ impl std::fmt::Display for BenchmarkSummary {
                 "[{}] {} - F:{:.2} R:{:.2} ({}ms)",
                 status, result.name, result.faithfulness, result.context_recall, result.duration_ms
             )?;
+            if let Some(retrieval) = &result.retrieval {
+                writeln!(
+                    f,
+                    "    retrieval@{} P:{:.2} R:{:.2} MRR:{:.2}",
+                    retrieval.k, retrieval.precision_at_k, retrieval.recall_at_k, retrieval.mrr
+                )?;
+            }
+            if result.secret_leaked {
+                writeln!(f, "    secret_leaked=true")?;
+            }
+            if let Some(hash) = result.determinism_hash {
+                writeln!(f, "    determinism_hash={hash}")?;
+            }
             if let Some(err) = &result.error {
                 writeln!(f, "    Error: {err}")?;
             }
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_retrieval_metrics_precision_recall_mrr() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+
+        let retrieved = vec![a, b, c];
+        let relevant: HashSet<Uuid> = [b].into_iter().collect();
+
+        let metrics = compute_retrieval_metrics(&retrieved, &relevant, 2);
+
+        assert_eq!(metrics.k, 2);
+        assert!((metrics.precision_at_k - 0.5).abs() < f32::EPSILON);
+        assert!((metrics.recall_at_k - 1.0).abs() < f32::EPSILON);
+        assert!((metrics.mrr - 0.5).abs() < f32::EPSILON);
     }
 }

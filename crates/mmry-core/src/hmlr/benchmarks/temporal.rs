@@ -4,13 +4,16 @@
 // Based on HMLR Test 7A: API Key Rotation
 // https://github.com/Sean-V-Dev/HMLR-Agentic-AI-Memory-System
 
+use super::compute_retrieval_metrics;
 use super::BenchmarkResult;
 use crate::agents::FactRecord;
 use crate::database::operations;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
 use sqlx::SqlitePool;
+use std::collections::HashSet;
 use std::time::Instant;
+use uuid::Uuid;
 
 /// Test 7A: API Key Rotation
 ///
@@ -21,6 +24,7 @@ use std::time::Instant;
 pub async fn test_api_key_rotation(pool: &SqlitePool) -> BenchmarkResult {
     let start = Instant::now();
     let test_name = "7A - API Key Rotation";
+    let mut expected_fact_id: Option<Uuid> = None;
 
     // Setup: Create a sequence of API key updates with timestamps
     let keys = [
@@ -35,6 +39,9 @@ pub async fn test_api_key_rotation(pool: &SqlitePool) -> BenchmarkResult {
         fact.source_span = Some(format!("api-key-update-{i}"));
         // Older facts have lower recency scores
         fact.recency_score = (i + 1) as f32 / keys.len() as f32;
+        if *key == "sk-current-key-003" {
+            expected_fact_id = Some(fact.id);
+        }
 
         if let Err(e) = operations::upsert_fact(pool, &fact).await {
             return BenchmarkResult::failure(
@@ -88,12 +95,22 @@ pub async fn test_api_key_rotation(pool: &SqlitePool) -> BenchmarkResult {
                 facts.len() as f32 / 3.0
             };
 
-            BenchmarkResult::success(
+            let retrieval = expected_fact_id.map(|id| {
+                let relevant: HashSet<Uuid> = [id].into_iter().collect();
+                let retrieved_ids: Vec<Uuid> = facts.iter().map(|f| f.id).collect();
+                compute_retrieval_metrics(&retrieved_ids, &relevant, 3)
+            });
+
+            let mut out = BenchmarkResult::success(
                 test_name,
                 faithfulness,
                 context_recall,
                 start.elapsed().as_millis() as u64,
-            )
+            );
+            if let Some(retrieval) = retrieval {
+                out = out.with_retrieval(retrieval);
+            }
+            out
         }
         Err(e) => BenchmarkResult::failure(
             test_name,
@@ -110,6 +127,7 @@ pub async fn test_api_key_rotation(pool: &SqlitePool) -> BenchmarkResult {
 pub async fn test_timestamp_updates(pool: &SqlitePool) -> BenchmarkResult {
     let start = Instant::now();
     let test_name = "7C - Timestamp Updates";
+    let mut expected_fact_id: Option<Uuid> = None;
 
     let deadlines = [
         (0.3, "2024-03-15"), // Original
@@ -121,6 +139,9 @@ pub async fn test_timestamp_updates(pool: &SqlitePool) -> BenchmarkResult {
         let mut fact = FactRecord::new("project_deadline", *date);
         fact.recency_score = *recency;
         fact.source_span = Some(format!("deadline-update-{recency}"));
+        if *date == "2024-03-29" {
+            expected_fact_id = Some(fact.id);
+        }
 
         if let Err(e) = operations::upsert_fact(pool, &fact).await {
             return BenchmarkResult::failure(
@@ -154,12 +175,22 @@ pub async fn test_timestamp_updates(pool: &SqlitePool) -> BenchmarkResult {
                 facts.len() as f32 / 3.0
             };
 
-            BenchmarkResult::success(
+            let retrieval = expected_fact_id.map(|id| {
+                let relevant: HashSet<Uuid> = [id].into_iter().collect();
+                let retrieved_ids: Vec<Uuid> = facts.iter().map(|f| f.id).collect();
+                compute_retrieval_metrics(&retrieved_ids, &relevant, 3)
+            });
+
+            let mut out = BenchmarkResult::success(
                 test_name,
                 faithfulness,
                 context_recall,
                 start.elapsed().as_millis() as u64,
-            )
+            );
+            if let Some(retrieval) = retrieval {
+                out = out.with_retrieval(retrieval);
+            }
+            out
         }
         Err(e) => BenchmarkResult::failure(
             test_name,
