@@ -128,7 +128,7 @@ impl BridgeBlock {
 }
 
 /// Category of extracted fact for better organization and retrieval
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub enum FactCategory {
     /// Definitions of terms or concepts
     Definition,
@@ -216,6 +216,60 @@ impl FactRecord {
         fact.category = category;
         fact
     }
+
+    pub fn fingerprint(&self) -> String {
+        fact_fingerprint(
+            self.category,
+            &self.fact_key,
+            &self.fact_value,
+            self.agent_id,
+        )
+    }
+}
+
+pub(crate) fn fact_fingerprint(
+    category: FactCategory,
+    fact_key: &str,
+    fact_value: &str,
+    agent_id: Option<Uuid>,
+) -> String {
+    let category = category.as_str().to_ascii_lowercase();
+    let key = normalize_fingerprint_component(fact_key);
+    let value = normalize_fingerprint_component(fact_value);
+    let agent = agent_id.map(|id| id.to_string()).unwrap_or_default();
+
+    format!("{category}|{agent}|{key}|{value}")
+}
+
+fn normalize_fingerprint_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut last_was_space = false;
+
+    for ch in input.trim().chars() {
+        let is_space = ch.is_whitespace();
+        if is_space {
+            if !last_was_space && !out.is_empty() {
+                out.push(' ');
+            }
+            last_was_space = true;
+            continue;
+        }
+
+        last_was_space = false;
+
+        for lower in ch.to_lowercase() {
+            if lower.is_alphanumeric() || matches!(lower, '-' | '_' | '.' | ':' | '/' | '@' | '=') {
+                out.push(lower);
+            } else if !out.ends_with(' ') && !out.is_empty() {
+                out.push(' ');
+                last_was_space = true;
+            }
+        }
+    }
+
+    out.trim()
+        .trim_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\''))
+        .to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

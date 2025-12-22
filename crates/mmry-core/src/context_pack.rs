@@ -274,8 +274,11 @@ mod tests {
                 owner,
                 "persona",
                 "You are helpful.".to_string(),
-                owner,
-                None,
+                crate::profile_blocks::ProfileBlockWriteContext {
+                    scope: crate::profile_blocks::ProfileBlockScope::Global,
+                    actor_id: owner,
+                    span_id: None,
+                },
             )
             .await?;
 

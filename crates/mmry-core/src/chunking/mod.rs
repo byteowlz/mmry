@@ -2,6 +2,9 @@ use crate::config::ChunkingConfig;
 use crate::memory::ChunkMethod;
 use crate::memory::Memory;
 use crate::Result;
+use std::collections::HashSet;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 use unicode_segmentation::UnicodeSegmentation;
@@ -73,26 +76,40 @@ impl Chunker {
         // Try paragraph splitting (double newline first)
         if let Ok(chunks) = self.chunk_by_paragraphs(text, "\n\n") {
             if !chunks.is_empty() {
-                return Ok(chunks);
+                return Ok(self.post_process_chunks(chunks));
             }
         }
 
         // Fall back to single newline
         if let Ok(chunks) = self.chunk_by_paragraphs(text, "\n") {
             if !chunks.is_empty() {
-                return Ok(chunks);
+                return Ok(self.post_process_chunks(chunks));
             }
         }
 
         // Fall back to sentences
         if let Ok(chunks) = self.chunk_by_sentences(text) {
             if !chunks.is_empty() {
-                return Ok(chunks);
+                return Ok(self.post_process_chunks(chunks));
             }
         }
 
         // Final fallback to words
-        self.chunk_by_words(text)
+        Ok(self.post_process_chunks(self.chunk_by_words(text)?))
+    }
+
+    fn post_process_chunks(&self, chunks: Vec<TextChunk>) -> Vec<TextChunk> {
+        let mut chunks = self.coalesce_small_chunks(chunks);
+
+        if self.config.dedupe_chunks && chunks.len() > 1 {
+            chunks = self.dedupe_chunks(chunks);
+        }
+
+        if self.config.overlap_tokens > 0 && chunks.len() > 1 {
+            chunks = self.apply_overlap(chunks);
+        }
+
+        chunks
     }
 
     /// Split by paragraphs with configurable separator
@@ -160,11 +177,6 @@ impl Chunker {
             });
         }
 
-        // Apply overlap if configured
-        if self.config.overlap_tokens > 0 && chunks.len() > 1 {
-            chunks = self.apply_overlap(chunks);
-        }
-
         Ok(chunks)
     }
 
@@ -226,10 +238,6 @@ impl Chunker {
             });
         }
 
-        if self.config.overlap_tokens > 0 && chunks.len() > 1 {
-            chunks = self.apply_overlap(chunks);
-        }
-
         Ok(chunks)
     }
 
@@ -265,11 +273,115 @@ impl Chunker {
             i = end;
         }
 
-        if self.config.overlap_tokens > 0 && chunks.len() > 1 {
-            chunks = self.apply_overlap(chunks);
+        Ok(chunks)
+    }
+
+    fn coalesce_small_chunks(&self, chunks: Vec<TextChunk>) -> Vec<TextChunk> {
+        if chunks.len() < 2 || self.config.min_chunk_tokens == 0 {
+            return self.reindex(chunks);
         }
 
-        Ok(chunks)
+        let min_tokens = self.config.min_chunk_tokens;
+        let max_tokens = self.config.max_chunk_tokens;
+
+        let mut out: Vec<TextChunk> = Vec::new();
+        let mut acc_content = String::new();
+        let mut acc_method = ChunkMethod::None;
+        let mut acc_tokens = 0usize;
+
+        for chunk in chunks {
+            let chunk_tokens = self.count_tokens(&chunk.content);
+
+            if acc_content.is_empty() {
+                acc_method = chunk.method.clone();
+                acc_content.push_str(chunk.content.trim());
+                acc_tokens = chunk_tokens;
+                continue;
+            }
+
+            let would_exceed_max = acc_tokens.saturating_add(chunk_tokens) > max_tokens;
+
+            if would_exceed_max {
+                out.push(TextChunk {
+                    content: acc_content.trim().to_string(),
+                    method: acc_method,
+                    index: 0,
+                });
+
+                acc_method = chunk.method.clone();
+                acc_content = chunk.content;
+                acc_tokens = chunk_tokens;
+                continue;
+            }
+
+            if !acc_content.ends_with('\n') {
+                acc_content.push('\n');
+            }
+            acc_content.push('\n');
+            acc_content.push_str(chunk.content.trim());
+            acc_tokens = self.count_tokens(&acc_content);
+        }
+
+        if !acc_content.trim().is_empty() {
+            out.push(TextChunk {
+                content: acc_content.trim().to_string(),
+                method: acc_method,
+                index: 0,
+            });
+        }
+
+        // If the last chunk is still too small, merge it into the previous one when possible.
+        if out.len() >= 2 && self.count_tokens(&out[out.len() - 1].content) < min_tokens {
+            let last = out.pop().expect("len >= 2");
+            let prev = out.last_mut().expect("len >= 1");
+            let merged = format!("{}\n\n{}", prev.content.trim(), last.content.trim());
+            if self.count_tokens(&merged) <= max_tokens {
+                prev.content = merged;
+            } else {
+                out.push(last);
+            }
+        }
+
+        self.reindex(out)
+    }
+
+    fn dedupe_chunks(&self, chunks: Vec<TextChunk>) -> Vec<TextChunk> {
+        let threshold = self.config.dedupe_chunk_threshold.clamp(0.0, 1.0);
+        if threshold <= 0.0 {
+            return self.reindex(chunks);
+        }
+
+        let mut kept_chunks: Vec<TextChunk> = Vec::new();
+        let mut kept_sets: Vec<HashSet<u64>> = Vec::new();
+
+        for chunk in chunks {
+            let token_set = dedupe_token_set(&chunk.content);
+            if token_set.is_empty() {
+                continue;
+            }
+
+            let mut is_dup = false;
+            for existing in &kept_sets {
+                if jaccard_similarity(existing, &token_set) >= threshold {
+                    is_dup = true;
+                    break;
+                }
+            }
+
+            if !is_dup {
+                kept_chunks.push(chunk);
+                kept_sets.push(token_set);
+            }
+        }
+
+        self.reindex(kept_chunks)
+    }
+
+    fn reindex(&self, mut chunks: Vec<TextChunk>) -> Vec<TextChunk> {
+        for (i, chunk) in chunks.iter_mut().enumerate() {
+            chunk.index = i;
+        }
+        chunks
     }
 
     /// Apply overlap between chunks
@@ -359,6 +471,44 @@ impl Chunker {
     }
 }
 
+fn dedupe_token_set(text: &str) -> HashSet<u64> {
+    let mut set = HashSet::new();
+    for token in text.split_whitespace() {
+        let normalized = token
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        if normalized.len() < 3 {
+            continue;
+        }
+        set.insert(stable_hash(&normalized));
+    }
+    set
+}
+
+fn stable_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn jaccard_similarity(a: &HashSet<u64>, b: &HashSet<u64>) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+
+    let mut intersection = 0usize;
+    for item in small {
+        if large.contains(item) {
+            intersection += 1;
+        }
+    }
+
+    let union = a.len() + b.len() - intersection;
+    (intersection as f32) / (union as f32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,7 +524,7 @@ mod tests {
             paragraph_separator: "\n\n".to_string(),
             embed_metadata: true,
             metadata_weight: 0.1,
-            dedupe_chunks: false,
+            dedupe_chunks: true,
             dedupe_chunk_threshold: 0.98,
         }
     }
@@ -411,6 +561,47 @@ mod tests {
 
         let chunks = chunker.chunk_text(text).unwrap();
         assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_coalesces_small_chunks_up_to_min_tokens() {
+        let mut config = test_config();
+        config.overlap_tokens = 0;
+        config.max_chunk_tokens = 50;
+        config.min_chunk_tokens = 10;
+        config.dedupe_chunks = false;
+
+        let chunker = Chunker::new(config);
+        let text = "a b c d e\n\nf g h i j\n\nk l m n o\n\np q r s t";
+
+        let chunks = chunker.chunk_text(text).unwrap();
+        assert!(chunks.len() <= 2);
+        if chunks.len() > 1 {
+            assert!(chunker.count_tokens(&chunks[0].content) >= 10);
+            assert!(chunker.count_tokens(&chunks[1].content) >= 10);
+        }
+    }
+
+    #[test]
+    fn test_dedupe_chunks_drops_repeated_sections() {
+        let mut config = test_config();
+        config.overlap_tokens = 0;
+        config.max_chunk_tokens = 20;
+        config.min_chunk_tokens = 2;
+        config.dedupe_chunks = true;
+        config.dedupe_chunk_threshold = 0.99;
+
+        let chunker = Chunker::new(config);
+        let repeated = "Disclaimer: This document is confidential and proprietary.\n\n";
+        let text = format!("{repeated}{repeated}Main content starts here.");
+
+        let chunks = chunker.chunk_text(&text).unwrap();
+        assert!(chunks.len() >= 2);
+        let disclaimer_chunks = chunks
+            .iter()
+            .filter(|c| c.content.contains("confidential and proprietary"))
+            .count();
+        assert_eq!(disclaimer_chunks, 1);
     }
 
     #[test]

@@ -503,19 +503,35 @@ pub async fn list_bridge_blocks(pool: &SqlitePool, limit: i64) -> crate::Result<
 }
 
 pub async fn upsert_fact(pool: &SqlitePool, fact: &FactRecord) -> crate::Result<()> {
+    let fingerprint = fact.fingerprint();
     sqlx::query(
         r#"
-        INSERT INTO facts (id, fact_key, fact_value, category, evidence_snippet, source_span, turn_id, source_chunk_id, source_paragraph_id, observed_at, recency_score, metadata, agent_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
+        INSERT INTO facts (
+            id,
+            fact_key,
+            fact_value,
+            category,
+            evidence_snippet,
+            source_span,
+            turn_id,
+            source_chunk_id,
+            source_paragraph_id,
+            observed_at,
+            recency_score,
+            metadata,
+            agent_id,
+            fact_fingerprint
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fact_fingerprint) DO UPDATE SET
             fact_key = excluded.fact_key,
             fact_value = excluded.fact_value,
             category = excluded.category,
-            evidence_snippet = excluded.evidence_snippet,
-            source_span = excluded.source_span,
-            turn_id = excluded.turn_id,
-            source_chunk_id = excluded.source_chunk_id,
-            source_paragraph_id = excluded.source_paragraph_id,
+            evidence_snippet = COALESCE(facts.evidence_snippet, excluded.evidence_snippet),
+            source_span = COALESCE(facts.source_span, excluded.source_span),
+            turn_id = COALESCE(facts.turn_id, excluded.turn_id),
+            source_chunk_id = COALESCE(facts.source_chunk_id, excluded.source_chunk_id),
+            source_paragraph_id = COALESCE(facts.source_paragraph_id, excluded.source_paragraph_id),
             observed_at = excluded.observed_at,
             recency_score = excluded.recency_score,
             metadata = excluded.metadata,
@@ -535,6 +551,7 @@ pub async fn upsert_fact(pool: &SqlitePool, fact: &FactRecord) -> crate::Result<
     .bind(fact.recency_score)
     .bind(fact.metadata.to_string())
     .bind(fact.agent_id.map(|id| id.to_string()))
+    .bind(fingerprint)
     .execute(pool)
     .await?;
 

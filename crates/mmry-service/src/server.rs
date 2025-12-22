@@ -34,6 +34,8 @@ use mmry_core::hmlr::prompts::MemoryCandidate;
 use mmry_core::memory::Memory;
 use mmry_core::profile_blocks::ProfileBlock;
 use mmry_core::profile_blocks::ProfileBlockPatchOp;
+use mmry_core::profile_blocks::ProfileBlockScope;
+use mmry_core::profile_blocks::ProfileBlockWriteContext;
 use mmry_core::profile_blocks::ProfileBlocksService;
 use mmry_core::reranker::RerankScore;
 use mmry_core::search::SearchService;
@@ -279,6 +281,8 @@ struct ProfileBlocksListRequest {
     user_id: String,
     #[serde(default)]
     store: Option<String>,
+    #[serde(default)]
+    scope: Option<ProfileBlockScope>,
 }
 
 #[derive(Debug, Serialize)]
@@ -290,6 +294,8 @@ struct ProfileBlocksListResponse {
 struct ProfileBlocksGetRequest {
     user_id: String,
     block: String,
+    #[serde(default)]
+    scope: Option<ProfileBlockScope>,
     #[serde(default)]
     store: Option<String>,
 }
@@ -304,6 +310,8 @@ struct ProfileBlocksSetRequest {
     user_id: String,
     block: String,
     content: String,
+    #[serde(default)]
+    scope: Option<ProfileBlockScope>,
     #[serde(default)]
     actor_id: Option<String>,
     #[serde(default)]
@@ -322,6 +330,8 @@ struct ProfileBlocksPatchRequest {
     user_id: String,
     block: String,
     ops: Vec<ProfileBlockPatchOp>,
+    #[serde(default)]
+    scope: Option<ProfileBlockScope>,
     #[serde(default)]
     actor_id: Option<String>,
     #[serde(default)]
@@ -1506,10 +1516,14 @@ async fn profile_blocks_list_handler(
     let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
 
     let svc = ProfileBlocksService::from_config(&app_state.state.config);
-    let blocks = svc
+    let mut blocks = svc
         .list_blocks(&pool, user_id)
         .await
         .map_err(|e| ApiError::internal(format!("Failed to list profile blocks: {e}")))?;
+
+    if let Some(scope) = payload.scope {
+        blocks.retain(|b| b.scope == scope);
+    }
 
     if let Some(db) = db_guard {
         db.close().await;
@@ -1533,8 +1547,9 @@ async fn profile_blocks_get_handler(
     let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
 
     let svc = ProfileBlocksService::from_config(&app_state.state.config);
+    let scope = payload.scope.unwrap_or(ProfileBlockScope::Project);
     let block = svc
-        .get_block(&pool, user_id, &payload.block)
+        .get_block(&pool, user_id, &payload.block, scope)
         .await
         .map_err(|e| ApiError::internal(format!("Failed to get profile block: {e}")))?;
 
@@ -1567,14 +1582,18 @@ async fn profile_blocks_set_handler(
     let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
 
     let svc = ProfileBlocksService::from_config(&app_state.state.config);
+    let scope = payload.scope.unwrap_or(ProfileBlockScope::Project);
     let block = svc
         .set_block(
             &pool,
             user_id,
             &payload.block,
             payload.content,
-            actor_id,
-            payload.span_id,
+            ProfileBlockWriteContext {
+                scope,
+                actor_id,
+                span_id: payload.span_id,
+            },
         )
         .await
         .map_err(|e| ApiError::internal(format!("Failed to set profile block: {e}")))?;
@@ -1608,14 +1627,18 @@ async fn profile_blocks_patch_handler(
     let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
 
     let svc = ProfileBlocksService::from_config(&app_state.state.config);
+    let scope = payload.scope.unwrap_or(ProfileBlockScope::Project);
     let block = svc
         .patch_block(
             &pool,
             user_id,
             &payload.block,
             payload.ops,
-            actor_id,
-            payload.span_id,
+            ProfileBlockWriteContext {
+                scope,
+                actor_id,
+                span_id: payload.span_id,
+            },
         )
         .await
         .map_err(|e| ApiError::internal(format!("Failed to patch profile block: {e}")))?;
@@ -2304,6 +2327,7 @@ mod tests {
                 user_id: user_id.to_string(),
                 block: "persona".to_string(),
                 content: "line1\nline2".to_string(),
+                scope: Some(ProfileBlockScope::Global),
                 actor_id: None,
                 span_id: None,
                 store: None,
@@ -2314,6 +2338,7 @@ mod tests {
 
         assert_eq!(set_resp.block.name, "persona");
         assert_eq!(set_resp.block.content, "line1\nline2");
+        assert_eq!(set_resp.block.scope, ProfileBlockScope::Global);
 
         let get_resp = profile_blocks_get_handler(
             AxumState(external_state.clone()),
@@ -2321,6 +2346,7 @@ mod tests {
             Json(ProfileBlocksGetRequest {
                 user_id: user_id.to_string(),
                 block: "persona".to_string(),
+                scope: Some(ProfileBlockScope::Global),
                 store: None,
             }),
         )
@@ -2337,6 +2363,7 @@ mod tests {
             Json(ProfileBlocksListRequest {
                 user_id: user_id.to_string(),
                 store: None,
+                scope: None,
             }),
         )
         .await
@@ -2353,6 +2380,7 @@ mod tests {
                     before_line: 2,
                     text: "inserted".to_string(),
                 }],
+                scope: Some(ProfileBlockScope::Global),
                 actor_id: None,
                 span_id: None,
                 store: None,

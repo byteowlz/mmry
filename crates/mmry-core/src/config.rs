@@ -126,6 +126,8 @@ pub struct Config {
     pub search: SearchConfig,
     pub memory: MemoryConfig,
     pub chunking: ChunkingConfig,
+    #[serde(default)]
+    pub ingest: IngestConfig,
     pub entities: EntitiesConfig,
     #[serde(default)]
     pub profile_blocks: ProfileBlocksConfig,
@@ -283,6 +285,19 @@ pub struct ChunkingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+pub struct IngestConfig {
+    /// Optional: use `ingestr` to convert non-text files to Markdown for directory ingestion
+    pub ingestr_enabled: bool,
+    /// Path to `ingestr` binary (or just `ingestr` if on PATH)
+    pub ingestr_bin: PathBuf,
+    /// Optional directory to store converted Markdown outputs (if unset, uses a temp directory)
+    pub ingestr_output_dir: Option<PathBuf>,
+    /// Timeout for ingestr conversion (seconds)
+    pub ingestr_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 pub struct EntitiesConfig {
     pub extract_enabled: bool,
     pub auto_link: bool,
@@ -345,6 +360,14 @@ pub struct LstIntegrationConfig {
 pub struct ProfileBlocksConfig {
     /// Maximum characters allowed in a single profile block
     pub max_block_chars: usize,
+    /// Optional: use `ingestr` to convert non-text files to Markdown when ingesting directories
+    pub ingestr_enabled: bool,
+    /// Path to `ingestr` binary (or just `ingestr` if on PATH)
+    pub ingestr_bin: PathBuf,
+    /// Optional directory to store converted Markdown outputs (if unset, uses a temp directory)
+    pub ingestr_output_dir: Option<PathBuf>,
+    /// Timeout for ingestr conversion (seconds)
+    pub ingestr_timeout_seconds: u64,
 }
 
 impl Default for DatabaseConfig {
@@ -416,6 +439,17 @@ impl Default for ChunkingConfig {
             metadata_weight: 0.1,
             dedupe_chunks: false,
             dedupe_chunk_threshold: 0.98,
+        }
+    }
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            ingestr_enabled: false,
+            ingestr_bin: PathBuf::from("ingestr"),
+            ingestr_output_dir: None,
+            ingestr_timeout_seconds: 300,
         }
     }
 }
@@ -602,6 +636,10 @@ impl Default for ProfileBlocksConfig {
     fn default() -> Self {
         Self {
             max_block_chars: 16_000,
+            ingestr_enabled: false,
+            ingestr_bin: PathBuf::from("ingestr"),
+            ingestr_output_dir: None,
+            ingestr_timeout_seconds: 300,
         }
     }
 }
@@ -692,6 +730,16 @@ impl Config {
 
         if let Some(ref data_dir) = self.integrations.lst.data_dir {
             self.integrations.lst.data_dir = Some(expand_path(data_dir));
+        }
+
+        self.ingest.ingestr_bin = expand_path(&self.ingest.ingestr_bin);
+        if let Some(ref dir) = self.ingest.ingestr_output_dir {
+            self.ingest.ingestr_output_dir = Some(expand_path(dir));
+        }
+
+        self.profile_blocks.ingestr_bin = expand_path(&self.profile_blocks.ingestr_bin);
+        if let Some(ref dir) = self.profile_blocks.ingestr_output_dir {
+            self.profile_blocks.ingestr_output_dir = Some(expand_path(dir));
         }
     }
 

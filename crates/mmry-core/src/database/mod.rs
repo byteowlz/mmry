@@ -2,6 +2,8 @@ pub mod graph_ops;
 pub mod operations;
 pub mod schema;
 
+use crate::agents::fact_fingerprint;
+use crate::agents::FactCategory;
 use sqlite_vec::sqlite3_vec_init;
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
@@ -462,12 +464,17 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 fact_key TEXT NOT NULL,
                 fact_value TEXT NOT NULL,
+                category TEXT DEFAULT 'General',
+                evidence_snippet TEXT,
                 source_span TEXT,
                 turn_id TEXT,
+                source_chunk_id TEXT,
+                source_paragraph_id TEXT,
                 observed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 recency_score REAL DEFAULT 1.0,
                 metadata JSON DEFAULT '{}',
-                agent_id TEXT REFERENCES agents(id)
+                agent_id TEXT REFERENCES agents(id),
+                fact_fingerprint TEXT
             )
             "#,
         )
@@ -510,6 +517,114 @@ impl Database {
                 .await?;
             tracing::info!("Fact category and provenance columns added");
         }
+
+        // Add fingerprint column if missing (from migration 20251222000000)
+        let facts_has_fingerprint: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('facts') WHERE name='fact_fingerprint'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !facts_has_fingerprint {
+            tracing::info!("Adding fact_fingerprint column to facts table...");
+            sqlx::query("ALTER TABLE facts ADD COLUMN fact_fingerprint TEXT")
+                .execute(pool)
+                .await?;
+            tracing::info!("fact_fingerprint column added");
+        }
+
+        // Backfill fingerprints and merge duplicates before enforcing uniqueness.
+        let needs_fingerprint_backfill: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM facts WHERE fact_fingerprint IS NULL OR fact_fingerprint = ''",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if needs_fingerprint_backfill {
+            tracing::info!("Backfilling fact_fingerprint for existing facts...");
+
+            let mut tx = pool.begin().await?;
+            let rows = sqlx::query(
+                r#"
+                SELECT id, fact_key, fact_value, category, agent_id
+                FROM facts
+                "#,
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+
+            for row in rows {
+                let id: String = row.try_get("id")?;
+                let fact_key: String = row.try_get("fact_key")?;
+                let fact_value: String = row.try_get("fact_value")?;
+                let category_raw: String = row
+                    .try_get("category")
+                    .unwrap_or_else(|_| "General".to_string());
+                let agent_id_raw: Option<String> = row.try_get("agent_id").ok().flatten();
+
+                let agent_id = agent_id_raw.and_then(|s| Uuid::parse_str(&s).ok());
+                let category = FactCategory::parse(&category_raw);
+                let fingerprint = fact_fingerprint(category, &fact_key, &fact_value, agent_id);
+
+                sqlx::query("UPDATE facts SET fact_fingerprint = ? WHERE id = ?")
+                    .bind(fingerprint)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+
+            // Merge duplicate fingerprints (keep most recent observed_at)
+            let dup_rows = sqlx::query(
+                r#"
+                SELECT fact_fingerprint
+                FROM facts
+                WHERE fact_fingerprint IS NOT NULL AND fact_fingerprint <> ''
+                GROUP BY fact_fingerprint
+                HAVING COUNT(*) > 1
+                "#,
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+
+            for row in dup_rows {
+                let fingerprint: String = row.try_get("fact_fingerprint")?;
+                let keep_id: Option<String> = sqlx::query_scalar(
+                    r#"
+                    SELECT id
+                    FROM facts
+                    WHERE fact_fingerprint = ?
+                    ORDER BY observed_at DESC
+                    LIMIT 1
+                    "#,
+                )
+                .bind(&fingerprint)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+                if let Some(keep_id) = keep_id {
+                    sqlx::query("DELETE FROM facts WHERE fact_fingerprint = ? AND id <> ?")
+                        .bind(&fingerprint)
+                        .bind(keep_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+
+            tx.commit().await?;
+            tracing::info!("fact_fingerprint backfill complete");
+        }
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_fingerprint ON facts(fact_fingerprint)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_chunk ON facts(source_chunk_id)")
+            .execute(pool)
+            .await?;
 
         // Add bridge block metadata columns if missing (from migration 20251212100000)
         let bridge_has_open_loops: bool = sqlx::query_scalar(
@@ -1007,6 +1122,120 @@ mod tests {
         let listed_events = operations::list_agent_events(db.pool(), 5).await?;
         assert_eq!(listed_events.len(), 1);
         assert_eq!(listed_events[0].agent_id, agent.id);
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upsert_fact_dedupes_by_fingerprint() -> crate::Result<()> {
+        use crate::agents::AgentRecord;
+        use crate::agents::FactRecord;
+
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("facts-dedupe.db");
+
+        let db = Database::init(&db_path, TEST_DIM).await?;
+
+        let agent = AgentRecord::new("tester", "sidecar");
+        operations::upsert_agent(db.pool(), &agent).await?;
+
+        let mut f1 = FactRecord::new("deadline", "Friday");
+        f1.category = FactCategory::Definition;
+        f1.agent_id = Some(agent.id);
+        operations::upsert_fact(db.pool(), &f1).await?;
+
+        let mut f2 = FactRecord::new("Deadline", "friday.");
+        f2.category = FactCategory::Definition;
+        f2.agent_id = Some(agent.id);
+        operations::upsert_fact(db.pool(), &f2).await?;
+
+        let count = operations::count_facts(db.pool()).await?;
+        assert_eq!(count, 1);
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_facts_and_merges_duplicates() -> crate::Result<()> {
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("legacy-facts.db");
+        let url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+        // Create an older schema facts table (no category/provenance/fingerprint).
+        let pool = SqlitePool::connect(&url).await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE facts (
+                id TEXT PRIMARY KEY,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                source_span TEXT,
+                turn_id TEXT,
+                observed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                recency_score REAL DEFAULT 1.0,
+                metadata JSON DEFAULT '{}',
+                agent_id TEXT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        let id1 = Uuid::new_v4().to_string();
+        let id2 = Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+            INSERT INTO facts (id, fact_key, fact_value, observed_at, recency_score, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&id1)
+        .bind("deadline")
+        .bind("Friday")
+        .bind("2025-01-01T00:00:00Z")
+        .bind(1.0_f32)
+        .bind("{}")
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO facts (id, fact_key, fact_value, observed_at, recency_score, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&id2)
+        .bind("Deadline")
+        .bind("friday.")
+        .bind("2025-02-01T00:00:00Z")
+        .bind(1.0_f32)
+        .bind("{}")
+        .execute(&pool)
+        .await?;
+
+        drop(pool);
+
+        // Init should migrate and merge duplicates.
+        let db = Database::init(&db_path, TEST_DIM).await?;
+
+        let count = operations::count_facts(db.pool()).await?;
+        assert_eq!(count, 1);
+
+        let has_fingerprint: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('facts') WHERE name='fact_fingerprint'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert!(has_fingerprint);
+
+        let idx_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='idx_facts_fingerprint'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert!(idx_exists);
 
         db.close().await;
         Ok(())

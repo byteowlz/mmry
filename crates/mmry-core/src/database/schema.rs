@@ -79,12 +79,17 @@ CREATE TABLE IF NOT EXISTS facts (
     id TEXT PRIMARY KEY,
     fact_key TEXT NOT NULL,
     fact_value TEXT NOT NULL,
+    category TEXT DEFAULT 'General',
+    evidence_snippet TEXT,
     source_span TEXT,
     turn_id TEXT,
+    source_chunk_id TEXT,
+    source_paragraph_id TEXT,
     observed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     recency_score REAL DEFAULT 1.0,
     metadata JSON DEFAULT '{}',
-    agent_id TEXT REFERENCES agents(id)
+    agent_id TEXT REFERENCES agents(id),
+    fact_fingerprint TEXT
 );
 
 CREATE TABLE IF NOT EXISTS user_profiles (

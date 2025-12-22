@@ -25,6 +25,8 @@ use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
 use mmry_core::profile_blocks::ProfileBlockPatchOp;
+use mmry_core::profile_blocks::ProfileBlockScope;
+use mmry_core::profile_blocks::ProfileBlockWriteContext;
 use mmry_core::profile_blocks::ProfileBlocksService;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
@@ -144,12 +146,16 @@ struct ProfileBlocksListArgs {
     user_id: String,
     #[serde(default)]
     store: Option<String>,
+    #[serde(default)]
+    scope: Option<ProfileBlockScope>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ProfileBlocksGetArgs {
     user_id: String,
     block: String,
+    #[serde(default)]
+    scope: Option<ProfileBlockScope>,
     #[serde(default)]
     store: Option<String>,
 }
@@ -159,6 +165,8 @@ struct ProfileBlocksSetArgs {
     user_id: String,
     block: String,
     content: String,
+    #[serde(default)]
+    scope: Option<ProfileBlockScope>,
     #[serde(default)]
     actor_id: Option<String>,
     #[serde(default)]
@@ -172,6 +180,8 @@ struct ProfileBlocksPatchArgs {
     user_id: String,
     block: String,
     ops: Vec<ProfileBlockPatchOp>,
+    #[serde(default)]
+    scope: Option<ProfileBlockScope>,
     #[serde(default)]
     actor_id: Option<String>,
     #[serde(default)]
@@ -660,12 +670,16 @@ impl MmryMcpRouter {
     ) -> Result<Vec<Content>, ToolError> {
         let user_id = Self::parse_uuid("user_id", &args.user_id)?;
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let blocks = self
+        let mut blocks = self
             .inner
             .profile_blocks
             .list_blocks(&pool, user_id)
             .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+
+        if let Some(scope) = args.scope {
+            blocks.retain(|b| b.scope == scope);
+        }
 
         if let Some(db) = db_guard {
             db.close().await;
@@ -686,10 +700,11 @@ impl MmryMcpRouter {
     ) -> Result<Vec<Content>, ToolError> {
         let user_id = Self::parse_uuid("user_id", &args.user_id)?;
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
+        let scope = args.scope.unwrap_or(ProfileBlockScope::Project);
         let block = self
             .inner
             .profile_blocks
-            .get_block(&pool, user_id, &args.block)
+            .get_block(&pool, user_id, &args.block, scope)
             .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
 
@@ -719,6 +734,7 @@ impl MmryMcpRouter {
             .unwrap_or(user_id);
 
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
+        let scope = args.scope.unwrap_or(ProfileBlockScope::Project);
         let block = self
             .inner
             .profile_blocks
@@ -727,8 +743,11 @@ impl MmryMcpRouter {
                 user_id,
                 &args.block,
                 args.content,
-                actor_id,
-                args.span_id,
+                ProfileBlockWriteContext {
+                    scope,
+                    actor_id,
+                    span_id: args.span_id,
+                },
             )
             .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
@@ -759,6 +778,7 @@ impl MmryMcpRouter {
             .unwrap_or(user_id);
 
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
+        let scope = args.scope.unwrap_or(ProfileBlockScope::Project);
         let block = self
             .inner
             .profile_blocks
@@ -767,8 +787,11 @@ impl MmryMcpRouter {
                 user_id,
                 &args.block,
                 args.ops,
-                actor_id,
-                args.span_id,
+                ProfileBlockWriteContext {
+                    scope,
+                    actor_id,
+                    span_id: args.span_id,
+                },
             )
             .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
@@ -1416,6 +1439,7 @@ mod tests {
                 user_id: user_id.to_string(),
                 block: "persona".to_string(),
                 content: "line1\nline2".to_string(),
+                scope: Some(ProfileBlockScope::Global),
                 actor_id: None,
                 span_id: None,
                 store: None,
@@ -1423,6 +1447,7 @@ mod tests {
             .await?;
         let set_json = extract_json(set);
         assert_eq!(set_json["block"]["name"].as_str(), Some("persona"));
+        assert_eq!(set_json["block"]["scope"].as_str(), Some("global"));
 
         let patch = router
             .tool_profile_blocks_patch(ProfileBlocksPatchArgs {
@@ -1432,6 +1457,7 @@ mod tests {
                     before_line: 2,
                     text: "inserted".to_string(),
                 }],
+                scope: Some(ProfileBlockScope::Global),
                 actor_id: None,
                 span_id: None,
                 store: None,

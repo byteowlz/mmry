@@ -3,6 +3,7 @@ use clap::Subcommand;
 use std::io::Read;
 use std::io::{self};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,7 @@ use notify::Watcher;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::mpsc;
+use tokio::process::Command;
 use walkdir::WalkDir;
 
 /// Helper to insert a key-value pair into a serde_json::Value (assumed to be an Object)
@@ -302,7 +304,22 @@ async fn handle_file_ingest(
         .map(|s| s.trim().to_lowercase())
         .collect();
 
-    let paths = collect_files(&opts.path, opts.recursive, &extensions)?;
+    let mut ingest_root = opts.path.clone();
+    let mut recursive = opts.recursive;
+    let mut extensions = extensions;
+    let mut _ingestr_output_dir = None;
+
+    if config.ingest.ingestr_enabled && ingest_root.is_dir() && !opts.dry_run {
+        let output_dir = IngestrOutputDir::new(config, &ingest_root)?;
+        run_ingestr_once(config, &ingest_root, output_dir.path()).await?;
+
+        ingest_root = output_dir.path().to_path_buf();
+        recursive = true;
+        extensions = vec!["md".to_string()];
+        _ingestr_output_dir = Some(output_dir);
+    }
+
+    let paths = collect_files(&ingest_root, recursive, &extensions)?;
 
     if paths.is_empty() {
         if opts.json {
@@ -409,7 +426,8 @@ async fn handle_watch(
         analyzer: &analyzer,
     };
 
-    let extensions: Vec<String> = opts
+    let mut watch_root = opts.path.clone();
+    let mut extensions: Vec<String> = opts
         .extensions
         .split(',')
         .map(|s| s.trim().to_lowercase())
@@ -419,9 +437,33 @@ async fn handle_watch(
         anyhow::bail!("Watch path must be a directory: {}", opts.path.display());
     }
 
+    let mut _ingestr_output_dir = None;
+    let mut _ingestr_child = None;
+
+    if config.ingest.ingestr_enabled {
+        let output_dir = IngestrOutputDir::new(config, &watch_root)?;
+        run_ingestr_once(config, &watch_root, output_dir.path()).await?;
+
+        let mut cmd = Command::new(&config.ingest.ingestr_bin);
+        cmd.arg("service")
+            .arg("run")
+            .arg("--watch-dir")
+            .arg(&watch_root)
+            .arg("--output-dir")
+            .arg(output_dir.path())
+            .arg("--disable-index")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        _ingestr_child = Some(cmd.spawn()?);
+
+        watch_root = output_dir.path().to_path_buf();
+        extensions = vec!["md".to_string()];
+        _ingestr_output_dir = Some(output_dir);
+    }
+
     // Process existing files if requested
     if opts.process_existing {
-        let paths = collect_files(&opts.path, true, &extensions)?;
+        let paths = collect_files(&watch_root, true, &extensions)?;
         if !opts.json {
             println!("Processing {} existing files...", paths.len());
         }
@@ -484,7 +526,7 @@ async fn handle_watch(
     if !opts.json {
         println!(
             "Watching {} for changes (press Ctrl+C to stop)...",
-            opts.path.display()
+            watch_root.display()
         );
     }
 
@@ -495,7 +537,7 @@ async fn handle_watch(
         let _ = tx.send(res);
     })?;
 
-    watcher.watch(&opts.path, RecursiveMode::Recursive)?;
+    watcher.watch(&watch_root, RecursiveMode::Recursive)?;
 
     loop {
         match rx.recv_timeout(debounce) {
@@ -658,6 +700,14 @@ async fn handle_stdin(
         // Create chunk memories
         let mut chunk_memories = chunker.create_memory_chunks(&parent, text_chunks);
 
+        let mut hmlr_pipeline = None;
+        let mut hmlr_creator_id = None;
+        let hmlr_query = "ingest:stdin".to_string();
+        if config.hmlr.enabled {
+            hmlr_pipeline = Some(HmlrPipeline::new(config.hmlr.clone(), analyzer.clone()));
+            hmlr_creator_id = Some(get_or_create_human_agent(db.pool(), config).await?);
+        }
+
         // Embed and insert chunks
         for chunk in &mut chunk_memories {
             let embed_text = if config.chunking.embed_metadata {
@@ -688,6 +738,12 @@ async fn handle_stdin(
 
             operations::insert_memory(db.pool(), chunk).await?;
             extract_and_link_entities(db, &ner, chunk).await?;
+
+            if let (Some(pipeline), Some(creator_id)) = (hmlr_pipeline.as_ref(), hmlr_creator_id) {
+                let context =
+                    HmlrContext::for_agent(creator_id, Some(hmlr_query.clone()), Vec::new());
+                let _ = pipeline.enrich_memory(db.pool(), chunk, context).await;
+            }
         }
 
         // Insert parent (without embedding)
@@ -865,6 +921,14 @@ async fn ingest_file(
         // Create chunk memories
         let mut chunk_memories = chunker.create_memory_chunks(&parent, text_chunks);
 
+        let mut hmlr_pipeline = None;
+        let mut hmlr_creator_id = None;
+        let hmlr_query = format!("ingest:file:{}", path.display());
+        if config.hmlr.enabled {
+            hmlr_pipeline = Some(HmlrPipeline::new(config.hmlr.clone(), analyzer.clone()));
+            hmlr_creator_id = Some(get_or_create_human_agent(db.pool(), config).await?);
+        }
+
         // Embed and insert chunks
         for chunk in &mut chunk_memories {
             let embed_text = if config.chunking.embed_metadata {
@@ -895,6 +959,12 @@ async fn ingest_file(
 
             operations::insert_memory(db.pool(), chunk).await?;
             extract_and_link_entities(db, ner, chunk).await?;
+
+            if let (Some(pipeline), Some(creator_id)) = (hmlr_pipeline.as_ref(), hmlr_creator_id) {
+                let context =
+                    HmlrContext::for_agent(creator_id, Some(hmlr_query.clone()), Vec::new());
+                let _ = pipeline.enrich_memory(db.pool(), chunk, context).await;
+            }
         }
 
         // Insert parent (without embedding)
@@ -1035,6 +1105,92 @@ fn parse_frontmatter(content: &str) -> (Option<IngestrFrontmatter>, &str) {
         }
     }
     (None, content)
+}
+
+struct IngestrOutputDir {
+    path: PathBuf,
+    cleanup: bool,
+}
+
+impl IngestrOutputDir {
+    fn new(config: &Config, source_dir: &std::path::Path) -> anyhow::Result<Self> {
+        let (path, cleanup) = if let Some(base) = &config.ingest.ingestr_output_dir {
+            let key = fnv1a64(&source_dir.to_string_lossy());
+            (base.join(format!("mmry-ingestr-{key:016x}")), false)
+        } else {
+            (
+                std::env::temp_dir().join(format!("mmry-ingestr-{}", uuid::Uuid::new_v4())),
+                true,
+            )
+        };
+
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path, cleanup })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.path.as_path()
+    }
+}
+
+impl Drop for IngestrOutputDir {
+    fn drop(&mut self) {
+        if self.cleanup {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn fnv1a64(input: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+async fn run_ingestr_once(
+    config: &Config,
+    source_dir: &std::path::Path,
+    output_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(output_dir)?;
+
+    let mut cmd = Command::new(&config.ingest.ingestr_bin);
+    cmd.arg("service")
+        .arg("run")
+        .arg("--once")
+        .arg("--watch-dir")
+        .arg(source_dir)
+        .arg("--output-dir")
+        .arg(output_dir)
+        .arg("--disable-index")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let timeout = Duration::from_secs(config.ingest.ingestr_timeout_seconds);
+    let output = tokio::time::timeout(timeout, cmd.output())
+        .await
+        .map_err(|_| anyhow::anyhow!("ingestr timed out after {}s", timeout.as_secs()))??;
+
+    if !output.status.success() {
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        stdout.truncate(8_000);
+        stderr.truncate(8_000);
+        anyhow::bail!(
+            "ingestr failed (status {:?})\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            stdout,
+            stderr
+        );
+    }
+
+    Ok(())
 }
 
 fn parse_memory_type(explicit: Option<&str>, content: &str) -> MemoryType {
