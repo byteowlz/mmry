@@ -26,16 +26,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux
+          # Linux x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
             features: ""
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-            cross: true
-            features: ""
+          # Linux ARM64 (disabled: needs Cross.toml with OpenSSL config)
+          # - target: aarch64-unknown-linux-gnu
+          #   os: ubuntu-latest
+          #   archive: tar.gz
+          #   cross: true
+          #   features: ""
           # macOS Intel
           - target: x86_64-apple-darwin
             os: macos-13
@@ -46,11 +47,11 @@ jobs:
             os: macos-14
             archive: tar.gz
             features: "--features coreml"
-          # Windows
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-            features: ""
+          # Windows (disabled: C runtime mismatch between esaxx-rs and ort-sys)
+          # - target: x86_64-pc-windows-msvc
+          #   os: windows-latest
+          #   archive: zip
+          #   features: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -126,7 +127,10 @@ jobs:
         run: |
           cd artifacts
           find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} . \;
-          sha256sum *.tar.gz *.zip > checksums.txt
+          sha256sum *.tar.gz > checksums.txt
+          if ls *.zip 1>/dev/null 2>&1; then
+            sha256sum *.zip >> checksums.txt
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -135,7 +139,6 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.tar.gz
-            artifacts/*.zip
             artifacts/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -208,20 +211,20 @@ jobs:
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_message: "Update to ${{ env.RELEASE_TAG }}"
 
-  publish-scoop:
-    name: Publish to Scoop
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Update Scoop bucket
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          repository: byteowlz/scoop-bucket
-          event-type: update-manifest
-          client-payload: |
-            {
-              "name": "mmry",
-              "version": "${{ env.RELEASE_TAG }}",
-              "repo": "${{ github.repository }}"
-            }
+  # publish-scoop:
+  #   name: Publish to Scoop
+  #   needs: release
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Update Scoop bucket
+  #       uses: peter-evans/repository-dispatch@v3
+  #       with:
+  #         token: ${{ secrets.TAP_GITHUB_TOKEN }}
+  #         repository: byteowlz/scoop-bucket
+  #         event-type: update-manifest
+  #         client-payload: |
+  #           {
+  #             "name": "mmry",
+  #             "version": "${{ env.RELEASE_TAG }}",
+  #             "repo": "${{ github.repository }}"
+  #           }
