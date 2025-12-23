@@ -22,6 +22,7 @@ use mmry_core::conversation::SummarizePruneOptions;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::guardrails::GuardrailsAccumulator;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
 use mmry_core::profile_blocks::ProfileBlockPatchOp;
@@ -387,6 +388,10 @@ impl MmryMcpRouter {
             memory.sparse_embedding = None;
         }
 
+        let mut guard = GuardrailsAccumulator::new(&self.inner.config.guardrails);
+        let results = guard.filter_memories(results);
+        let guardrails = guard.summary();
+
         if let Some(db) = db_guard {
             db.close().await;
         }
@@ -396,6 +401,7 @@ impl MmryMcpRouter {
             json!({
                 "store": store,
                 "memories": results,
+                "guardrails": guardrails,
             }),
         )
     }
@@ -849,6 +855,7 @@ impl MmryMcpRouter {
                 span_id: args.span_id.as_deref(),
                 budgets: args.budgets.unwrap_or_default(),
                 redact_secrets: args.redact_secrets.unwrap_or(false),
+                guardrails: self.inner.config.guardrails.clone(),
             },
         )
         .await

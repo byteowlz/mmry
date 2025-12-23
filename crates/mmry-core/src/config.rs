@@ -112,6 +112,33 @@ pub enum SearchMode {
     SparseEmbedding,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum GuardPatternKind {
+    #[default]
+    Literal,
+    Regex,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GuardPattern {
+    pub pattern: String,
+    #[serde(default)]
+    pub kind: GuardPatternKind,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct GuardrailsConfig {
+    pub enabled: bool,
+    pub patterns: Vec<GuardPattern>,
+    pub max_patterns: usize,
+    pub max_pattern_length: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[derive(Default)]
@@ -124,6 +151,8 @@ pub struct Config {
     pub embeddings: EmbeddingsConfig,
     pub sparse_embeddings: SparseEmbeddingsConfig,
     pub search: SearchConfig,
+    #[serde(default)]
+    pub guardrails: GuardrailsConfig,
     pub memory: MemoryConfig,
     pub chunking: ChunkingConfig,
     #[serde(default)]
@@ -411,6 +440,17 @@ impl Default for SparseEmbeddingsConfig {
         Self {
             enabled: false,
             model: "Qdrant/Splade_PP_en_v1".to_string(),
+        }
+    }
+}
+
+impl Default for GuardrailsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            patterns: Vec::new(),
+            max_patterns: 200,
+            max_pattern_length: 512,
         }
     }
 }
@@ -751,6 +791,17 @@ impl Config {
     /// Get the database path for the default store
     pub fn default_store_path(&self) -> PathBuf {
         self.store_path(&self.stores.default)
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> crate::Result<()> {
+        let config_path = expand_path(path);
+        let schema_path = config_path
+            .parent()
+            .map(|dir| dir.join(SCHEMA_FILENAME))
+            .ok_or_else(|| {
+                crate::Error::Config("Could not determine directory for config file".to_string())
+            })?;
+        write_config_file(self, &config_path, &schema_path, true)
     }
 
     pub fn save(&self) -> crate::Result<()> {

@@ -87,6 +87,9 @@ enum Commands {
     /// HMLR enrichment operations (backfill, stats)
     Hmlr(commands::hmlr::HmlrCmd),
 
+    /// Manage guardrails
+    Guard(commands::guard::GuardCmd),
+
     /// Ingest files and directories into memories
     Ingest(commands::ingest::IngestCmd),
 
@@ -134,7 +137,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Load config
     tracing::debug!("Loading config");
-    let config = Config::load_with_path(cli.config.clone())?;
+    let mut config = Config::load_with_path(cli.config.clone())?;
     tracing::debug!("Config loaded");
 
     // Handle commands that don't need database initialization
@@ -146,6 +149,9 @@ async fn async_main() -> anyhow::Result<()> {
         Commands::Stores(cmd) => return commands::stores::handle(cmd, &config).await,
         Commands::Export(cmd) => {
             return commands::export::handle(cmd, &config, cli.store.as_deref()).await
+        }
+        Commands::Guard(cmd) => {
+            return commands::guard::handle(cmd, &mut config, cli.config.clone()).await
         }
         other => other,
     };
@@ -160,7 +166,7 @@ async fn async_main() -> anyhow::Result<()> {
     if config.service.enabled {
         if let Commands::Search(cmd) = &command {
             if !cmd.uses_federation() {
-                match commands::search::handle_remote(cmd.clone(), &config).await {
+                match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
                     Ok(()) => return Ok(()),
                     Err(e) => tracing::warn!("Service search failed, falling back to local: {}", e),
                 }
@@ -244,6 +250,7 @@ async fn async_main() -> anyhow::Result<()> {
         | Commands::Rerankers(_)
         | Commands::Init(_)
         | Commands::Service(_)
+        | Commands::Guard(_)
         | Commands::Stores(_)
         | Commands::Export(_) => {
             unreachable!()

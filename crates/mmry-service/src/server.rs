@@ -30,6 +30,8 @@ use mmry_core::conversation::ConversationTurn;
 use mmry_core::conversation::SummarizePruneOptions;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
+use mmry_core::guardrails::GuardrailsAccumulator;
+use mmry_core::guardrails::GuardrailsSummary;
 use mmry_core::hmlr::prompts::MemoryCandidate;
 use mmry_core::memory::Memory;
 use mmry_core::profile_blocks::ProfileBlock;
@@ -274,6 +276,7 @@ struct FederationSearchRequest {
 #[derive(Debug, Serialize)]
 struct FederationSearchResponse {
     memories: Vec<Memory>,
+    guardrails: GuardrailsSummary,
 }
 
 #[derive(Debug, Deserialize)]
@@ -644,6 +647,11 @@ impl EmbeddingService for EmbeddingServiceImpl {
     ) -> Result<Response<SearchResponse>, Status> {
         self.state.record_activity().await;
         let req = request.into_inner();
+        let store = req.store.trim();
+        if !store.is_empty() {
+            mmry_core::stores::validate_store_name(store)
+                .map_err(|e| Status::invalid_argument(format!("Invalid store name: {e}")))?;
+        }
 
         let mode = match req.mode {
             0 => mmry_core::config::SearchMode::Hybrid,
@@ -655,8 +663,20 @@ impl EmbeddingService for EmbeddingServiceImpl {
             _ => mmry_core::config::SearchMode::Hybrid,
         };
 
+        let mut db_guard: Option<Database> = None;
+        let pool = if store.is_empty() || store == self.state.config.stores.default {
+            self.state.db.pool().clone()
+        } else {
+            let db = Database::init_store(&self.state.config, Some(store))
+                .await
+                .map_err(|e| Status::internal(format!("Failed to open store: {e}")))?;
+            let pool = db.pool().clone();
+            db_guard = Some(db);
+            pool
+        };
+
         let search_service = SearchService::new(
-            self.state.db.pool().clone(),
+            pool,
             self.state.search_config(),
             Arc::clone(&self.state.embeddings_wrapper),
             Arc::clone(&self.state.sparse_embeddings),
@@ -679,6 +699,10 @@ impl EmbeddingService for EmbeddingServiceImpl {
             .map_err(|e| Status::internal(format!("Search failed: {e}")))?;
 
         let results = memories.into_iter().map(memory_to_proto).collect();
+
+        if let Some(db) = db_guard {
+            db.close().await;
+        }
 
         Ok(Response::new(SearchResponse { memories: results }))
     }
@@ -1469,11 +1493,18 @@ async fn federation_search_handler(
         memory.sparse_embedding = None;
     }
 
+    let mut guard = GuardrailsAccumulator::new(&app_state.state.config.guardrails);
+    let results = guard.filter_memories(results);
+    let guardrails = guard.summary();
+
     if let Some(db) = db_guard {
         db.close().await;
     }
 
-    Ok(Json(FederationSearchResponse { memories: results }))
+    Ok(Json(FederationSearchResponse {
+        memories: results,
+        guardrails,
+    }))
 }
 
 fn parse_uuid(field: &str, raw: &str) -> Result<Uuid, ApiError> {
@@ -1710,6 +1741,7 @@ async fn context_pack_handler(
             span_id,
             budgets: payload.budgets.unwrap_or_default(),
             redact_secrets: payload.redact_secrets.unwrap_or(false),
+            guardrails: app_state.state.config.guardrails.clone(),
         },
     )
     .await
@@ -2294,6 +2326,65 @@ mod tests {
         .expect("store b search ok");
         assert_eq!(resp_b.memories.len(), 1);
         assert!(resp_b.memories[0].content.contains("beta"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grpc_search_respects_store_parameter() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.database.path = temp.path().join("memories.db");
+        config.stores.directory = temp.path().join("stores");
+        config.stores.default = "a".to_string();
+        config.embeddings.enabled = false;
+        config.sparse_embeddings.enabled = false;
+        config.service.enabled = false;
+
+        let db_a = Database::init_store(&config, Some("a"))
+            .await
+            .expect("db a");
+        let mut mem_a = mmry_core::memory::Memory::new(
+            mmry_core::memory::MemoryType::Episodic,
+            "alpha memory".to_string(),
+            "default".to_string(),
+        );
+        mem_a.importance = 5;
+        operations::insert_memory(db_a.pool(), &mem_a)
+            .await
+            .expect("insert a");
+        db_a.close().await;
+
+        let db_b = Database::init_store(&config, Some("b"))
+            .await
+            .expect("db b");
+        let mut mem_b = mmry_core::memory::Memory::new(
+            mmry_core::memory::MemoryType::Episodic,
+            "beta memory".to_string(),
+            "default".to_string(),
+        );
+        mem_b.importance = 5;
+        operations::insert_memory(db_b.pool(), &mem_b)
+            .await
+            .expect("insert b");
+        db_b.close().await;
+
+        let state = Arc::new(ServiceState::new(config).await.expect("state"));
+        let service = EmbeddingServiceImpl::new(Arc::clone(&state));
+
+        let response = service
+            .search(Request::new(SearchRequest {
+                query: "beta".to_string(),
+                limit: 10,
+                category: String::new(),
+                mode: SearchMode::Keyword as i32,
+                rerank: false,
+                store: "b".to_string(),
+            }))
+            .await
+            .expect("search ok");
+
+        let results = response.into_inner().memories;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "beta memory");
     }
 
     #[tokio::test(flavor = "multi_thread")]

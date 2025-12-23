@@ -123,6 +123,24 @@ When service mode is enabled, `mmry search` now delegates the entire search (DB 
 
 The CLI exits directly once a command finishes to sidestep an upstream fastembed/ONNX shutdown bug; the OS reclaims any leaked service resources.
 
+### gRPC API (EmbeddingService)
+
+`mmry-service` exposes a local-only gRPC API for embeddings and search.
+
+- Proto: `crates/mmry-service/proto/embeddings.proto` (package `mmry.embeddings`)
+- Service: `EmbeddingService` with `Embed`, `EmbedBatch`, `Search`
+- `SearchRequest.store` scopes search to a store (empty = default store)
+- Port is dynamic; read from `$XDG_STATE_HOME/mmry/service.port` or `~/.local/state/mmry/service.port`
+
+Example with `grpcurl`:
+
+```bash
+PORT=$(cat ~/.local/state/mmry/service.port)
+grpcurl -plaintext \
+  -d '{"query":"rust","limit":5,"mode":"KEYWORD","rerank":false,"store":"govnr"}' \
+  localhost:$PORT mmry.embeddings.EmbeddingService/Search
+```
+
 ## Optional analyzer (LLM-based enrichment)
 
 mmry can call any OpenAI-compatible API for intelligent fact extraction and routing decisions.
@@ -398,6 +416,15 @@ Other:
 - Status bar with helpful hints
 
 Built with Rust using sqlx, fastembed, and tokio. Check `AGENTS.md` if you're an AI agent working on this codebase.
+
+## Credits
+
+Inspiration and prior art:
+
+- Cloudflare Discord Agent: https://github.com/cloudflare/awesome-agents/tree/main/agents/discord-agent
+- HMLR Agentic AI Memory System: https://github.com/Sean-V-Dev/HMLR-Agentic-AI-Memory-System
+- Cass memory system: https://github.com/Dicklesworthstone/cass_memory_system
+- Letta: https://github.com/letta-ai/letta-code
 
 ## License
 

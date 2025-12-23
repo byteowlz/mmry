@@ -422,6 +422,7 @@ async fn run_context_pack_secret_redaction_scenario(
             span_id: None,
             budgets: ContextPackBudgets::default(),
             redact_secrets: true,
+            guardrails: config.guardrails.clone(),
         },
     )
     .await?;
@@ -544,6 +545,7 @@ async fn run_context_pack_budget_determinism_scenario(
             span_id: None,
             budgets: budgets.clone(),
             redact_secrets: true,
+            guardrails: config.guardrails.clone(),
         },
     )
     .await?;
@@ -563,6 +565,7 @@ async fn run_context_pack_budget_determinism_scenario(
             span_id: None,
             budgets: budgets.clone(),
             redact_secrets: true,
+            guardrails: config.guardrails.clone(),
         },
     )
     .await?;
@@ -660,7 +663,7 @@ async fn run_local_federation_scenario(
                 crate::federation::StoreSource::Local { store: store_a },
                 crate::federation::StoreSource::Local { store: store_b },
             ],
-            query: "ORION",
+            query: "Federation store",
             category: Some("bench"),
             limit: 10,
             mode: opts.search_mode,
@@ -671,7 +674,7 @@ async fn run_local_federation_scenario(
         })
         .await?;
 
-    let relevant: HashSet<Uuid> = [mem_a.id].into_iter().collect();
+    let relevant: HashSet<Uuid> = [mem_a.id, mem_b.id].into_iter().collect();
     let retrieved_ids: Vec<Uuid> = combined.iter().map(|m| m.memory.id).collect();
     let retrieval = super::compute_retrieval_metrics(&retrieved_ids, &relevant, opts.retrieval_k);
 

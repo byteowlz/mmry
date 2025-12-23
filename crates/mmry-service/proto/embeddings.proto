@@ -91,6 +91,7 @@ message SearchRequest {
   string category = 3;
   SearchMode mode = 4;
   bool rerank = 5;
+  string store = 6;
 }
 
 message SparseEmbeddingData {

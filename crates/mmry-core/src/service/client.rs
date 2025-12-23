@@ -333,6 +333,7 @@ impl DaemonClient {
         limit: i64,
         mode: crate::config::SearchMode,
         rerank: bool,
+        store: Option<&str>,
     ) -> Result<Vec<Memory>> {
         self.connect().await?;
 
@@ -348,6 +349,7 @@ impl DaemonClient {
             category: category.unwrap_or_default().to_string(),
             mode: search_mode_to_proto(mode) as i32,
             rerank,
+            store: store.unwrap_or_default().to_string(),
         };
 
         let response = client

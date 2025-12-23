@@ -36,6 +36,7 @@ use mmry_core::federation::search_federated;
 use mmry_core::federation::FederatedSearchOptions;
 use mmry_core::federation::StoreSource;
 use mmry_core::graph::Entity;
+use mmry_core::guardrails::GuardrailsAccumulator;
 use mmry_core::hmlr::get_or_create_human_agent;
 use mmry_core::hmlr::HmlrContext;
 use mmry_core::hmlr::HmlrPipeline;
@@ -1225,15 +1226,30 @@ impl App {
             .await?
         };
 
+        let mut guard = GuardrailsAccumulator::new(&self.config.guardrails);
+        let results = guard.filter_memories_with_store(results);
+        let guardrails = guard.summary();
+
         if results.is_empty() {
-            self.status_message = Some(format!("No memories found for \"{query}\""));
+            if guardrails.blocked_memories > 0 {
+                self.status_message = Some(format!(
+                    "No memories found for \"{query}\" (guardrails filtered {})",
+                    guardrails.blocked_memories
+                ));
+            } else {
+                self.status_message = Some(format!("No memories found for \"{query}\""));
+            }
         } else {
             self.memories = results;
             self.middle_selection.reset();
-            self.status_message = Some(format!(
-                "Showing {} result(s) for \"{query}\"",
-                self.memories.len()
-            ));
+            let mut message = format!("Showing {} result(s) for \"{query}\"", self.memories.len());
+            if guardrails.blocked_memories > 0 {
+                message.push_str(&format!(
+                    " (guardrails filtered {})",
+                    guardrails.blocked_memories
+                ));
+            }
+            self.status_message = Some(message);
         }
 
         self.update_categories_and_tags();

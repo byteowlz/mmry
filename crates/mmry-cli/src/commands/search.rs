@@ -14,6 +14,8 @@ use mmry_core::federation::search_federated;
 use mmry_core::federation::FederatedSearchOptions;
 #[cfg(feature = "federation")]
 use mmry_core::federation::StoreSource;
+use mmry_core::guardrails::GuardrailsAccumulator;
+use mmry_core::guardrails::GuardrailsSummary;
 use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::HmlrSearchOptions;
@@ -151,7 +153,10 @@ pub async fn handle(
             })
             .await?;
 
-            render_results_with_store(&results, resolved_mode, &cmd)?;
+            let mut guard = GuardrailsAccumulator::new(&config.guardrails);
+            let results = guard.filter_memories_with_store(results);
+            let guardrails = guard.summary();
+            render_results_with_store(&results, resolved_mode, &cmd, &guardrails)?;
         }
     } else if cmd.hmlr {
         // HMLR-enhanced search
@@ -181,7 +186,10 @@ pub async fn handle(
             .search_with_hmlr(&cmd.query, cmd.category.as_deref(), limit, options)
             .await?;
 
-        render_hmlr_results(&result, resolved_mode, &cmd)?;
+        let mut guard = GuardrailsAccumulator::new(&config.guardrails);
+        let result = guard.filter_hmlr_result(result);
+        let guardrails = guard.summary();
+        render_hmlr_results(&result, resolved_mode, &cmd, &guardrails)?;
     } else {
         let results = {
             let search_service = SearchService::new(
@@ -202,13 +210,20 @@ pub async fn handle(
                 .await?
         };
 
-        render_results(&results, resolved_mode, &cmd)?;
+        let mut guard = GuardrailsAccumulator::new(&config.guardrails);
+        let results = guard.filter_memories(results);
+        let guardrails = guard.summary();
+        render_results(&results, resolved_mode, &cmd, &guardrails)?;
     }
 
     Ok(())
 }
 
-pub async fn handle_remote(cmd: SearchCmd, config: &Config) -> anyhow::Result<()> {
+pub async fn handle_remote(
+    cmd: SearchCmd,
+    config: &Config,
+    store: Option<&str>,
+) -> anyhow::Result<()> {
     let (resolved_mode, limit, rerank) = resolve_search_opts(&cmd, config);
     let mut client = DaemonClient::new()?;
     let results = client
@@ -218,10 +233,14 @@ pub async fn handle_remote(cmd: SearchCmd, config: &Config) -> anyhow::Result<()
             limit,
             resolved_mode,
             rerank,
+            store,
         )
         .await?;
 
-    render_results(&results, resolved_mode, &cmd)?;
+    let mut guard = GuardrailsAccumulator::new(&config.guardrails);
+    let results = guard.filter_memories(results);
+    let guardrails = guard.summary();
+    render_results(&results, resolved_mode, &cmd, &guardrails)?;
 
     Ok(())
 }
@@ -285,11 +304,15 @@ fn resolve_search_opts(cmd: &SearchCmd, config: &Config) -> (SearchMode, i64, bo
     (resolved_mode, limit, rerank)
 }
 
-fn render_results(results: &[Memory], mode: SearchMode, cmd: &SearchCmd) -> anyhow::Result<()> {
+fn render_results(
+    results: &[Memory],
+    mode: SearchMode,
+    cmd: &SearchCmd,
+    guardrails: &GuardrailsSummary,
+) -> anyhow::Result<()> {
     if cmd.json {
-        if cmd.full {
-            let json = serde_json::to_string_pretty(results)?;
-            println!("{json}");
+        let memories = if cmd.full {
+            serde_json::to_value(results)?
         } else {
             let mut values: Vec<serde_json::Value> = Vec::new();
             for memory in results {
@@ -300,15 +323,33 @@ fn render_results(results: &[Memory], mode: SearchMode, cmd: &SearchCmd) -> anyh
                 }
                 values.push(value);
             }
-            let json = serde_json::to_string_pretty(&values)?;
-            println!("{json}");
-        }
+            serde_json::Value::Array(values)
+        };
+
+        let mut output = serde_json::Map::new();
+        output.insert("memories".to_string(), memories);
+        output.insert("guardrails".to_string(), serde_json::to_value(guardrails)?);
+        let json = serde_json::to_string_pretty(&output)?;
+        println!("{json}");
         return Ok(());
     }
 
     if results.is_empty() {
+        if guardrails.blocked_memories > 0 || guardrails.blocked_facts > 0 {
+            println!(
+                "Guardrails filtered {} memories, {} facts",
+                guardrails.blocked_memories, guardrails.blocked_facts
+            );
+        }
         println!("No memories found matching '{}'", cmd.query);
         return Ok(());
+    }
+
+    if guardrails.blocked_memories > 0 || guardrails.blocked_facts > 0 {
+        println!(
+            "Guardrails filtered {} memories, {} facts\n",
+            guardrails.blocked_memories, guardrails.blocked_facts
+        );
     }
 
     let mode_str = format!("{mode:?}");
@@ -328,6 +369,7 @@ fn render_hmlr_results(
     result: &HmlrSearchResult,
     mode: SearchMode,
     cmd: &SearchCmd,
+    guardrails: &GuardrailsSummary,
 ) -> anyhow::Result<()> {
     if cmd.json {
         // Build a comprehensive JSON output
@@ -382,6 +424,8 @@ fn render_hmlr_results(
             output.insert("facts".to_string(), serde_json::Value::Array(facts));
         }
 
+        output.insert("guardrails".to_string(), serde_json::to_value(guardrails)?);
+
         let json = serde_json::to_string_pretty(&output)?;
         println!("{json}");
         return Ok(());
@@ -389,8 +433,21 @@ fn render_hmlr_results(
 
     // Text output
     if result.memories.is_empty() && result.facts.is_empty() {
+        if guardrails.blocked_memories > 0 || guardrails.blocked_facts > 0 {
+            println!(
+                "Guardrails filtered {} memories, {} facts",
+                guardrails.blocked_memories, guardrails.blocked_facts
+            );
+        }
         println!("No results found matching '{}'", cmd.query);
         return Ok(());
+    }
+
+    if guardrails.blocked_memories > 0 || guardrails.blocked_facts > 0 {
+        println!(
+            "Guardrails filtered {} memories, {} facts\n",
+            guardrails.blocked_memories, guardrails.blocked_facts
+        );
     }
 
     let mode_str = format!("{mode:?}");
@@ -469,11 +526,11 @@ fn render_results_with_store(
     results: &[MemoryWithStore],
     mode: SearchMode,
     cmd: &SearchCmd,
+    guardrails: &GuardrailsSummary,
 ) -> anyhow::Result<()> {
     if cmd.json {
-        if cmd.full {
-            let json = serde_json::to_string_pretty(results)?;
-            println!("{json}");
+        let memories = if cmd.full {
+            serde_json::to_value(results)?
         } else {
             let mut values: Vec<serde_json::Value> = Vec::new();
             for item in results {
@@ -488,15 +545,33 @@ fn render_results_with_store(
                 }
                 values.push(value);
             }
-            let json = serde_json::to_string_pretty(&values)?;
-            println!("{json}");
-        }
+            serde_json::Value::Array(values)
+        };
+
+        let mut output = serde_json::Map::new();
+        output.insert("memories".to_string(), memories);
+        output.insert("guardrails".to_string(), serde_json::to_value(guardrails)?);
+        let json = serde_json::to_string_pretty(&output)?;
+        println!("{json}");
         return Ok(());
     }
 
     if results.is_empty() {
+        if guardrails.blocked_memories > 0 || guardrails.blocked_facts > 0 {
+            println!(
+                "Guardrails filtered {} memories, {} facts",
+                guardrails.blocked_memories, guardrails.blocked_facts
+            );
+        }
         println!("No memories found matching '{}'", cmd.query);
         return Ok(());
+    }
+
+    if guardrails.blocked_memories > 0 || guardrails.blocked_facts > 0 {
+        println!(
+            "Guardrails filtered {} memories, {} facts\n",
+            guardrails.blocked_memories, guardrails.blocked_facts
+        );
     }
 
     let mode_str = format!("{mode:?}");

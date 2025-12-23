@@ -1,5 +1,6 @@
 pub mod add;
 pub mod export;
+pub mod guard;
 pub mod hmlr;
 pub mod ingest;
 pub mod init;

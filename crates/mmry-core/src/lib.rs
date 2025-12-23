@@ -10,6 +10,7 @@ pub mod error;
 #[cfg(feature = "federation")]
 pub mod federation;
 pub mod graph;
+pub mod guardrails;
 pub mod hmlr;
 pub mod http_json;
 pub mod integrations;
