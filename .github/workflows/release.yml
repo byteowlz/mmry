@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            features: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+            features: ""
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+            features: ""
+          # macOS Apple Silicon (with CoreML acceleration)
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: tar.gz
+            features: "--features coreml"
+          # Windows
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            features: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} ${{ matrix.features }}
+          else
+            cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+          fi
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          # Package all binaries
+          tar czvf ../../../mmry-${{ github.ref_name }}-${{ matrix.target }}.tar.gz mmry mmry-mcp mmry-tui mmry-service
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../mmry-${{ github.ref_name }}-${{ matrix.target }}.zip mmry.exe mmry-mcp.exe mmry-tui.exe mmry-service.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmry-${{ matrix.target }}
+          path: mmry-${{ github.ref_name }}-${{ matrix.target }}.*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} . \;
+          sha256sum *.tar.gz *.zip > checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-homebrew:
+    name: Publish to Homebrew
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew tap
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          repository: byteowlz/homebrew-tap
+          event-type: update-formula
+          client-payload: |
+            {
+              "formula": "mmry",
+              "version": "${{ github.ref_name }}",
+              "repo": "${{ github.repository }}"
+            }
+
+  publish-aur:
+    name: Publish to AUR
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate PKGBUILD
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"  # Remove 'v' prefix
+          
+          # Download checksums
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/checksums.txt" -o checksums.txt
+          
+          SHA256=$(grep "x86_64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
+          
+          cat > PKGBUILD << EOF
+          # Maintainer: byteowlz
+          pkgname=mmry
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc="A lean, local-first memory management system for humans and AI agents"
+          arch=('x86_64')
+          url="https://github.com/byteowlz/mmry"
+          license=('MIT')
+          depends=('gcc-libs')
+          source=("\$pkgname-\$pkgver.tar.gz::https://github.com/byteowlz/mmry/releases/download/v\$pkgver/mmry-v\$pkgver-x86_64-unknown-linux-gnu.tar.gz")
+          sha256sums=('${SHA256}')
+          
+          package() {
+              install -Dm755 mmry "\$pkgdir/usr/bin/mmry"
+              install -Dm755 mmry-mcp "\$pkgdir/usr/bin/mmry-mcp"
+              install -Dm755 mmry-tui "\$pkgdir/usr/bin/mmry-tui"
+              install -Dm755 mmry-service "\$pkgdir/usr/bin/mmry-service"
+          }
+          EOF
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        with:
+          pkgname: mmry
+          pkgbuild: ./PKGBUILD
+          commit_username: byteowlz
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ github.ref_name }}"
+
+  publish-scoop:
+    name: Publish to Scoop
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Scoop bucket
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          repository: byteowlz/scoop-bucket
+          event-type: update-manifest
+          client-payload: |
+            {
+              "name": "mmry",
+              "version": "${{ github.ref_name }}",
+              "repo": "${{ github.repository }}"
+            }

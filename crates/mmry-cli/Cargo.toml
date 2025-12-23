@@ -48,3 +48,8 @@ tempfile = { workspace = true }
 service = ["mmry-core/service"]
 federation = ["mmry-core/federation"]
 default = ["service", "federation"]
+
+# Hardware acceleration (pass through to core)
+coreml = ["mmry-core/coreml"]    # Apple Silicon
+cuda = ["mmry-core/cuda"]         # NVIDIA GPUs
+directml = ["mmry-core/directml"] # Windows DirectX
