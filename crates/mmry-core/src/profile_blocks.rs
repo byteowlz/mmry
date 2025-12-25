@@ -718,7 +718,7 @@ fn shorten_block_name(name: &str, max_len: usize) -> String {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x00000100000001B3);
     }
-    let suffix = format!(".{:x}", hash);
+    let suffix = format!(".{hash:x}");
     let budget = max_len.saturating_sub(suffix.len()).max(1);
     let mut out = name.chars().take(budget).collect::<String>();
     out.push_str(&suffix);

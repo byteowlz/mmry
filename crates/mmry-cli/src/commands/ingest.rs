@@ -679,8 +679,7 @@ async fn handle_stdin(
 
         if !opts.json {
             println!(
-                "Content is large (~{} tokens), chunking into {} pieces",
-                total_tokens, total_chunks
+                "Content is large (~{total_tokens} tokens), chunking into {total_chunks} pieces"
             );
         }
 

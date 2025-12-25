@@ -388,7 +388,7 @@ fn print_prune_summary(opts: &PruneSummaryOptions<'_>) {
             let span_info = group
                 .span_id
                 .as_ref()
-                .map(|s| format!(" (span: {})", s))
+                .map(|s| format!(" (span: {s})"))
                 .unwrap_or_default();
             println!("  Topic: {}{}", group.topic_label, span_info);
             println!(
