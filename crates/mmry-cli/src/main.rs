@@ -63,6 +63,9 @@ enum Commands {
     /// Export memories to JSON file
     Export(commands::export::ExportCmd),
 
+    /// Import memories from JSON file (for cross-machine sync)
+    Import(commands::import::ImportCmd),
+
     /// Regenerate embeddings for existing memories
     Reembed(commands::reembed::ReembedCmd),
 
@@ -246,6 +249,16 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Commands::Prune(cmd) => commands::prune::handle(cmd, &config, &db).await,
         Commands::Profile(cmd) => commands::profile::handle(cmd, &config, &db).await,
+        Commands::Import(cmd) => {
+            commands::import::handle(
+                cmd,
+                &config,
+                &db,
+                Arc::clone(&embeddings),
+                Arc::clone(&sparse_embeddings),
+            )
+            .await
+        }
         Commands::Models(_)
         | Commands::Rerankers(_)
         | Commands::Init(_)

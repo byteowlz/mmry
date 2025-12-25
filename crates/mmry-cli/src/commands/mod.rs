@@ -2,6 +2,7 @@ pub mod add;
 pub mod export;
 pub mod guard;
 pub mod hmlr;
+pub mod import;
 pub mod ingest;
 pub mod init;
 pub mod ls;

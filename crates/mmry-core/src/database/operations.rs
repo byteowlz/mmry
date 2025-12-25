@@ -640,6 +640,163 @@ pub async fn list_facts_by_key(
     Ok(facts)
 }
 
+// ============================================================================
+// Import operations - upsert variants for cross-machine sync
+// ============================================================================
+
+/// Upsert a memory by ID - insert if not exists, update if exists with newer updated_at
+/// Returns true if the memory was inserted or updated, false if skipped
+pub async fn upsert_memory_for_import(pool: &SqlitePool, memory: &Memory) -> crate::Result<bool> {
+    // Check if memory exists
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT updated_at FROM memories WHERE id = ?")
+            .bind(memory.id.to_string())
+            .fetch_optional(pool)
+            .await?;
+
+    if let Some(existing_updated_at) = existing {
+        // Parse existing timestamp
+        let existing_dt = chrono::DateTime::parse_from_rfc3339(&existing_updated_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .ok();
+
+        // Skip if existing is same or newer
+        if let Some(existing_dt) = existing_dt {
+            if existing_dt >= memory.updated_at {
+                return Ok(false);
+            }
+        }
+
+        // Update existing memory (without embeddings - those are recomputed)
+        update_memory_fields(pool, memory, true).await?;
+        Ok(true)
+    } else {
+        // Insert new memory (without embeddings - those are computed after import)
+        let mut memory_without_embeddings = memory.clone();
+        memory_without_embeddings.embedding = None;
+        memory_without_embeddings.sparse_embedding = None;
+        insert_memory(pool, &memory_without_embeddings).await?;
+        Ok(true)
+    }
+}
+
+/// Upsert an entity by name (case-insensitive) for import
+/// Returns the entity ID (existing or new)
+pub async fn upsert_entity_for_import(
+    pool: &SqlitePool,
+    id: Uuid,
+    name: &str,
+    entity_type: Option<&str>,
+    metadata: &serde_json::Value,
+) -> crate::Result<Uuid> {
+    // Check if entity with same name exists (case-insensitive)
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM entities WHERE LOWER(name) = LOWER(?)")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
+
+    if let Some(existing_id) = existing {
+        // Update existing entity
+        sqlx::query(
+            r#"
+            UPDATE entities SET type = ?, metadata = ? WHERE id = ?
+            "#,
+        )
+        .bind(entity_type)
+        .bind(metadata.to_string())
+        .bind(&existing_id)
+        .execute(pool)
+        .await?;
+
+        Ok(Uuid::parse_str(&existing_id).unwrap_or(id))
+    } else {
+        // Insert new entity
+        sqlx::query(
+            r#"
+            INSERT INTO entities (id, name, type, metadata)
+            VALUES (?, ?, ?, ?)
+            "#,
+        )
+        .bind(id.to_string())
+        .bind(name)
+        .bind(entity_type)
+        .bind(metadata.to_string())
+        .execute(pool)
+        .await?;
+
+        Ok(id)
+    }
+}
+
+/// Upsert a relationship by ID for import
+pub async fn upsert_relationship_for_import(
+    pool: &SqlitePool,
+    id: Uuid,
+    from_entity: Uuid,
+    to_entity: Uuid,
+    relation_type: &str,
+    strength: f32,
+) -> crate::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO relationships (id, from_entity, to_entity, relation_type, strength)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            from_entity = excluded.from_entity,
+            to_entity = excluded.to_entity,
+            relation_type = excluded.relation_type,
+            strength = excluded.strength
+        "#,
+    )
+    .bind(id.to_string())
+    .bind(from_entity.to_string())
+    .bind(to_entity.to_string())
+    .bind(relation_type)
+    .bind(strength)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Upsert a memory-entity link for import
+pub async fn upsert_memory_entity_for_import(
+    pool: &SqlitePool,
+    memory_id: Uuid,
+    entity_id: Uuid,
+) -> crate::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO memory_entities (memory_id, entity_id)
+        VALUES (?, ?)
+        "#,
+    )
+    .bind(memory_id.to_string())
+    .bind(entity_id.to_string())
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Get memory IDs that need embeddings (have no embedding or sparse_embedding)
+pub async fn get_memories_needing_embeddings(pool: &SqlitePool) -> crate::Result<Vec<Uuid>> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM memories 
+        WHERE embedding IS NULL OR sparse_embedding IS NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|s| Uuid::parse_str(&s).ok())
+        .collect())
+}
+
 pub async fn set_user_profile(pool: &SqlitePool, profile: &UserProfileEntry) -> crate::Result<()> {
     sqlx::query(
         r#"
@@ -728,6 +885,135 @@ pub async fn count_agents(pool: &SqlitePool) -> crate::Result<i64> {
         .fetch_one(pool)
         .await?;
     Ok(count)
+}
+
+/// List all facts (for export)
+pub async fn list_all_facts(pool: &SqlitePool) -> crate::Result<Vec<FactRecord>> {
+    list_recent_facts(pool, i64::MAX).await
+}
+
+/// List all bridge blocks (for export)
+pub async fn list_all_bridge_blocks(pool: &SqlitePool) -> crate::Result<Vec<BridgeBlock>> {
+    list_bridge_blocks(pool, i64::MAX).await
+}
+
+/// Entity record from database
+#[derive(Debug, Clone)]
+pub struct EntityRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub entity_type: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+/// List all entities (for export)
+pub async fn list_all_entities(pool: &SqlitePool) -> crate::Result<Vec<EntityRecord>> {
+    let rows = sqlx::query("SELECT id, name, type, metadata FROM entities")
+        .fetch_all(pool)
+        .await?;
+
+    let mut entities = Vec::new();
+    for row in rows {
+        let raw_id: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&raw_id).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid entity id '{raw_id}': {e}"))
+        })?;
+
+        let metadata_raw: Option<String> = row.try_get("metadata").unwrap_or(None);
+        let metadata = metadata_raw
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+        entities.push(EntityRecord {
+            id,
+            name: row.try_get("name")?,
+            entity_type: row.try_get("type").ok(),
+            metadata,
+        });
+    }
+
+    Ok(entities)
+}
+
+/// Relationship record from database
+#[derive(Debug, Clone)]
+pub struct RelationshipRecord {
+    pub id: Uuid,
+    pub from_entity: Uuid,
+    pub to_entity: Uuid,
+    pub relation_type: String,
+    pub strength: f32,
+}
+
+/// List all relationships (for export)
+pub async fn list_all_relationships(pool: &SqlitePool) -> crate::Result<Vec<RelationshipRecord>> {
+    let rows = sqlx::query(
+        "SELECT id, from_entity, to_entity, relation_type, strength FROM relationships",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut relationships = Vec::new();
+    for row in rows {
+        let raw_id: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&raw_id).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid relationship id '{raw_id}': {e}"))
+        })?;
+
+        let raw_from: String = row.try_get("from_entity")?;
+        let from_entity = Uuid::parse_str(&raw_from).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid from_entity '{raw_from}': {e}"))
+        })?;
+
+        let raw_to: String = row.try_get("to_entity")?;
+        let to_entity = Uuid::parse_str(&raw_to).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid to_entity '{raw_to}': {e}"))
+        })?;
+
+        relationships.push(RelationshipRecord {
+            id,
+            from_entity,
+            to_entity,
+            relation_type: row.try_get("relation_type")?,
+            strength: row.try_get("strength").unwrap_or(1.0),
+        });
+    }
+
+    Ok(relationships)
+}
+
+/// Memory-entity link record
+#[derive(Debug, Clone)]
+pub struct MemoryEntityRecord {
+    pub memory_id: Uuid,
+    pub entity_id: Uuid,
+}
+
+/// List all memory-entity links (for export)
+pub async fn list_all_memory_entities(pool: &SqlitePool) -> crate::Result<Vec<MemoryEntityRecord>> {
+    let rows = sqlx::query("SELECT memory_id, entity_id FROM memory_entities")
+        .fetch_all(pool)
+        .await?;
+
+    let mut links = Vec::new();
+    for row in rows {
+        let raw_memory: String = row.try_get("memory_id")?;
+        let memory_id = Uuid::parse_str(&raw_memory).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid memory_id '{raw_memory}': {e}"))
+        })?;
+
+        let raw_entity: String = row.try_get("entity_id")?;
+        let entity_id = Uuid::parse_str(&raw_entity).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid entity_id '{raw_entity}': {e}"))
+        })?;
+
+        links.push(MemoryEntityRecord {
+            memory_id,
+            entity_id,
+        });
+    }
+
+    Ok(links)
 }
 
 pub async fn list_recent_facts(pool: &SqlitePool, limit: i64) -> crate::Result<Vec<FactRecord>> {
