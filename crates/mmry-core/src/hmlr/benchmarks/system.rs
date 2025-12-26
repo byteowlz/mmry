@@ -5,6 +5,7 @@ use crate::agents::AgentRecord;
 use crate::agents::FactCategory;
 use crate::agents::FactRecord;
 use crate::agents::UserProfileEntry;
+use crate::chunking::Chunker;
 use crate::config::Config;
 use crate::config::SearchMode;
 use crate::context_pack::build_context_pack;
@@ -14,6 +15,8 @@ use crate::context_pack::ContextPackOptions;
 use crate::database::operations;
 use crate::database::Database;
 use crate::embeddings::EmbeddingServiceWrapper;
+use crate::memory::Memory;
+use crate::memory::MemoryType;
 use crate::profile_blocks::ProfileBlocksService;
 use crate::reranker::RerankerService;
 use crate::search::SearchService;
@@ -23,6 +26,8 @@ use chrono::DateTime;
 use chrono::TimeZone;
 use chrono::Utc;
 use std::collections::HashSet;
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -107,12 +112,54 @@ fn stable_context_pack_view(pack: &ContextPack) -> String {
     out
 }
 
+fn bench_document(seed: u64, doc_idx: usize, tokens: usize) -> String {
+    let header = format!(
+        "Bench document {doc_idx} seed {seed}. Project {doc_idx} status ACTIVE. Owner User{doc_idx}.\n"
+    );
+    let mut out = String::with_capacity(header.len() + tokens * 6);
+    out.push_str(&header);
+
+    let words = [
+        "orion", "osiris", "atlas", "vector", "memory", "search", "prompt",
+    ];
+    for idx in 0..tokens {
+        let word = words[(idx + doc_idx) % words.len()];
+        out.push_str(word);
+        out.push(' ');
+    }
+
+    out
+}
+
+fn bench_query(doc_idx: usize) -> String {
+    format!("Project {doc_idx} status owner")
+}
+
+fn bench_memory(seed: u64, doc_idx: usize, tokens: usize) -> Memory {
+    let mut memory = Memory::new(
+        MemoryType::Semantic,
+        bench_document(seed, doc_idx, tokens),
+        "bench".to_string(),
+    );
+    memory.id = seeded_uuid(seed, &format!("bench-doc-{doc_idx}"));
+    let ts = seeded_time(doc_idx as i64);
+    memory.created_at = ts;
+    memory.updated_at = ts;
+    memory
+}
+
 #[derive(Clone)]
 pub struct SystemBenchmarkOptions {
     pub seed: u64,
     pub retrieval_k: usize,
     pub search_mode: SearchMode,
     pub rerank: bool,
+    pub include_perf: bool,
+    pub ingest_docs: usize,
+    pub ingest_doc_tokens: usize,
+    pub usage_docs: usize,
+    pub usage_queries: usize,
+    pub usage_context_packs: usize,
 }
 
 impl Default for SystemBenchmarkOptions {
@@ -122,6 +169,12 @@ impl Default for SystemBenchmarkOptions {
             retrieval_k: 5,
             search_mode: SearchMode::Bm25,
             rerank: false,
+            include_perf: false,
+            ingest_docs: 6,
+            ingest_doc_tokens: 220,
+            usage_docs: 12,
+            usage_queries: 6,
+            usage_context_packs: 4,
         }
     }
 }
@@ -144,6 +197,12 @@ pub async fn run_system_benchmarks(
     suite.add_result(run_context_pack_secret_redaction_scenario(config, &opts).await?);
     suite.add_result(run_context_pack_budget_determinism_scenario(config, &opts).await?);
 
+    if opts.include_perf {
+        suite.add_result(run_ingestion_performance_scenario(config, &opts).await?);
+        suite.add_result(run_search_performance_scenario(config, &opts).await?);
+        suite.add_result(run_context_pack_performance_scenario(config, &opts).await?);
+    }
+
     #[cfg(feature = "federation")]
     suite.add_result(run_local_federation_scenario(config, &opts).await?);
 
@@ -154,7 +213,7 @@ async fn run_hmlr_temporal_api_key_rotation(
     config: &Config,
     opts: &SystemBenchmarkOptions,
 ) -> Result<BenchmarkResult> {
-    let scenario_config = mk_scenario_config(config, opts, "hmlr-7a-api-key-rotation");
+    let scenario_config = mk_scenario_config(config, opts, "hmlr-7a-api-key-rotation")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let result = super::test_api_key_rotation(db.pool()).await;
     db.close().await;
@@ -165,7 +224,7 @@ async fn run_hmlr_temporal_timestamp_updates(
     config: &Config,
     opts: &SystemBenchmarkOptions,
 ) -> Result<BenchmarkResult> {
-    let scenario_config = mk_scenario_config(config, opts, "hmlr-7c-timestamp-updates");
+    let scenario_config = mk_scenario_config(config, opts, "hmlr-7c-timestamp-updates")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let result = super::test_timestamp_updates(db.pool()).await;
     db.close().await;
@@ -176,7 +235,7 @@ async fn run_hmlr_user_invariant_override(
     config: &Config,
     opts: &SystemBenchmarkOptions,
 ) -> Result<BenchmarkResult> {
-    let scenario_config = mk_scenario_config(config, opts, "hmlr-7b-user-invariant");
+    let scenario_config = mk_scenario_config(config, opts, "hmlr-7b-user-invariant")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let result = super::test_user_invariant_override(db.pool()).await;
     db.close().await;
@@ -187,7 +246,7 @@ async fn run_hmlr_language_preference_persistence(
     config: &Config,
     opts: &SystemBenchmarkOptions,
 ) -> Result<BenchmarkResult> {
-    let scenario_config = mk_scenario_config(config, opts, "hmlr-language-preference");
+    let scenario_config = mk_scenario_config(config, opts, "hmlr-language-preference")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let result = super::test_language_preference_persistence(db.pool()).await;
     db.close().await;
@@ -198,7 +257,7 @@ async fn run_hmlr_deprecation_policy(
     config: &Config,
     opts: &SystemBenchmarkOptions,
 ) -> Result<BenchmarkResult> {
-    let scenario_config = mk_scenario_config(config, opts, "hmlr-deprecation-policy");
+    let scenario_config = mk_scenario_config(config, opts, "hmlr-deprecation-policy")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let result = super::test_30_day_deprecation_policy(db.pool()).await;
     db.close().await;
@@ -209,7 +268,7 @@ async fn run_hmlr_dependency_chain(
     config: &Config,
     opts: &SystemBenchmarkOptions,
 ) -> Result<BenchmarkResult> {
-    let scenario_config = mk_scenario_config(config, opts, "hmlr-dependency-chain");
+    let scenario_config = mk_scenario_config(config, opts, "hmlr-dependency-chain")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let result = super::test_dependency_chain(db.pool()).await;
     db.close().await;
@@ -220,7 +279,7 @@ async fn run_hmlr_access_control_chain(
     config: &Config,
     opts: &SystemBenchmarkOptions,
 ) -> Result<BenchmarkResult> {
-    let scenario_config = mk_scenario_config(config, opts, "hmlr-access-control-chain");
+    let scenario_config = mk_scenario_config(config, opts, "hmlr-access-control-chain")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let result = super::test_access_control_chain(db.pool()).await;
     db.close().await;
@@ -247,14 +306,109 @@ async fn mk_services(
     ))
 }
 
-fn mk_scenario_config(base: &Config, opts: &SystemBenchmarkOptions, scenario: &str) -> Config {
+async fn ingest_memory_for_bench(
+    pool: &sqlx::SqlitePool,
+    chunker: &Chunker,
+    config: &Config,
+    embeddings: &mut EmbeddingServiceWrapper,
+    sparse_embeddings: &SparseEmbeddingService,
+    mut memory: Memory,
+) -> Result<u64> {
+    let mut inserted = 0u64;
+
+    if chunker.needs_chunking(&memory.content) {
+        let text_chunks = chunker.chunk_text(&memory.content)?;
+        let total_chunks = text_chunks.len();
+        let mut chunk_memories = chunker.create_memory_chunks(&memory, text_chunks);
+
+        memory.total_chunks = Some(total_chunks as i32);
+        memory.chunk_method = chunk_memories.first().and_then(|c| c.chunk_method.clone());
+
+        for chunk in &mut chunk_memories {
+            let embed_text = if config.chunking.embed_metadata {
+                let metadata_text = chunker.generate_metadata_text(chunk);
+                if metadata_text.is_empty() {
+                    chunk.content.clone()
+                } else {
+                    format!("{}\n\n{}", metadata_text, chunk.content)
+                }
+            } else {
+                chunk.content.clone()
+            };
+
+            if embeddings.is_enabled() {
+                if let Some(vector) = embeddings.embed(&embed_text).await? {
+                    chunk.embedding = Some(vector);
+                }
+            }
+
+            if sparse_embeddings.is_enabled() {
+                if let Some(sparse_vec) = sparse_embeddings.embed(&embed_text).await? {
+                    chunk.sparse_embedding = Some(sparse_vec.into());
+                }
+            }
+
+            operations::insert_memory(pool, chunk).await?;
+            inserted += 1;
+        }
+
+        operations::insert_memory(pool, &memory).await?;
+        inserted += 1;
+    } else {
+        if embeddings.is_enabled() {
+            if let Some(vector) = embeddings.embed(&memory.content).await? {
+                memory.embedding = Some(vector);
+            }
+        }
+
+        if sparse_embeddings.is_enabled() {
+            if let Some(sparse_vec) = sparse_embeddings.embed(&memory.content).await? {
+                memory.sparse_embedding = Some(sparse_vec.into());
+            }
+        }
+
+        operations::insert_memory(pool, &memory).await?;
+        inserted += 1;
+    }
+
+    Ok(inserted)
+}
+
+fn remove_if_exists(path: &Path) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn prepare_bench_store(config: &Config, store_name: &str) -> Result<()> {
+    if !store_name.starts_with("bench-") {
+        return Ok(());
+    }
+
+    let path = config.store_path(store_name);
+    remove_if_exists(&path)?;
+
+    let path_str = path.to_string_lossy();
+    let wal_path = PathBuf::from(format!("{path_str}-wal"));
+    let shm_path = PathBuf::from(format!("{path_str}-shm"));
+    remove_if_exists(&wal_path)?;
+    remove_if_exists(&shm_path)?;
+
+    Ok(())
+}
+
+fn mk_scenario_config(
+    base: &Config,
+    opts: &SystemBenchmarkOptions,
+    scenario: &str,
+) -> Result<Config> {
     let mut config = base.clone();
-    config.embeddings.enabled = false;
-    config.search.rerank_enabled = false;
-    config.search.boost_recent = false;
     config.search.mode = opts.search_mode;
+    config.search.rerank_enabled = opts.rerank;
     config.stores.default = format!("bench-{scenario}-{}", opts.seed);
-    config
+    prepare_bench_store(&config, &config.stores.default)?;
+    Ok(config)
 }
 
 async fn run_retrieval_distractors_scenario(
@@ -265,7 +419,7 @@ async fn run_retrieval_distractors_scenario(
     let test_name = "System - Retrieval Distractors";
     let seed = opts.seed;
 
-    let scenario_config = mk_scenario_config(config, opts, "retrieval-distractors");
+    let scenario_config = mk_scenario_config(config, opts, "retrieval-distractors")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let pool = db.pool().clone();
     let (search, _profile_blocks) = mk_services(pool.clone(), &scenario_config).await?;
@@ -313,6 +467,7 @@ async fn run_retrieval_distractors_scenario(
             10,
             Some(opts.search_mode),
             Some(opts.rerank),
+            false,
         )
         .await?;
 
@@ -347,7 +502,7 @@ async fn run_context_pack_secret_redaction_scenario(
     let test_name = "System - Context Pack Secret Redaction";
     let seed = opts.seed;
 
-    let scenario_config = mk_scenario_config(config, opts, "context-pack-secret");
+    let scenario_config = mk_scenario_config(config, opts, "context-pack-secret")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let pool = db.pool().clone();
     let (search, profile_blocks) = mk_services(pool.clone(), &scenario_config).await?;
@@ -463,7 +618,7 @@ async fn run_context_pack_budget_determinism_scenario(
     let test_name = "System - Context Pack Budget Determinism";
     let seed = opts.seed;
 
-    let scenario_config = mk_scenario_config(config, opts, "context-pack-budget");
+    let scenario_config = mk_scenario_config(config, opts, "context-pack-budget")?;
     let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
     let pool = db.pool().clone();
     let (search, profile_blocks) = mk_services(pool.clone(), &scenario_config).await?;
@@ -608,6 +763,193 @@ async fn run_context_pack_budget_determinism_scenario(
     .with_determinism_hash(hash1))
 }
 
+async fn run_ingestion_performance_scenario(
+    config: &Config,
+    opts: &SystemBenchmarkOptions,
+) -> Result<BenchmarkResult> {
+    let test_name = "Perf - Ingestion";
+    let seed = opts.seed;
+
+    let scenario_config = mk_scenario_config(config, opts, "perf-ingest")?;
+    let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
+    let pool = db.pool().clone();
+
+    let chunker = Chunker::new(scenario_config.chunking.clone());
+    let mut embeddings = EmbeddingServiceWrapper::new(&scenario_config)?;
+    let sparse_embeddings = SparseEmbeddingService::new(&scenario_config.sparse_embeddings)?;
+
+    if embeddings.is_enabled() {
+        let _ = embeddings.embed("warmup").await?;
+    }
+    if sparse_embeddings.is_enabled() {
+        let _ = sparse_embeddings.embed("warmup").await?;
+    }
+
+    let start = Instant::now();
+    let mut inserted = 0u64;
+    for doc_idx in 0..opts.ingest_docs {
+        let memory = bench_memory(seed, doc_idx, opts.ingest_doc_tokens);
+        inserted += ingest_memory_for_bench(
+            &pool,
+            &chunker,
+            &scenario_config,
+            &mut embeddings,
+            &sparse_embeddings,
+            memory,
+        )
+        .await?;
+    }
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    db.close().await;
+
+    Ok(BenchmarkResult::success(test_name, 1.0, 1.0, duration_ms).with_operation_count(inserted))
+}
+
+async fn run_search_performance_scenario(
+    config: &Config,
+    opts: &SystemBenchmarkOptions,
+) -> Result<BenchmarkResult> {
+    let test_name = "Perf - Search";
+    let seed = opts.seed;
+
+    let scenario_config = mk_scenario_config(config, opts, "perf-search")?;
+    let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
+    let pool = db.pool().clone();
+
+    let chunker = Chunker::new(scenario_config.chunking.clone());
+    let mut embeddings = EmbeddingServiceWrapper::new(&scenario_config)?;
+    let sparse_embeddings = SparseEmbeddingService::new(&scenario_config.sparse_embeddings)?;
+
+    for doc_idx in 0..opts.usage_docs {
+        let memory = bench_memory(seed, doc_idx, opts.ingest_doc_tokens);
+        ingest_memory_for_bench(
+            &pool,
+            &chunker,
+            &scenario_config,
+            &mut embeddings,
+            &sparse_embeddings,
+            memory,
+        )
+        .await?;
+    }
+
+    let (search, _profile_blocks) = mk_services(pool.clone(), &scenario_config).await?;
+    let warmup_query = bench_query(0);
+    let _ = search
+        .search_with_options(
+            &warmup_query,
+            Some("bench"),
+            10,
+            Some(opts.search_mode),
+            Some(opts.rerank),
+            false,
+        )
+        .await?;
+
+    let start = Instant::now();
+    for idx in 0..opts.usage_queries {
+        let query = bench_query(idx % opts.usage_docs.max(1));
+        let _ = search
+            .search_with_options(
+                &query,
+                Some("bench"),
+                10,
+                Some(opts.search_mode),
+                Some(opts.rerank),
+                false,
+            )
+            .await?;
+    }
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    db.close().await;
+
+    Ok(BenchmarkResult::success(test_name, 1.0, 1.0, duration_ms)
+        .with_operation_count(opts.usage_queries as u64))
+}
+
+async fn run_context_pack_performance_scenario(
+    config: &Config,
+    opts: &SystemBenchmarkOptions,
+) -> Result<BenchmarkResult> {
+    let test_name = "Perf - Context Pack";
+    let seed = opts.seed;
+
+    let scenario_config = mk_scenario_config(config, opts, "perf-context-pack")?;
+    let db = Database::init_store(&scenario_config, Some(&scenario_config.stores.default)).await?;
+    let pool = db.pool().clone();
+
+    let chunker = Chunker::new(scenario_config.chunking.clone());
+    let mut embeddings = EmbeddingServiceWrapper::new(&scenario_config)?;
+    let sparse_embeddings = SparseEmbeddingService::new(&scenario_config.sparse_embeddings)?;
+
+    for doc_idx in 0..opts.usage_docs {
+        let memory = bench_memory(seed, doc_idx, opts.ingest_doc_tokens);
+        ingest_memory_for_bench(
+            &pool,
+            &chunker,
+            &scenario_config,
+            &mut embeddings,
+            &sparse_embeddings,
+            memory,
+        )
+        .await?;
+    }
+
+    let (search, profile_blocks) = mk_services(pool.clone(), &scenario_config).await?;
+    let warmup_query = bench_query(0);
+    let _ = build_context_pack(
+        &pool,
+        &profile_blocks,
+        &search,
+        ContextPackOptions {
+            query: &warmup_query,
+            category: Some("bench"),
+            limit: 10,
+            mode: opts.search_mode,
+            rerank: opts.rerank,
+            store: Some(&scenario_config.stores.default),
+            owner_id: None,
+            span_id: None,
+            budgets: ContextPackBudgets::default(),
+            redact_secrets: false,
+            guardrails: config.guardrails.clone(),
+        },
+    )
+    .await?;
+
+    let start = Instant::now();
+    for idx in 0..opts.usage_context_packs {
+        let query = bench_query(idx % opts.usage_docs.max(1));
+        let _ = build_context_pack(
+            &pool,
+            &profile_blocks,
+            &search,
+            ContextPackOptions {
+                query: &query,
+                category: Some("bench"),
+                limit: 10,
+                mode: opts.search_mode,
+                rerank: opts.rerank,
+                store: Some(&scenario_config.stores.default),
+                owner_id: None,
+                span_id: None,
+                budgets: ContextPackBudgets::default(),
+                redact_secrets: false,
+                guardrails: config.guardrails.clone(),
+            },
+        )
+        .await?;
+    }
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    db.close().await;
+
+    Ok(BenchmarkResult::success(test_name, 1.0, 1.0, duration_ms)
+        .with_operation_count(opts.usage_context_packs as u64))
+}
+
 #[cfg(feature = "federation")]
 async fn run_local_federation_scenario(
     config: &Config,
@@ -627,6 +969,9 @@ async fn run_local_federation_scenario(
 
     let store_a = format!("bench-fed-a-{seed}");
     let store_b = format!("bench-fed-b-{seed}");
+
+    prepare_bench_store(&config, &store_a)?;
+    prepare_bench_store(&config, &store_b)?;
 
     let db_a = Database::init_store(&config, Some(&store_a)).await?;
     let db_b = Database::init_store(&config, Some(&store_b)).await?;
@@ -668,6 +1013,7 @@ async fn run_local_federation_scenario(
             limit: 10,
             mode: opts.search_mode,
             rerank: opts.rerank,
+            include_expired: false,
             embeddings,
             sparse_embeddings,
             reranker,

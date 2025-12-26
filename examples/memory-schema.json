@@ -66,6 +66,11 @@
             "type": "string"
           },
           "description": "Tags for categorizing and filtering memories"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional RFC3339 expiration timestamp (UTC recommended)"
         }
       },
       "additionalProperties": false

@@ -395,6 +395,55 @@ impl Database {
             tracing::info!("Chunking columns and indices added");
         }
 
+        let expires_at_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='expires_at'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !expires_at_exists {
+            tracing::info!("Adding expiration columns to memories table...");
+            sqlx::query("ALTER TABLE memories ADD COLUMN expires_at DATETIME")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE memories ADD COLUMN expired_at DATETIME")
+                .execute(pool)
+                .await?;
+            tracing::info!("Expiration columns added");
+        }
+
+        let provenance_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='source_attribution'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !provenance_exists {
+            tracing::info!("Adding provenance columns to memories table...");
+            sqlx::query("ALTER TABLE memories ADD COLUMN source_attribution JSON")
+                .execute(pool)
+                .await?;
+            sqlx::query("ALTER TABLE memories ADD COLUMN trust_level REAL DEFAULT 0.5")
+                .execute(pool)
+                .await?;
+            sqlx::query(
+                "ALTER TABLE memories ADD COLUMN source_reinforcement_score REAL DEFAULT 0.0",
+            )
+            .execute(pool)
+            .await?;
+            tracing::info!("Provenance columns added");
+        }
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_expired_at ON memories(expired_at)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_trust_level ON memories(trust_level)")
+            .execute(pool)
+            .await?;
+
         // Ensure agent and provenance tables exist
         sqlx::query(
             r#"

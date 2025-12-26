@@ -65,6 +65,15 @@ case "${CHOICE}" in
 esac
 
 echo ""
+read -p "Install benchmark runner (mmry bench)? [y/N]: " BENCH_CHOICE
+BENCH_CHOICE="${BENCH_CHOICE:-N}"
+
+CLI_FEATURES=()
+if [[ "${BENCH_CHOICE}" =~ ^[Yy]$ ]]; then
+    CLI_FEATURES+=("--features" "bench")
+fi
+
+echo ""
 echo "Building workspace..."
 cargo build --release
 
@@ -74,7 +83,7 @@ cargo install --path "${ROOT_DIR}/crates/mmry-service" --force
 
 echo ""
 echo "Installing mmry CLI..."
-cargo install --path "${ROOT_DIR}/crates/mmry-cli" --force
+cargo install --path "${ROOT_DIR}/crates/mmry-cli" --force "${CLI_FEATURES[@]}"
 
 echo ""
 echo "Installing mmry TUI..."

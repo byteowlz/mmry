@@ -103,6 +103,9 @@ pub struct SearchCmd {
         help = "Strategy for inactive blocks: include, exclude, deprioritize"
     )]
     pub inactive_blocks: Option<String>,
+
+    #[arg(long, help = "Include expired memories in results")]
+    pub include_expired: bool,
 }
 
 impl SearchCmd {
@@ -147,6 +150,7 @@ pub async fn handle(
                 limit,
                 mode: resolved_mode,
                 rerank,
+                include_expired: cmd.include_expired,
                 embeddings,
                 sparse_embeddings,
                 reranker,
@@ -183,7 +187,13 @@ pub async fn handle(
         };
 
         let result = search_service
-            .search_with_hmlr(&cmd.query, cmd.category.as_deref(), limit, options)
+            .search_with_hmlr(
+                &cmd.query,
+                cmd.category.as_deref(),
+                limit,
+                options,
+                cmd.include_expired,
+            )
             .await?;
 
         let mut guard = GuardrailsAccumulator::new(&config.guardrails);
@@ -206,6 +216,7 @@ pub async fn handle(
                     limit,
                     Some(resolved_mode),
                     Some(rerank),
+                    cmd.include_expired,
                 )
                 .await?
         };
@@ -227,14 +238,15 @@ pub async fn handle_remote(
     let (resolved_mode, limit, rerank) = resolve_search_opts(&cmd, config);
     let mut client = DaemonClient::new()?;
     let results = client
-        .search(
-            &cmd.query,
-            cmd.category.as_deref(),
+        .search(mmry_core::service::client::DaemonSearchOptions {
+            query: &cmd.query,
+            category: cmd.category.as_deref(),
             limit,
-            resolved_mode,
+            mode: resolved_mode,
             rerank,
+            include_expired: cmd.include_expired,
             store,
-        )
+        })
         .await?;
 
     let mut guard = GuardrailsAccumulator::new(&config.guardrails);

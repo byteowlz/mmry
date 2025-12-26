@@ -41,6 +41,7 @@ use mmry_core::hmlr::get_or_create_human_agent;
 use mmry_core::hmlr::HmlrContext;
 use mmry_core::hmlr::HmlrPipeline;
 use mmry_core::memory::Memory;
+use mmry_core::memory::SourceAttribution;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
@@ -1201,7 +1202,7 @@ impl App {
         {
             let results = self
                 .search_service
-                .search_with_options(query, None, limit, Some(mode), None)
+                .search_with_options(query, None, limit, Some(mode), None, false)
                 .await?;
             results
                 .into_iter()
@@ -1219,6 +1220,7 @@ impl App {
                 limit,
                 mode,
                 rerank: false,
+                include_expired: false,
                 embeddings: Arc::clone(&self.embeddings),
                 sparse_embeddings: Arc::clone(&self.sparse_embeddings),
                 reranker: Arc::clone(&self.reranker),
@@ -1561,6 +1563,19 @@ impl App {
                     Ok(mut updated_memory) => {
                         updated_memory.created_at = memory.created_at;
                         updated_memory.updated_at = chrono::Utc::now();
+                        updated_memory.source_attribution = memory.source_attribution.clone();
+                        updated_memory.trust_level = memory.trust_level;
+                        updated_memory.source_reinforcement_score =
+                            memory.source_reinforcement_score;
+                        updated_memory.recompute_trust_metrics();
+                        let now = chrono::Utc::now();
+                        updated_memory.expired_at = match updated_memory.expires_at {
+                            Some(expiration) if expiration <= now => {
+                                Some(memory.expired_at.unwrap_or(now))
+                            }
+                            Some(_) => None,
+                            None => None,
+                        };
 
                         let clear_embeddings = updated_memory.content != memory.content;
                         self.with_store_db(&store, move |db| {
@@ -1625,14 +1640,33 @@ impl App {
         match edited_result {
             Ok(edited) => {
                 match editor::parse_edited_memory(&edited, None) {
-                    Ok(new_memory) => {
+                    Ok(mut new_memory) => {
+                        let analyzer = if self.config.analyzer.enabled {
+                            Some(build_analyzer(&self.config))
+                        } else {
+                            None
+                        };
+                        if new_memory.source_attribution.is_none() {
+                            new_memory.source_attribution = Some(SourceAttribution::default_user());
+                            new_memory.recompute_trust_metrics();
+                        }
+                        if let Some(analyzer) = analyzer.as_ref() {
+                            if new_memory.expires_at.is_none() {
+                                if let Ok(Some(inferred)) =
+                                    analyzer.infer_expiration(&new_memory.content).await
+                                {
+                                    new_memory.expires_at = Some(inferred);
+                                }
+                            }
+                        }
+
                         let new_id = new_memory.id;
                         operations::insert_memory(self.db.pool(), &new_memory).await?;
 
                         // HMLR enrichment (if enabled)
                         let mut hmlr_info = String::new();
                         if self.config.hmlr.enabled {
-                            let analyzer = build_analyzer(&self.config);
+                            let analyzer = analyzer.unwrap_or_else(|| build_analyzer(&self.config));
                             let pipeline = HmlrPipeline::new(self.config.hmlr.clone(), analyzer);
                             if let Ok(human_id) =
                                 get_or_create_human_agent(self.db.pool(), &self.config).await

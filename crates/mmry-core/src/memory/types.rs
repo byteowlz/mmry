@@ -2,6 +2,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::sparse_embeddings::StoredSparseEmbedding;
@@ -23,6 +24,11 @@ pub struct Memory {
     pub sparse_embedding: Option<StoredSparseEmbedding>,
     pub metadata: serde_json::Value,
     pub importance: i32,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub expired_at: Option<DateTime<Utc>>,
+    pub source_attribution: Option<SourceAttribution>,
+    pub trust_level: f32,
+    pub source_reinforcement_score: f32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub category: String,
@@ -75,6 +81,12 @@ pub struct ProceduralMemory {
 
 impl Memory {
     pub fn new(memory_type: MemoryType, content: String, category: String) -> Self {
+        let source_attribution = Some(SourceAttribution::default_user());
+        let (trust_level, source_reinforcement_score) = source_attribution
+            .as_ref()
+            .map(SourceAttribution::compute_metrics)
+            .unwrap_or((0.5, 0.0));
+
         Self {
             id: Uuid::new_v4(),
             memory_type,
@@ -83,6 +95,11 @@ impl Memory {
             sparse_embedding: None,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             importance: 5,
+            expires_at: None,
+            expired_at: None,
+            source_attribution,
+            trust_level,
+            source_reinforcement_score,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             category,
@@ -100,5 +117,156 @@ impl Memory {
 
     pub fn is_parent(&self) -> bool {
         self.total_chunks.is_some() && self.total_chunks.unwrap() > 1
+    }
+
+    pub fn recompute_trust_metrics(&mut self) {
+        let (trust_level, reinforcement) = self
+            .source_attribution
+            .as_ref()
+            .map(SourceAttribution::compute_metrics)
+            .unwrap_or((0.5, 0.0));
+        self.trust_level = trust_level;
+        self.source_reinforcement_score = reinforcement;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceKind {
+    User,
+    Llm,
+    External,
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceEntry {
+    pub kind: SourceKind,
+    pub label: Option<String>,
+    pub trust: f32,
+    pub model: Option<String>,
+    pub reference: Option<String>,
+}
+
+impl SourceEntry {
+    pub fn user(label: &str, trust: f32) -> Self {
+        Self {
+            kind: SourceKind::User,
+            label: Some(label.to_string()),
+            trust,
+            model: None,
+            reference: None,
+        }
+    }
+
+    pub fn llm(label: &str, trust: f32, model: Option<String>) -> Self {
+        Self {
+            kind: SourceKind::Llm,
+            label: Some(label.to_string()),
+            trust,
+            model,
+            reference: None,
+        }
+    }
+
+    pub fn external(reference: &str, trust: f32) -> Self {
+        Self {
+            kind: SourceKind::External,
+            label: None,
+            trust,
+            model: None,
+            reference: Some(reference.to_string()),
+        }
+    }
+
+    fn unique_key(&self) -> String {
+        format!(
+            "{:?}:{:?}:{:?}:{:?}",
+            self.kind, self.label, self.model, self.reference
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceAttribution {
+    pub sources: Vec<SourceEntry>,
+}
+
+impl SourceAttribution {
+    pub fn new(sources: Vec<SourceEntry>) -> Self {
+        Self { sources }
+    }
+
+    pub fn default_user() -> Self {
+        Self {
+            sources: vec![SourceEntry::user("direct_input", 0.9)],
+        }
+    }
+
+    pub fn add_source(&mut self, source: SourceEntry) -> bool {
+        let key = source.unique_key();
+        if let Some(existing) = self
+            .sources
+            .iter_mut()
+            .find(|existing| existing.unique_key() == key)
+        {
+            if source.trust > existing.trust {
+                existing.trust = source.trust;
+            }
+            return false;
+        }
+
+        self.sources.push(source);
+        true
+    }
+
+    pub fn compute_metrics(&self) -> (f32, f32) {
+        if self.sources.is_empty() {
+            return (0.5, 0.0);
+        }
+
+        let avg_trust = self
+            .sources
+            .iter()
+            .map(|source| source.trust.clamp(0.0, 1.0))
+            .sum::<f32>()
+            / self.sources.len() as f32;
+
+        let mut unique = HashSet::new();
+        for source in &self.sources {
+            unique.insert(source.unique_key());
+        }
+
+        let bonus = (unique.len().saturating_sub(1) as f32) * 0.1;
+        let reinforcement = (avg_trust + bonus).clamp(0.0, 1.5);
+
+        (avg_trust.clamp(0.0, 1.0), reinforcement)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_attribution_metrics_grow_with_sources() {
+        let attribution = SourceAttribution::new(vec![
+            SourceEntry::user("direct", 0.8),
+            SourceEntry::external("https://example.com", 0.6),
+        ]);
+
+        let (trust_level, reinforcement) = attribution.compute_metrics();
+        assert!((trust_level - 0.7).abs() < 0.001);
+        assert!((reinforcement - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn add_source_dedupes_by_key_and_updates_trust() {
+        let mut attribution = SourceAttribution::new(vec![SourceEntry::user("direct", 0.7)]);
+        let added = attribution.add_source(SourceEntry::user("direct", 0.9));
+
+        assert!(!added);
+        assert_eq!(attribution.sources.len(), 1);
+        assert!((attribution.sources[0].trust - 0.9).abs() < 0.001);
     }
 }

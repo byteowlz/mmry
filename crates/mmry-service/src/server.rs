@@ -10,6 +10,7 @@ use axum::routing::get;
 use axum::routing::post;
 use axum::Json;
 use axum::Router;
+use chrono::Duration as ChronoDuration;
 use mmry_core::agents::AgentEvent;
 use mmry_core::agents::AgentRecord;
 use mmry_core::agents::BridgeBlock;
@@ -33,7 +34,11 @@ use mmry_core::database::Database;
 use mmry_core::guardrails::GuardrailsAccumulator;
 use mmry_core::guardrails::GuardrailsSummary;
 use mmry_core::hmlr::prompts::MemoryCandidate;
+use mmry_core::hmlr::ContextHydrator;
+use mmry_core::hmlr::SynthesisOptions;
 use mmry_core::memory::Memory;
+use mmry_core::memory::SourceAttribution;
+use mmry_core::memory::SourceEntry;
 use mmry_core::profile_blocks::ProfileBlock;
 use mmry_core::profile_blocks::ProfileBlockPatchOp;
 use mmry_core::profile_blocks::ProfileBlockScope;
@@ -269,6 +274,8 @@ struct FederationSearchRequest {
     mode: Option<String>,
     #[serde(default)]
     rerank: Option<bool>,
+    #[serde(default)]
+    include_expired: Option<bool>,
     #[serde(default)]
     store: Option<String>,
 }
@@ -694,6 +701,7 @@ impl EmbeddingService for EmbeddingServiceImpl {
                 req.limit,
                 Some(mode),
                 Some(req.rerank),
+                req.include_expired,
             )
             .await
             .map_err(|e| Status::internal(format!("Search failed: {e}")))?;
@@ -1004,6 +1012,11 @@ async fn agent_memory_create_handler(
         .category
         .unwrap_or_else(|| app_state.state.config.memory.default_category.clone());
     let mut memory = Memory::new(memory_type, payload.content.clone(), category.clone());
+    memory.source_attribution = Some(SourceAttribution::new(vec![SourceEntry::external(
+        &format!("agent:{}", agent.id),
+        0.7,
+    )]));
+    memory.recompute_trust_metrics();
 
     if let Some(tags) = payload.tags {
         memory.tags = tags;
@@ -1310,6 +1323,7 @@ async fn agent_route_handler(
             limit * 2,
             None,
             None,
+            false,
         ),
     )
     .await
@@ -1483,6 +1497,7 @@ async fn federation_search_handler(
             limit,
             mode,
             rerank,
+            payload.include_expired.unwrap_or(false),
         )
         .await
         .map_err(|e| ApiError::internal(format!("Search failed: {e}")))?;
@@ -1999,6 +2014,11 @@ async fn console_data_handler(
 
 pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -> Result<()> {
     let state = Arc::new(ServiceState::new(config.clone()).await?);
+    if config.analyzer.enabled {
+        if let Err(e) = mmry_core::analysis::check_analyzer_health(&config).await {
+            tracing::warn!("Analyzer health check failed: {e}");
+        }
+    }
 
     // Bind to random available port on localhost for gRPC
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
@@ -2019,6 +2039,13 @@ pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -
         let idle_timeout = config.service.idle_timeout_seconds;
         tokio::spawn(async move {
             idle_timeout_task(state_clone, idle_timeout).await;
+        });
+    }
+
+    if config.hmlr.enabled && config.hmlr.synthesis_interval_seconds > 0 {
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            synthesis_task(state_clone).await;
         });
     }
 
@@ -2115,6 +2142,14 @@ fn memory_to_proto(memory: Memory) -> MemoryResult {
         }),
         metadata_json: memory.metadata.to_string(),
         importance: memory.importance,
+        expires_at: memory
+            .expires_at
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_default(),
+        expired_at: memory
+            .expired_at
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_default(),
         created_at: memory.created_at.to_rfc3339(),
         updated_at: memory.updated_at.to_rfc3339(),
         category: memory.category,
@@ -2162,6 +2197,93 @@ async fn idle_timeout_task(state: Arc<ServiceState>, timeout_seconds: u64) {
 
         if idle_duration > Duration::from_secs(timeout_seconds) {
             state.unload_models().await;
+        }
+    }
+}
+
+async fn synthesis_task(state: Arc<ServiceState>) {
+    let interval = state.config.hmlr.synthesis_interval_seconds;
+    if interval == 0 {
+        return;
+    }
+
+    let analyzer = build_analyzer(&state.config);
+    let hydrator = ContextHydrator::new();
+    let options = SynthesisOptions::default();
+    let mut ticker = tokio::time::interval(Duration::from_secs(interval));
+
+    loop {
+        ticker.tick().await;
+        if !state.config.hmlr.enabled {
+            continue;
+        }
+
+        let pool = state.db.pool();
+        let mut synthesized = 0;
+
+        if analyzer.is_noop() {
+            tracing::debug!("Analyzer disabled; skipping synthesis step");
+        } else {
+            match hydrator.find_synthesis_candidates(pool, &options).await {
+                Ok(candidates) => {
+                    for mut block in candidates {
+                        match hydrator.prepare_for_synthesis(pool, &block).await {
+                            Ok(memories) if !memories.is_empty() => {
+                                match analyzer.synthesize_bridge_block(&block, &memories).await {
+                                    Ok(Some(result)) => {
+                                        if let Err(e) = hydrator
+                                            .apply_synthesis(pool, &mut block, &result)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                block_id = %block.block_id,
+                                                "Failed to apply synthesis: {e}"
+                                            );
+                                        } else {
+                                            synthesized += 1;
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        tracing::debug!(
+                                            block_id = %block.block_id,
+                                            "Synthesis returned no result"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            block_id = %block.block_id,
+                                            "Synthesis failed: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    block_id = %block.block_id,
+                                    "Failed to prepare synthesis: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("Failed to find synthesis candidates: {e}"),
+            }
+        }
+
+        match hydrator.decay_fact_recency(pool, 0.05).await {
+            Ok(updated) => {
+                tracing::debug!(updated, "Decayed fact recency scores");
+            }
+            Err(e) => tracing::warn!("Failed to decay fact recency scores: {e}"),
+        }
+
+        let cutoff = chrono::Utc::now() - ChronoDuration::hours(options.max_age_hours as i64);
+        match operations::close_inactive_bridge_blocks(pool, cutoff).await {
+            Ok(closed) => {
+                tracing::debug!(closed, synthesized, "Background synthesis completed");
+            }
+            Err(e) => tracing::warn!("Failed to close inactive bridge blocks: {e}"),
         }
     }
 }
@@ -2302,6 +2424,7 @@ mod tests {
                 limit: Some(10),
                 mode: Some("keyword".to_string()),
                 rerank: Some(false),
+                include_expired: None,
                 store: None,
             }),
         )
@@ -2319,6 +2442,7 @@ mod tests {
                 limit: Some(10),
                 mode: Some("keyword".to_string()),
                 rerank: Some(false),
+                include_expired: None,
                 store: Some("b".to_string()),
             }),
         )
@@ -2378,6 +2502,7 @@ mod tests {
                 mode: SearchMode::Keyword as i32,
                 rerank: false,
                 store: "b".to_string(),
+                include_expired: false,
             }))
             .await
             .expect("search ok");

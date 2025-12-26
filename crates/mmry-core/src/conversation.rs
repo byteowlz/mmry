@@ -9,6 +9,8 @@ use crate::agents::AgentRecord;
 use crate::database::operations;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
+use crate::memory::SourceAttribution;
+use crate::memory::SourceEntry;
 use crate::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,7 +157,13 @@ pub async fn persist_summary(
 ) -> Result<PersistedSummary> {
     ensure_agent_exists(pool, agent_id).await?;
 
-    let memory = Memory::new(MemoryType::Episodic, summary, category);
+    let mut memory = Memory::new(MemoryType::Episodic, summary, category);
+    memory.source_attribution = Some(SourceAttribution::new(vec![SourceEntry::llm(
+        "conversation_summary",
+        0.7,
+        None,
+    )]));
+    memory.recompute_trust_metrics();
     operations::insert_memory(pool, &memory).await?;
 
     let mut event = AgentEvent::new(agent_id, "conversation_summary");

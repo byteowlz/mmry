@@ -8,6 +8,7 @@
 //! - ContextHydrator: Assembles final context from multiple sources
 //! - Benchmarks: RAGAS-style tests for memory system quality
 
+#[cfg(feature = "bench")]
 pub mod benchmarks;
 mod context_hydrator;
 mod fact_scrubber;
@@ -231,6 +232,7 @@ mod tests {
             audit_trail: true,
             track_human_agent: true,
             human_agent_name: "test_human".to_string(),
+            synthesis_interval_seconds: 0,
         };
 
         // Create the human agent first

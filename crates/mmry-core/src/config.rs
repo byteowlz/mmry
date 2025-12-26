@@ -567,7 +567,7 @@ pub struct ExternalApiConfig {
     pub request_timeout_seconds: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct AnalyzerConfig {
     /// Enable analyzer-backed features (fact extraction, routing)
@@ -576,6 +576,22 @@ pub struct AnalyzerConfig {
     pub model: Option<String>,
     /// HTTP endpoint for OpenAI-compatible API (e.g., "http://127.0.0.1:1234/v1")
     pub endpoint: Option<String>,
+    /// Number of retries for transient analyzer failures
+    pub retry_count: u32,
+    /// Base backoff in milliseconds between retries
+    pub retry_backoff_ms: u64,
+}
+
+impl Default for AnalyzerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: None,
+            endpoint: None,
+            retry_count: 3,
+            retry_backoff_ms: 1000,
+        }
+    }
 }
 
 impl Default for ServiceConfig {
@@ -622,6 +638,8 @@ pub struct HmlrConfig {
     pub track_human_agent: bool,
     /// Name for the human operator agent (used when track_human_agent=true)
     pub human_agent_name: String,
+    /// Interval in seconds for background synthesis (0 disables)
+    pub synthesis_interval_seconds: u64,
 }
 
 impl Default for HmlrConfig {
@@ -633,6 +651,7 @@ impl Default for HmlrConfig {
             audit_trail: true,
             track_human_agent: true,
             human_agent_name: "human".to_string(),
+            synthesis_interval_seconds: 0,
         }
     }
 }

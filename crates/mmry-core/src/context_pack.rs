@@ -89,6 +89,7 @@ pub async fn build_context_pack(
             opts.limit,
             Some(opts.mode),
             Some(opts.rerank),
+            false,
         )
         .await?;
 

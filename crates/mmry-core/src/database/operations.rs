@@ -7,6 +7,8 @@ use crate::agents::FactCategory;
 use crate::agents::FactRecord;
 use crate::agents::UserProfileEntry;
 use crate::memory::Memory;
+use crate::memory::SourceAttribution;
+use crate::memory::SourceEntry;
 use crate::sparse_embeddings::StoredSparseEmbedding;
 use sqlx::Row;
 use sqlx::SqlitePool;
@@ -90,6 +92,31 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
             ))
         })?
         .with_timezone(&chrono::Utc);
+    let expires_at_raw: Option<String> = row.try_get("expires_at").ok().flatten();
+    let expires_at = match expires_at_raw {
+        Some(raw) => Some(parse_datetime(&raw, "expires_at", &format!("memory {id}"))?),
+        None => None,
+    };
+    let expired_at_raw: Option<String> = row.try_get("expired_at").ok().flatten();
+    let expired_at = match expired_at_raw {
+        Some(raw) => Some(parse_datetime(&raw, "expired_at", &format!("memory {id}"))?),
+        None => None,
+    };
+    let source_attribution_raw: Option<String> = row.try_get("source_attribution").ok().flatten();
+    let source_attribution = match source_attribution_raw {
+        Some(raw) => match serde_json::from_str::<SourceAttribution>(&raw) {
+            Ok(attribution) => Some(attribution),
+            Err(e) => {
+                tracing::warn!(memory_id = %id, error = %e, "Invalid source attribution stored; skipping value");
+                None
+            }
+        },
+        None => None,
+    };
+    let trust_level: Option<f32> = row.try_get("trust_level").ok();
+    let trust_level = trust_level.unwrap_or(0.5);
+    let source_reinforcement_score: Option<f32> = row.try_get("source_reinforcement_score").ok();
+    let source_reinforcement_score = source_reinforcement_score.unwrap_or(0.0);
 
     Ok(Memory {
         id,
@@ -99,6 +126,11 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         sparse_embedding: sparse_embedding_vec,
         metadata: serde_json::from_str(row.try_get("metadata")?)?,
         importance: row.try_get("importance")?,
+        expires_at,
+        expired_at,
+        source_attribution,
+        trust_level,
+        source_reinforcement_score,
         category: row.try_get("category")?,
         tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
         created_at,
@@ -127,11 +159,26 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
             .map(|s| s.trim_matches('"').to_string())
     });
 
+    let now = chrono::Utc::now();
+    let expired_at = memory
+        .expired_at
+        .or_else(|| memory.expires_at.filter(|ts| *ts <= now).map(|_| now));
+    let (trust_level, source_reinforcement_score) = memory
+        .source_attribution
+        .as_ref()
+        .map(SourceAttribution::compute_metrics)
+        .unwrap_or((memory.trust_level, memory.source_reinforcement_score));
+
     sqlx::query(
         r#"
-        INSERT INTO memories (id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#
+        INSERT INTO memories (
+            id, type, content, embedding, sparse_embedding, metadata, importance,
+            expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score,
+            category, tags, created_at, updated_at,
+            parent_id, chunk_index, total_chunks, chunk_method
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
     )
     .bind(memory.id.to_string())
     .bind(serde_json::to_string(&memory.memory_type)?)
@@ -140,6 +187,17 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(sparse_embedding_bytes)
     .bind(memory.metadata.to_string())
     .bind(memory.importance)
+    .bind(memory.expires_at.map(|ts| ts.to_rfc3339()))
+    .bind(expired_at.map(|ts| ts.to_rfc3339()))
+    .bind(
+        memory
+            .source_attribution
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
+    .bind(trust_level)
+    .bind(source_reinforcement_score)
     .bind(&memory.category)
     .bind(serde_json::to_string(&memory.tags)?)
     .bind(memory.created_at.to_rfc3339())
@@ -161,7 +219,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
         FROM memories
         WHERE id = ?
         "#,
@@ -185,7 +243,7 @@ pub async fn list_memories(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -199,7 +257,7 @@ pub async fn list_memories(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -241,6 +299,106 @@ pub async fn delete_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<bool> {
     } else {
         Ok(false)
     }
+}
+
+pub async fn mark_expired_memories(
+    pool: &SqlitePool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE memories
+        SET expired_at = ?
+        WHERE expired_at IS NULL
+          AND expires_at IS NOT NULL
+          AND expires_at <= ?
+        "#,
+    )
+    .bind(now.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+pub async fn update_memory_provenance(
+    pool: &SqlitePool,
+    memory_id: Uuid,
+    source_attribution: Option<SourceAttribution>,
+) -> crate::Result<Memory> {
+    let mut memory = get_memory(pool, memory_id)
+        .await?
+        .ok_or_else(|| crate::Error::InvalidInput("Memory not found".to_string()))?;
+
+    memory.source_attribution = source_attribution;
+    memory.recompute_trust_metrics();
+    memory.updated_at = chrono::Utc::now();
+
+    sqlx::query(
+        r#"
+        UPDATE memories
+        SET source_attribution = ?, trust_level = ?, source_reinforcement_score = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(
+        memory
+            .source_attribution
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
+    .bind(memory.trust_level)
+    .bind(memory.source_reinforcement_score)
+    .bind(memory.updated_at.to_rfc3339())
+    .bind(memory.id.to_string())
+    .execute(pool)
+    .await?;
+
+    Ok(memory)
+}
+
+pub async fn add_memory_source(
+    pool: &SqlitePool,
+    memory_id: Uuid,
+    source: SourceEntry,
+) -> crate::Result<Memory> {
+    let mut memory = get_memory(pool, memory_id)
+        .await?
+        .ok_or_else(|| crate::Error::InvalidInput("Memory not found".to_string()))?;
+
+    let mut attribution = memory
+        .source_attribution
+        .take()
+        .unwrap_or_else(|| SourceAttribution::new(Vec::new()));
+    attribution.add_source(source);
+    memory.source_attribution = Some(attribution);
+    memory.recompute_trust_metrics();
+    memory.updated_at = chrono::Utc::now();
+
+    sqlx::query(
+        r#"
+        UPDATE memories
+        SET source_attribution = ?, trust_level = ?, source_reinforcement_score = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(
+        memory
+            .source_attribution
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
+    .bind(memory.trust_level)
+    .bind(memory.source_reinforcement_score)
+    .bind(memory.updated_at.to_rfc3339())
+    .bind(memory.id.to_string())
+    .execute(pool)
+    .await?;
+
+    Ok(memory)
 }
 
 pub async fn update_memory_embeddings(
@@ -286,11 +444,18 @@ pub async fn update_memory_fields(
             .map(|s| s.trim_matches('"').to_string())
     });
 
+    let (trust_level, source_reinforcement_score) = memory
+        .source_attribution
+        .as_ref()
+        .map(SourceAttribution::compute_metrics)
+        .unwrap_or((memory.trust_level, memory.source_reinforcement_score));
+
     sqlx::query(
         r#"
         UPDATE memories
-        SET type = ?, content = ?, metadata = ?, importance = ?, category = ?, tags = ?,
-            updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?
+        SET type = ?, content = ?, metadata = ?, importance = ?, expires_at = ?, expired_at = ?,
+            source_attribution = ?, trust_level = ?, source_reinforcement_score = ?,
+            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?
         WHERE id = ?
         "#,
     )
@@ -298,6 +463,17 @@ pub async fn update_memory_fields(
     .bind(&memory.content)
     .bind(memory.metadata.to_string())
     .bind(memory.importance)
+    .bind(memory.expires_at.map(|ts| ts.to_rfc3339()))
+    .bind(memory.expired_at.map(|ts| ts.to_rfc3339()))
+    .bind(
+        memory
+            .source_attribution
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
+    .bind(trust_level)
+    .bind(source_reinforcement_score)
     .bind(&memory.category)
     .bind(serde_json::to_string(&memory.tags)?)
     .bind(memory.updated_at.to_rfc3339())
@@ -500,6 +676,26 @@ pub async fn list_bridge_blocks_by_span(
 
 pub async fn list_bridge_blocks(pool: &SqlitePool, limit: i64) -> crate::Result<Vec<BridgeBlock>> {
     list_bridge_blocks_by_span(pool, None, limit).await
+}
+
+pub async fn close_inactive_bridge_blocks(
+    pool: &SqlitePool,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> crate::Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE bridge_blocks
+        SET status = 'closed',
+            exit_reason = 'inactive_timeout'
+        WHERE status = 'active'
+          AND created_at <= ?
+        "#,
+    )
+    .bind(cutoff.to_rfc3339())
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 pub async fn upsert_fact(pool: &SqlitePool, fact: &FactRecord) -> crate::Result<()> {

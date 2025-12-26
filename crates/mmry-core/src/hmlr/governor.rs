@@ -160,8 +160,7 @@ impl Governor {
         context: &HmlrContext,
         candidates: &[BridgeBlock],
     ) -> Result<(BridgeBlock, bool, Option<String>)> {
-        // If no candidates or no query, create new block
-        if candidates.is_empty() || context.query.is_none() {
+        if candidates.is_empty() {
             let block = self.create_bridge_block(pool, memory, context).await?;
             return Ok((
                 block,
@@ -170,30 +169,52 @@ impl Governor {
             ));
         }
 
-        // Find the most recent active block for this agent
-        let active_block = candidates.iter().find(|b| {
-            b.status == Some("active".to_string()) && b.agent_id == Some(context.creator_id)
-        });
+        if self.analyzer.is_noop() {
+            // Heuristic fallback when analyzer is disabled
+            let active_block = candidates.iter().find(|b| {
+                b.status == Some("active".to_string()) && b.agent_id == Some(context.creator_id)
+            });
 
-        if let Some(block) = active_block {
-            // Resume existing block
-            let updated_block = self
-                .resume_bridge_block(pool, block.block_id, memory)
-                .await?;
-            Ok((
-                updated_block,
-                false,
-                Some("Resumed active block".to_string()),
-            ))
-        } else {
-            // Create new block
+            if let Some(block) = active_block {
+                let updated_block = self
+                    .resume_bridge_block(pool, block.block_id, memory)
+                    .await?;
+                return Ok((
+                    updated_block,
+                    false,
+                    Some("Resumed active block (heuristic)".to_string()),
+                ));
+            }
+
             let block = self.create_bridge_block(pool, memory, context).await?;
-            Ok((
+            return Ok((
                 block,
                 true,
-                Some("No active block, created new".to_string()),
-            ))
+                Some("No active block, created new (heuristic)".to_string()),
+            ));
         }
+
+        let routing = self.analyzer.route(&memory.content, candidates).await?;
+
+        if let Some(chosen) = routing.chosen_block {
+            let updated_block = self.resume_bridge_block(pool, chosen, memory).await?;
+            return Ok((updated_block, false, routing.rationale));
+        }
+
+        if !routing.is_new_topic {
+            let active_block = candidates.iter().find(|b| {
+                b.status == Some("active".to_string()) && b.agent_id == Some(context.creator_id)
+            });
+            if let Some(block) = active_block {
+                let updated_block = self
+                    .resume_bridge_block(pool, block.block_id, memory)
+                    .await?;
+                return Ok((updated_block, false, routing.rationale));
+            }
+        }
+
+        let block = self.create_bridge_block(pool, memory, context).await?;
+        Ok((block, true, routing.rationale))
     }
 
     /// Create a new bridge block for the memory
@@ -310,10 +331,13 @@ fn is_stop_word(word: &str) -> bool {
 mod tests {
     use super::*;
     use crate::agents::AgentRecord;
+    use crate::analysis::AnalyzerRouting;
     use crate::analysis::NoOpAnalyzer;
     use crate::database::Database;
     use crate::memory::MemoryType;
+    use async_trait::async_trait;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     async fn setup_test_db() -> anyhow::Result<(tempfile::TempDir, Database)> {
         let temp = tempdir()?;
@@ -327,6 +351,29 @@ mod tests {
         let agent = AgentRecord::new("test_agent".to_string(), "test".to_string());
         operations::upsert_agent(pool, &agent).await?;
         Ok(agent.id)
+    }
+
+    struct FixedRouteAnalyzer {
+        chosen: Option<Uuid>,
+    }
+
+    #[async_trait]
+    impl crate::analysis::Analyzer for FixedRouteAnalyzer {
+        async fn extract_facts(&self, _content: &str) -> crate::Result<Vec<FactRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn route(
+            &self,
+            _query: &str,
+            _candidates: &[BridgeBlock],
+        ) -> crate::Result<AnalyzerRouting> {
+            Ok(AnalyzerRouting {
+                chosen_block: self.chosen,
+                is_new_topic: self.chosen.is_none(),
+                rationale: Some("Test routing".to_string()),
+            })
+        }
     }
 
     #[tokio::test]
@@ -422,6 +469,49 @@ mod tests {
         assert!(!decision2.is_new_topic);
         let block2 = decision2.bridge_block.unwrap();
         assert_eq!(block1.block_id, block2.block_id);
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_governor_uses_analyzer_routing() -> anyhow::Result<()> {
+        let (_temp, db) = setup_test_db().await?;
+
+        let config = HmlrConfig {
+            enabled: true,
+            extract_facts: false,
+            bridge_routing: true,
+            ..Default::default()
+        };
+
+        let agent_id = create_test_agent(db.pool()).await?;
+
+        let mut block = BridgeBlock::new();
+        block.agent_id = Some(agent_id);
+        block.status = Some("active".to_string());
+        operations::upsert_bridge_block(db.pool(), &block).await?;
+
+        let analyzer = Arc::new(FixedRouteAnalyzer {
+            chosen: Some(block.block_id),
+        });
+        let governor = Governor::new(config, analyzer);
+
+        let memory = Memory::new(
+            MemoryType::Episodic,
+            "Routing should use analyzer".to_string(),
+            "work".to_string(),
+        );
+        operations::insert_memory(db.pool(), &memory).await?;
+
+        let context = HmlrContext::for_agent(agent_id, Some("Route this".to_string()), vec![]);
+        let decision = governor
+            .process_memory(db.pool(), &memory, &context)
+            .await?;
+
+        assert!(decision.bridge_block.is_some());
+        assert!(!decision.is_new_topic);
+        assert_eq!(decision.bridge_block.unwrap().block_id, block.block_id);
 
         db.close().await;
         Ok(())

@@ -81,6 +81,7 @@ pub struct FederatedSearchOptions<'a> {
     pub limit: i64,
     pub mode: SearchMode,
     pub rerank: bool,
+    pub include_expired: bool,
     pub embeddings: std::sync::Arc<Mutex<EmbeddingServiceWrapper>>,
     pub sparse_embeddings: std::sync::Arc<SparseEmbeddingService>,
     pub reranker: std::sync::Arc<RerankerService>,
@@ -97,6 +98,8 @@ struct RemoteSearchRequest<'a> {
     mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rerank: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include_expired: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     store: Option<&'a str>,
 }
@@ -203,6 +206,7 @@ pub async fn search_federated(opts: FederatedSearchOptions<'_>) -> Result<Vec<Me
         let limit = opts.limit;
         let mode = opts.mode;
         let rerank = opts.rerank;
+        let include_expired = opts.include_expired;
 
         tasks.push(tokio::spawn(async move {
             let db = Database::init_store(&config, Some(&store)).await?;
@@ -214,7 +218,14 @@ pub async fn search_federated(opts: FederatedSearchOptions<'_>) -> Result<Vec<Me
                 reranker,
             );
             let results = search_service
-                .search_with_options(&query, category.as_deref(), limit, Some(mode), Some(rerank))
+                .search_with_options(
+                    &query,
+                    category.as_deref(),
+                    limit,
+                    Some(mode),
+                    Some(rerank),
+                    include_expired,
+                )
                 .await?;
             db.close().await;
 
@@ -242,6 +253,7 @@ pub async fn search_federated(opts: FederatedSearchOptions<'_>) -> Result<Vec<Me
         let limit = opts.limit;
         let mode = opts.mode;
         let rerank = opts.rerank;
+        let include_expired = opts.include_expired;
 
         tasks.push(tokio::spawn(async move {
             let url = format!("{base_url}/v1/federation/search");
@@ -251,6 +263,7 @@ pub async fn search_federated(opts: FederatedSearchOptions<'_>) -> Result<Vec<Me
                 limit: Some(limit),
                 mode: Some(mode_to_param(mode).to_string()),
                 rerank: Some(rerank),
+                include_expired: Some(include_expired),
                 store: store.as_deref(),
             };
 
@@ -351,6 +364,11 @@ mod tests {
                 sparse_embedding: None,
                 metadata: serde_json::json!({}),
                 importance: 5,
+                expires_at: None,
+                expired_at: None,
+                source_attribution: None,
+                trust_level: 0.5,
+                source_reinforcement_score: 0.0,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 category: "default".into(),

@@ -1,3 +1,4 @@
+use chrono::NaiveDate;
 use clap::Parser;
 use std::io::Read;
 use std::io::{self};
@@ -49,6 +50,12 @@ pub struct AddCmd {
 
     #[arg(long, short = 'f', help = "Include full embeddings in JSON output")]
     pub full: bool,
+
+    #[arg(
+        long,
+        help = "Expiration timestamp for the memory (RFC3339 or YYYY-MM-DD)"
+    )]
+    pub expires_at: Option<String>,
 }
 
 pub async fn handle(
@@ -121,6 +128,12 @@ pub async fn handle(
 
     if let Some(importance) = cmd.importance {
         memory.importance = importance.clamp(1, 10);
+    }
+
+    if let Some(raw) = cmd.expires_at.as_deref() {
+        memory.expires_at = Some(parse_expiration_input(raw)?);
+    } else if let Ok(Some(inferred)) = analyzer.infer_expiration(&memory.content).await {
+        memory.expires_at = Some(inferred);
     }
 
     // Check if chunking is needed
@@ -372,7 +385,7 @@ async fn handle_json_input(
     if let Some(array) = json_value.as_array() {
         let mut results = Vec::new();
         for item in array {
-            let memory = process_json_memory(
+            let mut memory = process_json_memory(
                 item,
                 &cmd,
                 ctx.config,
@@ -380,6 +393,7 @@ async fn handle_json_input(
                 ctx.sparse_embeddings,
             )
             .await?;
+            maybe_infer_expiration(ctx.analyzer, &mut memory).await;
             operations::insert_memory(ctx.db.pool(), &memory).await?;
             // Extract entities for each memory
             extract_and_link_entities(ctx.db, ctx.ner, &memory, true).await?;
@@ -423,7 +437,7 @@ async fn handle_json_input(
     }
 
     // Handle single object
-    let memory = process_json_memory(
+    let mut memory = process_json_memory(
         &json_value,
         &cmd,
         ctx.config,
@@ -431,6 +445,7 @@ async fn handle_json_input(
         ctx.sparse_embeddings,
     )
     .await?;
+    maybe_infer_expiration(ctx.analyzer, &mut memory).await;
     operations::insert_memory(ctx.db.pool(), &memory).await?;
     // Extract entities
     extract_and_link_entities(ctx.db, ctx.ner, &memory, cmd.json).await?;
@@ -546,6 +561,12 @@ async fn process_json_memory(
         }
     }
 
+    if let Some(raw) = cmd.expires_at.as_deref() {
+        memory.expires_at = Some(parse_expiration_input(raw)?);
+    } else if let Some(raw) = obj.get("expires_at").and_then(|v| v.as_str()) {
+        memory.expires_at = Some(parse_expiration_input(raw)?);
+    }
+
     // Extract tags
     if let Some(tags_str) = cmd.tags.as_ref() {
         memory.tags = tags_str.split(',').map(|s| s.trim().to_string()).collect();
@@ -575,6 +596,34 @@ async fn process_json_memory(
     }
 
     Ok(memory)
+}
+
+async fn maybe_infer_expiration(analyzer: &Arc<dyn Analyzer + Send + Sync>, memory: &mut Memory) {
+    if memory.expires_at.is_some() {
+        return;
+    }
+
+    if let Ok(Some(inferred)) = analyzer.infer_expiration(&memory.content).await {
+        memory.expires_at = Some(inferred);
+    }
+}
+
+fn parse_expiration_input(raw: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+    if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(ts.with_timezone(&chrono::Utc));
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        let naive = date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| anyhow::anyhow!("Invalid date {raw}"))?;
+        return Ok(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            naive,
+            chrono::Utc,
+        ));
+    }
+
+    anyhow::bail!("Invalid expires_at format: {raw}");
 }
 
 fn serialize_memory(memory: &Memory, full: bool) -> anyhow::Result<String> {
@@ -661,6 +710,7 @@ mod tests {
             category: None,
             tags: None,
             importance: None,
+            expires_at: None,
             json: false,
             full: false,
         };
@@ -702,6 +752,7 @@ mod tests {
             category: None,
             tags: None,
             importance: None,
+            expires_at: None,
             json: true,
             full: false,
         };

@@ -45,6 +45,7 @@ default = ["service", "remote-http"]
 remote-http = ["dep:reqwest"]
 service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "remote-http", "dep:rig-core"]
 federation = ["remote-http"]
+bench = []
 
 # Hardware acceleration
 coreml = ["ort/coreml"]  # Apple Silicon (macOS/iOS)

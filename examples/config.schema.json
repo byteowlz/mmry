@@ -7,7 +7,9 @@
       "default": {
         "enabled": false,
         "endpoint": null,
-        "model": null
+        "model": null,
+        "retry_backoff_ms": 1000,
+        "retry_count": 3
       },
       "allOf": [
         {
@@ -114,6 +116,7 @@
         "enabled": false,
         "extract_facts": true,
         "human_agent_name": "human",
+        "synthesis_interval_seconds": 0,
         "track_human_agent": true
       },
       "allOf": [
@@ -256,6 +259,20 @@
             "string",
             "null"
           ]
+        },
+        "retry_backoff_ms": {
+          "description": "Base backoff in milliseconds between retries",
+          "default": 1000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "retry_count": {
+          "description": "Number of retries for transient analyzer failures",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
@@ -497,6 +514,13 @@
           "description": "Auto-create agent record for human operators",
           "default": true,
           "type": "boolean"
+        },
+        "synthesis_interval_seconds": {
+          "description": "Interval in seconds for background synthesis (0 disables)",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         }
       }
     },

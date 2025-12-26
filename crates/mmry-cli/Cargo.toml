@@ -27,6 +27,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 sqlx = { workspace = true }
+sysinfo = { version = "0.32", optional = true }
 
 # TUI dependencies (for future interactive mode)
 ratatui = "0.28"
@@ -47,6 +48,7 @@ tempfile = { workspace = true }
 [features]
 service = ["mmry-core/service"]
 federation = ["mmry-core/federation"]
+bench = ["mmry-core/bench", "dep:sysinfo"]
 default = ["service", "federation"]
 
 # Hardware acceleration (pass through to core)

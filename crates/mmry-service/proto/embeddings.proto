@@ -92,6 +92,7 @@ message SearchRequest {
   SearchMode mode = 4;
   bool rerank = 5;
   string store = 6;
+  bool include_expired = 7;
 }
 
 message SparseEmbeddingData {
@@ -115,6 +116,8 @@ message MemoryResult {
   int32 chunk_index = 13;
   int32 total_chunks = 14;
   string chunk_method = 15;
+  string expires_at = 16;
+  string expired_at = 17;
 }
 
 message SearchResponse {

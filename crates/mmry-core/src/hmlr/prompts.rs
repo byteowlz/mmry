@@ -14,6 +14,10 @@
 use crate::agents::BridgeBlock;
 use crate::agents::FactCategory;
 use crate::agents::FactRecord;
+use crate::hmlr::SynthesisResult;
+use chrono::DateTime;
+use chrono::Utc;
+use tracing::warn;
 
 /// Generate a prompt for extracting categorized facts from content
 ///
@@ -85,12 +89,14 @@ pub fn parse_facts_response(response: &str) -> Vec<FactRecord> {
 
     // Strip markdown code blocks if present (```json ... ``` or ``` ... ```)
     let cleaned = strip_markdown_code_block(response);
+    let mut parsed_any = false;
 
     // First try to parse the wrapped format: {"facts": [...]}
     if let Some(obj_start) = cleaned.find('{') {
         if let Some(obj_end) = cleaned.rfind('}') {
             let json_str = &cleaned[obj_start..=obj_end];
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+                parsed_any = true;
                 if let Some(facts_array) = parsed.get("facts").and_then(|v| v.as_array()) {
                     return facts_array.iter().filter_map(parse_fact_value).collect();
                 }
@@ -106,12 +112,21 @@ pub fn parse_facts_response(response: &str) -> Vec<FactRecord> {
 
             // Parse as JSON array
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                parsed_any = true;
                 let facts: Vec<FactRecord> = parsed.iter().filter_map(parse_fact_value).collect();
                 if !facts.is_empty() {
                     return facts;
                 }
             }
         }
+    }
+
+    if !parsed_any && !cleaned.trim().is_empty() {
+        warn!(
+            target: "llm",
+            raw_response = %response,
+            "Failed to parse fact extraction response"
+        );
     }
 
     Vec::new()
@@ -219,28 +234,46 @@ pub fn parse_routing_response(response: &str) -> Option<RoutingDecision> {
     if let (Some(start), Some(end)) = (json_start, json_end) {
         let json_str = &response[start..=end];
 
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
-            let chosen_block = parsed
-                .get("chosen_block")
-                .and_then(|v| v.as_str())
-                .and_then(|s| uuid::Uuid::parse_str(s).ok());
+        match serde_json::from_str::<serde_json::Value>(json_str) {
+            Ok(parsed) => {
+                let chosen_block = parsed
+                    .get("chosen_block")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok());
 
-            let is_new_topic = parsed
-                .get("is_new_topic")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+                let is_new_topic = parsed
+                    .get("is_new_topic")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
 
-            let rationale = parsed
-                .get("rationale")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                let rationale = parsed
+                    .get("rationale")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
 
-            return Some(RoutingDecision {
-                chosen_block,
-                is_new_topic,
-                rationale,
-            });
+                return Some(RoutingDecision {
+                    chosen_block,
+                    is_new_topic,
+                    rationale,
+                });
+            }
+            Err(_) => {
+                warn!(
+                    target: "llm",
+                    raw_response = %response,
+                    "Failed to parse routing response"
+                );
+                return None;
+            }
         }
+    }
+
+    if !response.trim().is_empty() {
+        warn!(
+            target: "llm",
+            raw_response = %response,
+            "Failed to parse routing response"
+        );
     }
 
     None
@@ -288,6 +321,78 @@ Examples:
 
 Return ONLY the topic label, no other text or formatting:"#
     )
+}
+
+/// Generate a prompt for inferring an expiration date for a memory
+///
+/// Use when the memory implies a clear temporal validity window.
+pub fn expiration_prompt(content: &str) -> String {
+    format!(
+        r#"You are inferring memory expiration for a memory system.
+
+MEMORY CONTENT:
+{content}
+
+TASK:
+If the memory implies a clear expiration (e.g., "valid until Friday", "temporary password"),
+return an RFC3339 timestamp in UTC. If no expiration is implied, return null.
+
+Return JSON:
+{{
+  "expires_at": "<RFC3339 UTC timestamp>" or null,
+  "reason": "<brief reason or empty>"
+}}
+
+Return ONLY the JSON, no other text:"#,
+    )
+}
+
+/// Parse an expiration response from the LLM
+pub fn parse_expiration_response(response: &str) -> Option<DateTime<Utc>> {
+    let json_start = response.find('{');
+    let json_end = response.rfind('}');
+
+    if let (Some(start), Some(end)) = (json_start, json_end) {
+        let json_str = &response[start..=end];
+        match serde_json::from_str::<serde_json::Value>(json_str) {
+            Ok(parsed) => {
+                let expires_at = parsed.get("expires_at")?;
+                if expires_at.is_null() {
+                    return None;
+                }
+                let raw = expires_at.as_str()?;
+                return DateTime::parse_from_rfc3339(raw)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| {
+                        warn!(
+                            target: "llm",
+                            raw_response = %response,
+                            error = %e,
+                            "Invalid expires_at in expiration response"
+                        );
+                    })
+                    .ok();
+            }
+            Err(_) => {
+                warn!(
+                    target: "llm",
+                    raw_response = %response,
+                    "Failed to parse expiration response"
+                );
+                return None;
+            }
+        }
+    }
+
+    if !response.trim().is_empty() {
+        warn!(
+            target: "llm",
+            raw_response = %response,
+            "Failed to parse expiration response"
+        );
+    }
+
+    None
 }
 
 /// Parse a topic label response from the LLM
@@ -340,6 +445,69 @@ Your response:"#,
         block.keywords.join(", "),
         memories_str
     )
+}
+
+/// Parse the LLM response for bridge block synthesis
+pub fn parse_synthesis_response(response: &str, block_id: uuid::Uuid) -> Option<SynthesisResult> {
+    let json_start = response.find('{');
+    let json_end = response.rfind('}');
+
+    if let (Some(start), Some(end)) = (json_start, json_end) {
+        let json_str = &response[start..=end];
+        match serde_json::from_str::<serde_json::Value>(json_str) {
+            Ok(parsed) => {
+                let summary = parsed.get("summary")?.as_str()?.trim().to_string();
+                let key_points = parsed
+                    .get("key_points")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let action_items = parsed
+                    .get("action_items")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                if summary.is_empty() {
+                    return None;
+                }
+
+                return Some(SynthesisResult {
+                    block_id,
+                    summary,
+                    key_points,
+                    action_items,
+                    synthesized_at: Utc::now(),
+                });
+            }
+            Err(_) => {
+                warn!(
+                    target: "llm",
+                    raw_response = %response,
+                    "Failed to parse synthesis response"
+                );
+                return None;
+            }
+        }
+    }
+
+    if !response.trim().is_empty() {
+        warn!(
+            target: "llm",
+            raw_response = %response,
+            "Failed to parse synthesis response"
+        );
+    }
+
+    None
 }
 
 /// Memory candidate for 2-key filtering
@@ -434,27 +602,45 @@ pub fn parse_filtering_response(response: &str) -> FilteringResult {
     if let (Some(start), Some(end)) = (json_start, json_end) {
         let json_str = &response[start..=end];
 
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
-            let relevant_indices = parsed
-                .get("relevant_indices")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_u64().map(|n| n as usize))
-                        .collect()
-                })
-                .unwrap_or_default();
+        match serde_json::from_str::<serde_json::Value>(json_str) {
+            Ok(parsed) => {
+                let relevant_indices = parsed
+                    .get("relevant_indices")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_u64().map(|n| n as usize))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-            let reasoning = parsed
-                .get("reasoning")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                let reasoning = parsed
+                    .get("reasoning")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
 
-            return FilteringResult {
-                relevant_indices,
-                reasoning,
-            };
+                return FilteringResult {
+                    relevant_indices,
+                    reasoning,
+                };
+            }
+            Err(_) => {
+                warn!(
+                    target: "llm",
+                    raw_response = %response,
+                    "Failed to parse filtering response"
+                );
+                return FilteringResult::default();
+            }
         }
+    }
+
+    if !response.trim().is_empty() {
+        warn!(
+            target: "llm",
+            raw_response = %response,
+            "Failed to parse filtering response"
+        );
     }
 
     FilteringResult::default()
@@ -523,6 +709,28 @@ mod tests {
 
         assert_eq!(facts[2].fact_key, "John CEO Relationship");
         assert_eq!(facts[2].category, FactCategory::Entity);
+    }
+
+    #[test]
+    fn test_parse_synthesis_response() {
+        let block_id = uuid::Uuid::new_v4();
+        let response = r#"{
+            "summary": "Discussed project milestones and next steps.",
+            "key_points": ["Milestones defined", "Team aligned"],
+            "action_items": ["Draft timeline"]
+        }"#;
+
+        let result = parse_synthesis_response(response, block_id).expect("parsed synthesis");
+        assert_eq!(result.block_id, block_id);
+        assert_eq!(
+            result.summary,
+            "Discussed project milestones and next steps."
+        );
+        assert_eq!(
+            result.key_points,
+            vec!["Milestones defined", "Team aligned"]
+        );
+        assert_eq!(result.action_items, vec!["Draft timeline"]);
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub struct SearchAllStoresOptions<'a> {
     pub limit: i64,
     pub mode: Option<SearchMode>,
     pub rerank: Option<bool>,
+    pub include_expired: bool,
     pub embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
     pub sparse_embeddings: Arc<SparseEmbeddingService>,
     pub reranker: Arc<RerankerService>,
@@ -203,6 +204,7 @@ pub async fn search_all_stores(
                 opts.limit,
                 opts.mode,
                 opts.rerank,
+                opts.include_expired,
             )
             .await?;
 
@@ -311,6 +313,16 @@ pub struct ExportedMemory {
     pub category: String,
     pub tags: Vec<String>,
     pub importance: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expired_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_attribution: Option<crate::memory::SourceAttribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_level: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_reinforcement_score: Option<f32>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -327,6 +339,11 @@ impl From<&Memory> for ExportedMemory {
             category: memory.category.clone(),
             tags: memory.tags.clone(),
             importance: memory.importance,
+            expires_at: memory.expires_at.map(|ts| ts.to_rfc3339()),
+            expired_at: memory.expired_at.map(|ts| ts.to_rfc3339()),
+            source_attribution: memory.source_attribution.clone(),
+            trust_level: Some(memory.trust_level),
+            source_reinforcement_score: Some(memory.source_reinforcement_score),
             created_at: memory.created_at.to_rfc3339(),
             updated_at: memory.updated_at.to_rfc3339(),
             store: None,

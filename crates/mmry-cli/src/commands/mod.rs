@@ -1,4 +1,6 @@
 pub mod add;
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod export;
 pub mod guard;
 pub mod hmlr;

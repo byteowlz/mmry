@@ -1,12 +1,18 @@
 use anyhow::Result;
 use clap::Subcommand;
+use mmry_core::analysis::check_analyzer_health;
+use mmry_core::config::Config;
 use mmry_core::service::manager::ServiceManager;
 use mmry_core::service::manager::ServiceStatus;
+use std::path::PathBuf;
 
 #[derive(clap::Args)]
 pub struct ServiceCmd {
     #[command(subcommand)]
     command: ServiceCommands,
+
+    #[arg(long, help = "Check analyzer LLM endpoint connectivity")]
+    check_llm: bool,
 }
 
 #[derive(Subcommand)]
@@ -30,7 +36,18 @@ enum ServiceCommands {
     Reload,
 }
 
-pub async fn handle(cmd: ServiceCmd) -> Result<()> {
+pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()> {
+    if cmd.check_llm {
+        let config = Config::load_with_path(config_path)?;
+        match check_analyzer_health(&config).await {
+            Ok(()) => println!("✓ Analyzer endpoint reachable"),
+            Err(e) => {
+                println!("✗ Analyzer health check failed: {e}");
+                return Err(e.into());
+            }
+        }
+    }
+
     let manager = ServiceManager::new()?;
 
     match cmd.command {

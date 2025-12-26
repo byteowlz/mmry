@@ -19,10 +19,12 @@ pub use system::*;
 pub use temporal::*;
 pub use user_invariant::*;
 
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashSet;
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalMetrics {
     pub k: usize,
     pub precision_at_k: f32,
@@ -31,7 +33,7 @@ pub struct RetrievalMetrics {
 }
 
 /// Benchmark result tracking
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkResult {
     /// Name of the benchmark test
     pub name: String,
@@ -47,6 +49,9 @@ pub struct BenchmarkResult {
     pub secret_leaked: bool,
     /// Stable hash of relevant output (used for determinism checks)
     pub determinism_hash: Option<u64>,
+    /// Operation count captured for throughput reporting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_count: Option<u64>,
     /// Optional error message if failed
     pub error: Option<String>,
     /// Execution time in milliseconds
@@ -63,6 +68,7 @@ impl BenchmarkResult {
             retrieval: None,
             secret_leaked: false,
             determinism_hash: None,
+            operation_count: None,
             error: None,
             duration_ms,
         }
@@ -77,6 +83,7 @@ impl BenchmarkResult {
             retrieval: None,
             secret_leaked: false,
             determinism_hash: None,
+            operation_count: None,
             error: Some(error.to_string()),
             duration_ms,
         }
@@ -94,6 +101,11 @@ impl BenchmarkResult {
 
     pub fn with_determinism_hash(mut self, hash: u64) -> Self {
         self.determinism_hash = Some(hash);
+        self
+    }
+
+    pub fn with_operation_count(mut self, operation_count: u64) -> Self {
+        self.operation_count = Some(operation_count);
         self
     }
 }
@@ -176,7 +188,7 @@ impl Default for BenchmarkSuite {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkSummary {
     pub total_tests: usize,
     pub passed_tests: usize,
@@ -218,6 +230,10 @@ impl std::fmt::Display for BenchmarkSummary {
                     "    retrieval@{} P:{:.2} R:{:.2} MRR:{:.2}",
                     retrieval.k, retrieval.precision_at_k, retrieval.recall_at_k, retrieval.mrr
                 )?;
+            }
+            if let Some(ops) = result.operation_count {
+                let seconds = (result.duration_ms as f32 / 1000.0).max(0.001);
+                writeln!(f, "    ops={ops} ops_per_sec={:.2}", ops as f32 / seconds)?;
             }
             if result.secret_leaked {
                 writeln!(f, "    secret_leaked=true")?;

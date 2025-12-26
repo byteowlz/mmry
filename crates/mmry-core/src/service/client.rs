@@ -106,6 +106,17 @@ pub struct DaemonClient {
     api_config: Option<ExternalApiConfig>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DaemonSearchOptions<'a> {
+    pub query: &'a str,
+    pub category: Option<&'a str>,
+    pub limit: i64,
+    pub mode: crate::config::SearchMode,
+    pub rerank: bool,
+    pub include_expired: bool,
+    pub store: Option<&'a str>,
+}
+
 impl DaemonClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
@@ -326,15 +337,7 @@ impl DaemonClient {
         self.client.is_some()
     }
 
-    pub async fn search(
-        &mut self,
-        query: &str,
-        category: Option<&str>,
-        limit: i64,
-        mode: crate::config::SearchMode,
-        rerank: bool,
-        store: Option<&str>,
-    ) -> Result<Vec<Memory>> {
+    pub async fn search(&mut self, opts: DaemonSearchOptions<'_>) -> Result<Vec<Memory>> {
         self.connect().await?;
 
         let mut client = self
@@ -344,12 +347,13 @@ impl DaemonClient {
             .clone();
 
         let request = SearchRequest {
-            query: query.to_string(),
-            limit,
-            category: category.unwrap_or_default().to_string(),
-            mode: search_mode_to_proto(mode) as i32,
-            rerank,
-            store: store.unwrap_or_default().to_string(),
+            query: opts.query.to_string(),
+            limit: opts.limit,
+            category: opts.category.unwrap_or_default().to_string(),
+            mode: search_mode_to_proto(opts.mode) as i32,
+            rerank: opts.rerank,
+            store: opts.store.unwrap_or_default().to_string(),
+            include_expired: opts.include_expired,
         };
 
         let response = client
@@ -421,6 +425,26 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         }
     });
 
+    let expires_at = if mem.expires_at.is_empty() {
+        None
+    } else {
+        Some(
+            chrono::DateTime::parse_from_rfc3339(&mem.expires_at)
+                .map_err(|e| crate::Error::Service(format!("Invalid expires_at: {e}")))?
+                .with_timezone(&chrono::Utc),
+        )
+    };
+
+    let expired_at = if mem.expired_at.is_empty() {
+        None
+    } else {
+        Some(
+            chrono::DateTime::parse_from_rfc3339(&mem.expired_at)
+                .map_err(|e| crate::Error::Service(format!("Invalid expired_at: {e}")))?
+                .with_timezone(&chrono::Utc),
+        )
+    };
+
     Ok(Memory {
         id: Uuid::parse_str(&mem.id)
             .map_err(|e| crate::Error::Service(format!("Invalid memory id: {e}")))?,
@@ -435,6 +459,11 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         metadata: serde_json::from_str(&mem.metadata_json)
             .unwrap_or_else(|_| serde_json::json!({})),
         importance: mem.importance,
+        expires_at,
+        expired_at,
+        source_attribution: None,
+        trust_level: 0.5,
+        source_reinforcement_score: 0.0,
         created_at: chrono::DateTime::parse_from_rfc3339(&mem.created_at)
             .map_err(|e| crate::Error::Service(format!("Invalid created_at: {e}")))?
             .with_timezone(&chrono::Utc),
