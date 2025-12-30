@@ -253,9 +253,22 @@ You can tweak the weights of each strategy in the config, or just use hybrid mod
 
 ## Installation
 
+### Package Managers
+
+```bash
+# macOS (Homebrew)
+brew install byteowlz/tap/mmry
+
+# Arch Linux (AUR)
+yay -S mmry          # Pre-built binary
+yay -S mmry-cuda     # Build from source with CUDA support
+```
+
+### From Source
+
 ```bash
 # Clone the repository
-git clone https://github.com/tommyfalkowski/mmry
+git clone https://github.com/byteowlz/mmry
 cd mmry
 
 # Option 1: Using just (recommended if you have it installed)
@@ -269,7 +282,7 @@ just install-all
 powershell -ExecutionPolicy Bypass -File scripts\install-mmry.ps1
 
 # From source (CLI only)
-cargo install --git https://github.com/tommyfalkowski/mmry mmry-cli
+cargo install --git https://github.com/byteowlz/mmry mmry-cli
 
 # Manual build
 cargo build --release
