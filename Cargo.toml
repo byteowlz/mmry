@@ -3,7 +3,7 @@ members = ["crates/mmry-core", "crates/mmry-cli", "crates/mmry-mcp", "crates/mmr
 resolver = "2"
 
 [workspace.package]
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 authors = ["byteowlz"]
 license = "MIT"
