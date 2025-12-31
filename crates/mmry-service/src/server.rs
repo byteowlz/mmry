@@ -280,6 +280,73 @@ struct FederationSearchRequest {
     store: Option<String>,
 }
 
+// ============================================================================
+// Memory CRUD Types
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct MemoryListQuery {
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryListResponse {
+    memories: Vec<Memory>,
+    total: i64,
+    offset: i64,
+    limit: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryGetQuery {
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryUpdateRequest {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    importance: Option<i32>,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryUpdateResponse {
+    memory: Memory,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryDeleteQuery {
+    #[serde(default)]
+    store: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryDeleteResponse {
+    deleted: bool,
+    id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct StoresListResponse {
+    stores: Vec<mmry_core::stores::StoreInfo>,
+    default: String,
+}
+
 #[derive(Debug, Serialize)]
 struct FederationSearchResponse {
     memories: Vec<Memory>,
@@ -1530,6 +1597,242 @@ fn is_local_console_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
+// ============================================================================
+// Memory CRUD Handlers
+// ============================================================================
+
+async fn memory_list_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    Query(query): Query<MemoryListQuery>,
+) -> Result<Json<MemoryListResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0).max(0);
+
+    let (pool, db_guard) = pool_for_store(&app_state, query.store.as_deref()).await?;
+
+    let total = operations::count_memories(&pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to count memories: {e}")))?;
+
+    let mut memories = operations::list_memories(&pool, query.category.as_deref(), limit + offset)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to list memories: {e}")))?;
+
+    // Apply offset manually since list_memories doesn't support it
+    if offset > 0 {
+        memories = memories.into_iter().skip(offset as usize).collect();
+    }
+    memories.truncate(limit as usize);
+
+    // Don't ship embeddings over the wire
+    for memory in &mut memories {
+        memory.embedding = None;
+        memory.sparse_embedding = None;
+    }
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(MemoryListResponse {
+        memories,
+        total,
+        offset,
+        limit,
+    }))
+}
+
+async fn memory_get_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<MemoryGetQuery>,
+) -> Result<Json<Memory>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let memory_id = Uuid::parse_str(&id)
+        .map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
+
+    let (pool, db_guard) = pool_for_store(&app_state, query.store.as_deref()).await?;
+
+    let mut memory = operations::get_memory(&pool, memory_id)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to get memory: {e}")))?
+        .ok_or_else(|| ApiError::not_found("Memory not found"))?;
+
+    // Don't ship embeddings over the wire
+    memory.embedding = None;
+    memory.sparse_embedding = None;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(memory))
+}
+
+async fn memory_update_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(payload): Json<MemoryUpdateRequest>,
+) -> Result<Json<MemoryUpdateResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let memory_id = Uuid::parse_str(&id)
+        .map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
+
+    let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
+
+    let mut memory = operations::get_memory(&pool, memory_id)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to get memory: {e}")))?
+        .ok_or_else(|| ApiError::not_found("Memory not found"))?;
+
+    let mut needs_reembed = false;
+
+    if let Some(content) = payload.content {
+        if !content.is_empty() {
+            validate_text_len(&content, &app_state.api_config, "content")?;
+            memory.content = content;
+            needs_reembed = true;
+        }
+    }
+    if let Some(category) = payload.category {
+        memory.category = category;
+    }
+    if let Some(tags) = payload.tags {
+        memory.tags = tags;
+    }
+    if let Some(importance) = payload.importance {
+        memory.importance = importance.clamp(1, 10);
+    }
+
+    // Re-embed if content changed
+    if needs_reembed {
+        let service_arc = app_state.state.get_embedding_service().await;
+        let service_guard = service_arc.lock().await;
+        if let Some(service) = service_guard.as_ref() {
+            let timeout_duration =
+                Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
+            if let Ok(Ok(Some(vector))) = timeout(timeout_duration, service.embed(&memory.content)).await {
+                memory.embedding = Some(vector);
+            }
+        }
+        // Also update sparse embeddings if enabled
+        if let Ok(Some(sparse_vec)) = app_state
+            .state
+            .sparse_embeddings
+            .embed(&memory.content)
+            .await
+        {
+            memory.sparse_embedding = Some(sparse_vec.into());
+        }
+    }
+
+    // Update timestamp
+    memory.updated_at = chrono::Utc::now();
+
+    operations::update_memory_fields(&pool, &memory, needs_reembed)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to update memory: {e}")))?;
+
+    // Don't ship embeddings over the wire
+    memory.embedding = None;
+    memory.sparse_embedding = None;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(MemoryUpdateResponse { memory }))
+}
+
+async fn memory_delete_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<MemoryDeleteQuery>,
+) -> Result<Json<MemoryDeleteResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let memory_id = Uuid::parse_str(&id)
+        .map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
+
+    let (pool, db_guard) = pool_for_store(&app_state, query.store.as_deref()).await?;
+
+    // Verify it exists first
+    let exists = operations::get_memory(&pool, memory_id)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to check memory: {e}")))?
+        .is_some();
+
+    if !exists {
+        if let Some(db) = db_guard {
+            db.close().await;
+        }
+        return Err(ApiError::not_found("Memory not found"));
+    }
+
+    operations::delete_memory(&pool, memory_id)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to delete memory: {e}")))?;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(MemoryDeleteResponse {
+        deleted: true,
+        id: memory_id.to_string(),
+    }))
+}
+
+async fn stores_list_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<StoresListResponse>, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    app_state.state.record_activity().await;
+
+    let stores = mmry_core::stores::list_stores(&app_state.state.config)
+        .map_err(|e| ApiError::internal(format!("Failed to list stores: {e}")))?;
+
+    let default_store = app_state.state.config.stores.default.clone();
+
+    Ok(Json(StoresListResponse {
+        stores,
+        default: default_store,
+    }))
+}
+
 async fn pool_for_store(
     app_state: &ExternalApiState,
     store: Option<&str>,
@@ -2090,6 +2393,8 @@ async fn run_http_api(
         api_config,
     };
 
+    use axum::routing::{delete, put};
+
     let mut app = Router::new()
         .route("/v1/models", get(models_handler))
         .route("/v1/embeddings", post(embeddings_handler))
@@ -2098,6 +2403,14 @@ async fn run_http_api(
         .route("/v1/agents/memories", post(agent_memory_create_handler))
         .route("/v1/agents/enrich", post(agent_enrich_handler))
         .route("/v1/federation/search", post(federation_search_handler))
+        // Memory CRUD endpoints
+        .route("/v1/memories", get(memory_list_handler))
+        .route("/v1/memories/:id", get(memory_get_handler))
+        .route("/v1/memories/:id", put(memory_update_handler))
+        .route("/v1/memories/:id", delete(memory_delete_handler))
+        // Stores endpoint
+        .route("/v1/stores", get(stores_list_handler))
+        // Profile blocks
         .route("/v1/profile/blocks/list", post(profile_blocks_list_handler))
         .route("/v1/profile/blocks/get", post(profile_blocks_get_handler))
         .route("/v1/profile/blocks/set", post(profile_blocks_set_handler))

@@ -27,7 +27,7 @@ pub struct SearchAllStoresOptions<'a> {
 }
 
 /// Information about a store
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoreInfo {
     pub name: String,
     pub path: PathBuf,
