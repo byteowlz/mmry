@@ -1,0 +1,123 @@
+# tool.toml - mmry metadata for byteowlz.com/toolz/mmry
+
+name = "mmry"
+title = "mmry"
+tagline = "Local-first memory system for humans and AI agents"
+
+description = """
+Store any text and find it again with multiple search strategies. Everything runs locally - no API keys, no cloud services, all data stays on your machine.
+
+mmry combines keyword matching, fuzzy search, BM25, dense embeddings, and sparse neural embeddings into a single hybrid search. Pick what works for your query, or let hybrid mode figure it out.
+
+Built for both humans and AI agents. Use the CLI for quick captures, the TUI for browsing, or integrate via MCP/gRPC.
+"""
+
+language = "rust"
+category = "toolz"
+version = "0.5.0"
+license = "MIT"
+
+# ============================================================================
+# Installation
+# ============================================================================
+
+[install]
+homebrew = "byteowlz/tap/mmry"
+aur = "mmry"
+aur_cuda = "mmry-cuda"
+cargo = "mmry-cli"
+
+# ============================================================================
+# Links
+# ============================================================================
+
+[links]
+github = "https://github.com/byteowlz/mmry"
+
+# ============================================================================
+# Features
+# ============================================================================
+
+[[features]]
+title = "Hybrid Search"
+description = "Combines keyword, fuzzy, BM25, semantic, and sparse search into one query"
+
+[[features]]
+title = "Local-First"
+description = "SQLite database with vector extensions. No cloud, no API keys, no subscriptions"
+
+[[features]]
+title = "Fast Embeddings"
+description = "Optional service mode keeps models loaded for 10-50ms embedding times"
+
+[[features]]
+title = "Multiple Interfaces"
+description = "CLI for scripts, TUI for browsing, MCP server for AI agents, gRPC API for integration"
+
+[[features]]
+title = "JSON Pipelines"
+description = "Every command supports --json for scripting and piping"
+
+[[features]]
+title = "HMLR Enrichment"
+description = "Optional fact extraction, bridge blocks, and agent attribution for AI workflows"
+
+# ============================================================================
+# Examples
+# ============================================================================
+
+[[examples]]
+title = "Quick Start"
+language = "bash"
+code = """
+# Add memories
+mmry add "I love coding in Rust"
+mmry add "Meeting with Sarah about the API on Friday"
+
+# Search however you want
+mmry search "rust programming"
+mmry search "sara friday" --mode fuzzy  # typo-tolerant
+mmry search "api" --mode semantic       # conceptual similarity
+"""
+
+[[examples]]
+title = "JSON Pipelines"
+language = "bash"
+code = """
+# Pipe things around
+echo "Important note" | mmry add -
+mmry search "important" --json | jq '.[].content'
+
+# Batch operations
+mmry ls --json | jq 'map(select(.importance > 7))'
+"""
+
+[[examples]]
+title = "TUI"
+language = "bash"
+code = """
+# Launch the TUI
+mmry-tui
+
+# vi keybindings: hjkl to navigate, / to search
+# e to edit, d to delete, Space to multi-select
+"""
+
+# ============================================================================
+# Media
+# ============================================================================
+
+[media]
+# icon = "assets/icon.svg"
+screenshot = "banner.png"
+
+# ============================================================================
+# Metadata
+# ============================================================================
+
+[meta]
+keywords = ["memory", "search", "embeddings", "local-first", "cli", "tui", "ai-agents"]
+platforms = ["linux", "macos", "windows"]
+related = ["mailz", "byt"]
+status = "stable"
+listed = true
