@@ -80,6 +80,10 @@ pub struct BridgeBlock {
     /// Example: ["Use PostgreSQL for the database", "Deploy to AWS us-east-1"]
     #[serde(default)]
     pub decisions_made: Vec<String>,
+    /// Embedding vector for semantic matching during routing
+    /// Generated from topic_label + keywords for similarity search
+    #[serde(skip)]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Default for BridgeBlock {
@@ -102,7 +106,29 @@ impl BridgeBlock {
             created_at: Utc::now(),
             open_loops: Vec::new(),
             decisions_made: Vec::new(),
+            embedding: None,
         }
+    }
+
+    /// Generate text representation for embedding
+    /// Combines topic_label, keywords, and any summary for semantic matching
+    pub fn embedding_text(&self) -> String {
+        let mut parts = Vec::new();
+
+        if let Some(label) = &self.topic_label {
+            parts.push(label.clone());
+        }
+
+        if !self.keywords.is_empty() {
+            parts.push(self.keywords.join(" "));
+        }
+
+        // Extract summary from content if present
+        if let Some(summary) = self.content.get("summary").and_then(|v| v.as_str()) {
+            parts.push(summary.to_string());
+        }
+
+        parts.join(". ")
     }
 
     /// Add an open loop (unresolved question/task) to this block

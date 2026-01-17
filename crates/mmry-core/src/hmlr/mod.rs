@@ -162,6 +162,41 @@ impl HmlrPipeline {
     }
 }
 
+/// Generate an embedding for a bridge block based on its topic_label and keywords
+/// This should be called after enrichment when the caller has access to the embedding service.
+/// The embedding enables semantic routing when LLM routing is unavailable.
+pub async fn generate_block_embedding<F, Fut>(
+    pool: &SqlitePool,
+    block: &BridgeBlock,
+    embed_fn: F,
+) -> Result<()>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<Vec<f32>>>>,
+{
+    let embed_text = block.embedding_text();
+    if embed_text.is_empty() {
+        tracing::debug!(block_id = %block.block_id, "Skipping embedding for block with no topic/keywords");
+        return Ok(());
+    }
+
+    match embed_fn(embed_text).await? {
+        Some(embedding) => {
+            operations::update_bridge_block_embedding(pool, block.block_id, &embedding).await?;
+            tracing::debug!(
+                block_id = %block.block_id,
+                embedding_dim = embedding.len(),
+                "Generated embedding for bridge block"
+            );
+        }
+        None => {
+            tracing::debug!(block_id = %block.block_id, "Embedding service disabled, skipping block embedding");
+        }
+    }
+
+    Ok(())
+}
+
 /// Get or create the human agent record for manual operations
 pub async fn get_or_create_human_agent(pool: &SqlitePool, config: &Config) -> Result<Uuid> {
     let agent_name = &config.hmlr.human_agent_name;

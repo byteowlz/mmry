@@ -695,6 +695,58 @@ impl Database {
             tracing::info!("Bridge block metadata columns added");
         }
 
+        // Add bridge_block_id FK to memories table if missing (from migration 20260117000000)
+        let bridge_block_id_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='bridge_block_id'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !bridge_block_id_exists {
+            tracing::info!("Adding bridge_block_id column to memories table...");
+            sqlx::query(
+                "ALTER TABLE memories ADD COLUMN bridge_block_id TEXT REFERENCES bridge_blocks(block_id)",
+            )
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_memories_bridge_block ON memories(bridge_block_id)",
+            )
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_memories_bridge_block_created ON memories(bridge_block_id, created_at DESC)",
+            )
+            .execute(pool)
+            .await?;
+            tracing::info!("bridge_block_id column and indices added");
+        }
+
+        // Add embedding column to bridge_blocks for semantic routing (from migration 20260117100000)
+        let bridge_has_embedding: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('bridge_blocks') WHERE name='embedding'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !bridge_has_embedding {
+            tracing::info!("Adding embedding column to bridge_blocks table...");
+            sqlx::query("ALTER TABLE bridge_blocks ADD COLUMN embedding BLOB")
+                .execute(pool)
+                .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_bridge_blocks_has_embedding ON bridge_blocks(block_id) WHERE embedding IS NOT NULL",
+            )
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_bridge_blocks_agent_status ON bridge_blocks(agent_id, status)",
+            )
+            .execute(pool)
+            .await?;
+            tracing::info!("Bridge block embedding column and indices added");
+        }
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS user_profiles (

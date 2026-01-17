@@ -6,6 +6,8 @@
 //! - LatticeCrawler: Find candidate bridge blocks
 //!
 //! After parallel tasks complete, Governor makes routing decisions.
+//! When LLM routing is unavailable, the Governor falls back to semantic
+//! similarity matching using embeddings from the memory and bridge blocks.
 
 use super::fact_scrubber::FactScrubber;
 use super::lattice_crawler::LatticeCrawler;
@@ -21,6 +23,10 @@ use crate::Result;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// Minimum similarity threshold for semantic matching (0.0 - 1.0)
+/// Blocks must score above this to be considered for routing
+const SEMANTIC_MATCH_THRESHOLD: f32 = 0.3;
 
 /// Result of Governor's processing
 #[derive(Debug, Default)]
@@ -102,6 +108,13 @@ impl Governor {
                 .route_to_bridge_block(pool, memory, context, &candidates)
                 .await?;
 
+            // Update memory with bridge_block_id for direct FK relationship
+            if let Err(e) =
+                operations::update_memory_bridge_block(pool, memory.id, bridge_block.block_id).await
+            {
+                tracing::warn!("Failed to update memory bridge_block_id: {e}");
+            }
+
             Ok(GovernorDecision {
                 facts,
                 bridge_block: Some(bridge_block),
@@ -170,7 +183,32 @@ impl Governor {
         }
 
         if self.analyzer.is_noop() {
-            // Heuristic fallback when analyzer is disabled
+            // Semantic matching fallback when analyzer is disabled
+            // Try to find a semantically similar block using embeddings
+            if let Some(memory_embedding) = &memory.embedding {
+                if let Some(semantic_match) =
+                    find_best_semantic_match(memory_embedding, candidates, context.creator_id)
+                {
+                    tracing::debug!(
+                        block_id = %semantic_match.block_id,
+                        similarity = %semantic_match.similarity,
+                        "Found semantic match for memory routing"
+                    );
+                    let updated_block = self
+                        .resume_bridge_block(pool, semantic_match.block_id, memory)
+                        .await?;
+                    return Ok((
+                        updated_block,
+                        false,
+                        Some(format!(
+                            "Resumed block via semantic match (similarity: {:.2})",
+                            semantic_match.similarity
+                        )),
+                    ));
+                }
+            }
+
+            // Fallback: find any active block for the same agent
             let active_block = candidates.iter().find(|b| {
                 b.status == Some("active".to_string()) && b.agent_id == Some(context.creator_id)
             });
@@ -182,7 +220,7 @@ impl Governor {
                 return Ok((
                     updated_block,
                     false,
-                    Some("Resumed active block (heuristic)".to_string()),
+                    Some("Resumed active block (heuristic fallback)".to_string()),
                 ));
             }
 
@@ -190,7 +228,7 @@ impl Governor {
             return Ok((
                 block,
                 true,
-                Some("No active block, created new (heuristic)".to_string()),
+                Some("No matching block, created new (heuristic)".to_string()),
             ));
         }
 
@@ -325,6 +363,71 @@ fn is_stop_word(word: &str) -> bool {
         "until", "using", "wants", "where", "which", "while", "would", "write", "years", "your",
     ];
     STOP_WORDS.contains(&word)
+}
+
+/// Compute cosine similarity between two embedding vectors
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+
+    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+
+    dot_product / (norm_a * norm_b)
+}
+
+/// Result of semantic matching for a bridge block
+#[derive(Debug)]
+struct SemanticMatch {
+    block_id: Uuid,
+    similarity: f32,
+}
+
+/// Find the best matching bridge block using semantic similarity
+fn find_best_semantic_match(
+    memory_embedding: &[f32],
+    candidates: &[BridgeBlock],
+    agent_id: Uuid,
+) -> Option<SemanticMatch> {
+    let mut best_match: Option<SemanticMatch> = None;
+
+    for block in candidates {
+        // Only consider blocks for the same agent that are active
+        if block.agent_id != Some(agent_id) || block.status != Some("active".to_string()) {
+            continue;
+        }
+
+        // Skip blocks without embeddings
+        let block_embedding = match &block.embedding {
+            Some(emb) if !emb.is_empty() => emb,
+            _ => continue,
+        };
+
+        let similarity = cosine_similarity(memory_embedding, block_embedding);
+
+        // Only consider matches above threshold
+        if similarity < SEMANTIC_MATCH_THRESHOLD {
+            continue;
+        }
+
+        if best_match
+            .as_ref()
+            .is_none_or(|m| similarity > m.similarity)
+        {
+            best_match = Some(SemanticMatch {
+                block_id: block.block_id,
+                similarity,
+            });
+        }
+    }
+
+    best_match
 }
 
 #[cfg(test)]
@@ -549,5 +652,126 @@ mod tests {
         assert!(is_stop_word("would"));
         assert!(!is_stop_word("project"));
         assert!(!is_stop_word("meeting"));
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_cosine_similarity_opposite() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![-1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim + 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_cosine_similarity_normalized() {
+        let a = vec![3.0, 4.0]; // magnitude 5
+        let b = vec![6.0, 8.0]; // magnitude 10, same direction
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_cosine_similarity_empty() {
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
+        let sim = cosine_similarity(&a, &b);
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_mismatched_dims() {
+        let a = vec![1.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn test_find_best_semantic_match_with_embeddings() {
+        let agent_id = Uuid::new_v4();
+        let memory_embedding = vec![0.8, 0.6, 0.0];
+
+        let mut block1 = BridgeBlock::new();
+        block1.agent_id = Some(agent_id);
+        block1.status = Some("active".to_string());
+        block1.embedding = Some(vec![0.9, 0.4, 0.1]); // similar to memory
+
+        let mut block2 = BridgeBlock::new();
+        block2.agent_id = Some(agent_id);
+        block2.status = Some("active".to_string());
+        block2.embedding = Some(vec![0.0, 0.0, 1.0]); // orthogonal
+
+        let candidates = vec![block1.clone(), block2];
+        let result = find_best_semantic_match(&memory_embedding, &candidates, agent_id);
+
+        assert!(result.is_some());
+        let matched = result.unwrap();
+        assert_eq!(matched.block_id, block1.block_id);
+        assert!(matched.similarity > 0.8); // Should be highly similar
+    }
+
+    #[test]
+    fn test_find_best_semantic_match_no_embeddings() {
+        let agent_id = Uuid::new_v4();
+        let memory_embedding = vec![0.8, 0.6, 0.0];
+
+        let mut block = BridgeBlock::new();
+        block.agent_id = Some(agent_id);
+        block.status = Some("active".to_string());
+        // No embedding
+
+        let candidates = vec![block];
+        let result = find_best_semantic_match(&memory_embedding, &candidates, agent_id);
+
+        assert!(result.is_none()); // Should not match without embedding
+    }
+
+    #[test]
+    fn test_find_best_semantic_match_below_threshold() {
+        let agent_id = Uuid::new_v4();
+        let memory_embedding = vec![1.0, 0.0, 0.0];
+
+        let mut block = BridgeBlock::new();
+        block.agent_id = Some(agent_id);
+        block.status = Some("active".to_string());
+        block.embedding = Some(vec![0.0, 1.0, 0.0]); // orthogonal, similarity = 0
+
+        let candidates = vec![block];
+        let result = find_best_semantic_match(&memory_embedding, &candidates, agent_id);
+
+        assert!(result.is_none()); // Below threshold
+    }
+
+    #[test]
+    fn test_find_best_semantic_match_different_agent() {
+        let agent_id = Uuid::new_v4();
+        let other_agent_id = Uuid::new_v4();
+        let memory_embedding = vec![0.8, 0.6, 0.0];
+
+        let mut block = BridgeBlock::new();
+        block.agent_id = Some(other_agent_id); // Different agent
+        block.status = Some("active".to_string());
+        block.embedding = Some(vec![0.8, 0.6, 0.0]); // Identical embedding
+
+        let candidates = vec![block];
+        let result = find_best_semantic_match(&memory_embedding, &candidates, agent_id);
+
+        assert!(result.is_none()); // Should not match different agent's blocks
     }
 }

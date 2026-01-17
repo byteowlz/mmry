@@ -294,6 +294,7 @@ fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow
         chunk_index: None,
         total_chunks: None,
         chunk_method: None,
+        bridge_block_id: None,
     })
 }
 
@@ -338,5 +339,6 @@ fn parse_exported_bridge_block(
         created_at,
         open_loops: exported.open_loops.clone(),
         decisions_made: exported.decisions_made.clone(),
+        embedding: None, // Will be generated lazily during routing
     })
 }

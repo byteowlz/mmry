@@ -466,6 +466,7 @@ mod tests {
                     chunk_index: None,
                     total_chunks: None,
                     chunk_method: None,
+                    bridge_block_id: None,
                 },
                 Memory {
                     id: dropped_id,
@@ -488,6 +489,7 @@ mod tests {
                     chunk_index: None,
                     total_chunks: None,
                     chunk_method: None,
+                    bridge_block_id: None,
                 },
             ],
             facts: vec![FactRecord::new("keep", "value")],

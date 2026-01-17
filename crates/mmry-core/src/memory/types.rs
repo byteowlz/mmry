@@ -37,6 +37,8 @@ pub struct Memory {
     pub chunk_index: Option<i32>,
     pub total_chunks: Option<i32>,
     pub chunk_method: Option<ChunkMethod>,
+    /// Bridge block this memory belongs to (for topic/conversation grouping)
+    pub bridge_block_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +110,7 @@ impl Memory {
             chunk_index: None,
             total_chunks: None,
             chunk_method: None,
+            bridge_block_id: None,
         }
     }
 

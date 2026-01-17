@@ -304,12 +304,15 @@ pub async fn search_federated(opts: FederatedSearchOptions<'_>) -> Result<Vec<Me
     }
 
     let mut per_source_results: Vec<Vec<MemoryWithStore>> = Vec::new();
-    for task in tasks {
-        match tokio::time::timeout(timeout, task).await {
+    for mut task in tasks {
+        match tokio::time::timeout(timeout, &mut task).await {
             Ok(Ok(Ok(results))) => per_source_results.push(results),
             Ok(Ok(Err(e))) => tracing::warn!("{e}"),
             Ok(Err(e)) => tracing::warn!("Federated search task failed: {e}"),
-            Err(_) => tracing::warn!("Federated search task timed out"),
+            Err(_) => {
+                task.abort();
+                tracing::warn!("Federated search task timed out");
+            }
         }
     }
 
@@ -377,6 +380,7 @@ mod tests {
                 chunk_index: None,
                 total_chunks: None,
                 chunk_method: None,
+                bridge_block_id: None,
             },
         }
     }

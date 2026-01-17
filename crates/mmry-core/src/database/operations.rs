@@ -118,6 +118,16 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let source_reinforcement_score: Option<f32> = row.try_get("source_reinforcement_score").ok();
     let source_reinforcement_score = source_reinforcement_score.unwrap_or(0.0);
 
+    let bridge_block_id: Option<String> = row.try_get("bridge_block_id").ok().flatten();
+    let bridge_block_id = match bridge_block_id {
+        Some(raw) => Some(Uuid::parse_str(&raw).map_err(|e| {
+            crate::Error::InvalidInput(format!(
+                "Invalid bridge_block_id '{raw}' for memory {id}: {e}"
+            ))
+        })?),
+        None => None,
+    };
+
     Ok(Memory {
         id,
         memory_type: serde_json::from_str(row.try_get("type")?)?,
@@ -139,6 +149,79 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
         chunk_method,
+        bridge_block_id,
+    })
+}
+
+/// Helper function to parse a BridgeBlock from a database row
+fn bridge_block_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<BridgeBlock> {
+    let raw_block_id: String = match row.try_get("block_id") {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("Skipping bridge block with missing block_id: {e}");
+            return None;
+        }
+    };
+    let block_id = match Uuid::parse_str(&raw_block_id) {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("Skipping bridge block with invalid id '{raw_block_id}': {e}");
+            return None;
+        }
+    };
+
+    let created_at_raw: String = match row.try_get("created_at") {
+        Ok(raw) => raw,
+        Err(e) => {
+            warn!("Skipping bridge block {block_id} with missing created_at: {e}");
+            return None;
+        }
+    };
+    let created_at = match parse_datetime(
+        &created_at_raw,
+        "created_at",
+        &format!("bridge_block {block_id}"),
+    ) {
+        Ok(dt) => dt,
+        Err(e) => {
+            warn!("Skipping corrupt bridge block {block_id}: {e}");
+            return None;
+        }
+    };
+
+    let keywords: String = row.try_get("keywords").unwrap_or_default();
+    let content_json: String = row.try_get("content_json").unwrap_or_default();
+    let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+    let open_loops: String = row.try_get("open_loops").unwrap_or_default();
+    let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
+
+    // Parse embedding if present
+    let embedding: Option<Vec<u8>> = row.try_get("embedding").ok().flatten();
+    let embedding_vec = match embedding {
+        Some(bytes) if !bytes.is_empty() => match serde_json::from_slice::<Vec<f32>>(&bytes) {
+            Ok(vec) => Some(vec),
+            Err(e) => {
+                tracing::warn!(block_id = %block_id, error = %e, "Invalid embedding stored; skipping value");
+                None
+            }
+        },
+        _ => None,
+    };
+
+    Some(BridgeBlock {
+        block_id,
+        span_id: row.try_get("span_id").ok().flatten(),
+        topic_label: row.try_get("topic_label").ok().flatten(),
+        keywords: serde_json::from_str(&keywords).unwrap_or_default(),
+        status: row.try_get("status").ok().flatten(),
+        exit_reason: row.try_get("exit_reason").ok().flatten(),
+        content: serde_json::from_str(&content_json)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+        agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
+        created_at,
+        open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
+        decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
+        embedding: embedding_vec,
     })
 }
 
@@ -175,9 +258,9 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
             id, type, content, embedding, sparse_embedding, metadata, importance,
             expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score,
             category, tags, created_at, updated_at,
-            parent_id, chunk_index, total_chunks, chunk_method
+            parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(memory.id.to_string())
@@ -206,6 +289,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(memory.chunk_index)
     .bind(memory.total_chunks)
     .bind(chunk_method_str)
+    .bind(memory.bridge_block_id.map(|id| id.to_string()))
     .execute(pool)
     .await?;
 
@@ -219,7 +303,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
         FROM memories
         WHERE id = ?
         "#,
@@ -243,7 +327,7 @@ pub async fn list_memories(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -257,7 +341,7 @@ pub async fn list_memories(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -274,6 +358,56 @@ pub async fn list_memories(
             Ok(memory) => memories.push(memory),
             Err(e) => {
                 // Try to get the ID for logging, fall back to "unknown"
+                let id_str: String = row.try_get("id").unwrap_or_else(|_| "unknown".to_string());
+                warn!("Skipping corrupt memory row {id_str}: {e}");
+            }
+        }
+    }
+
+    Ok(memories)
+}
+
+pub async fn list_memories_paged(
+    pool: &SqlitePool,
+    category: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> crate::Result<Vec<Memory>> {
+    let rows = if let Some(cat) = category {
+        sqlx::query(
+            r#"
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            FROM memories
+            WHERE category = ?
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            "#,
+        )
+        .bind(cat)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            FROM memories
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?
+    };
+
+    let mut memories = Vec::new();
+    for row in rows {
+        match memory_from_row(&row) {
+            Ok(memory) => memories.push(memory),
+            Err(e) => {
                 let id_str: String = row.try_get("id").unwrap_or_else(|_| "unknown".to_string());
                 warn!("Skipping corrupt memory row {id_str}: {e}");
             }
@@ -455,7 +589,7 @@ pub async fn update_memory_fields(
         UPDATE memories
         SET type = ?, content = ?, metadata = ?, importance = ?, expires_at = ?, expired_at = ?,
             source_attribution = ?, trust_level = ?, source_reinforcement_score = ?,
-            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?
+            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?, bridge_block_id = ?
         WHERE id = ?
         "#,
     )
@@ -481,6 +615,7 @@ pub async fn update_memory_fields(
     .bind(memory.chunk_index)
     .bind(memory.total_chunks)
     .bind(chunk_method_str)
+    .bind(memory.bridge_block_id.map(|id| id.to_string()))
     .bind(memory.id.to_string())
     .execute(pool)
     .await?;
@@ -547,10 +682,15 @@ pub async fn record_agent_event(pool: &SqlitePool, event: &AgentEvent) -> crate:
 }
 
 pub async fn upsert_bridge_block(pool: &SqlitePool, block: &BridgeBlock) -> crate::Result<()> {
+    let embedding_bytes = block
+        .embedding
+        .as_ref()
+        .and_then(|e| serde_json::to_vec(e).ok());
+
     sqlx::query(
         r#"
-        INSERT INTO bridge_blocks (block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO bridge_blocks (block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made, embedding)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(block_id) DO UPDATE SET
             span_id = excluded.span_id,
             topic_label = excluded.topic_label,
@@ -560,7 +700,8 @@ pub async fn upsert_bridge_block(pool: &SqlitePool, block: &BridgeBlock) -> crat
             content_json = excluded.content_json,
             agent_id = excluded.agent_id,
             open_loops = excluded.open_loops,
-            decisions_made = excluded.decisions_made
+            decisions_made = excluded.decisions_made,
+            embedding = excluded.embedding
         "#,
     )
     .bind(block.block_id.to_string())
@@ -574,10 +715,58 @@ pub async fn upsert_bridge_block(pool: &SqlitePool, block: &BridgeBlock) -> crat
     .bind(block.created_at.to_rfc3339())
     .bind(serde_json::to_string(&block.open_loops)?)
     .bind(serde_json::to_string(&block.decisions_made)?)
+    .bind(embedding_bytes)
     .execute(pool)
     .await?;
 
     Ok(())
+}
+
+/// Update the embedding for a bridge block
+pub async fn update_bridge_block_embedding(
+    pool: &SqlitePool,
+    block_id: Uuid,
+    embedding: &[f32],
+) -> crate::Result<()> {
+    let embedding_bytes = serde_json::to_vec(embedding)?;
+
+    sqlx::query(
+        r#"
+        UPDATE bridge_blocks
+        SET embedding = ?
+        WHERE block_id = ?
+        "#,
+    )
+    .bind(embedding_bytes)
+    .bind(block_id.to_string())
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Get active bridge blocks for an agent that have embeddings
+pub async fn get_active_blocks_with_embeddings(
+    pool: &SqlitePool,
+    agent_id: Uuid,
+    limit: i64,
+) -> crate::Result<Vec<BridgeBlock>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made, embedding
+        FROM bridge_blocks
+        WHERE agent_id = ? AND status = 'active' AND embedding IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(agent_id.to_string())
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let blocks: Vec<BridgeBlock> = rows.iter().filter_map(bridge_block_from_row).collect();
+    Ok(blocks)
 }
 
 pub async fn list_bridge_blocks_by_span(
@@ -588,7 +777,7 @@ pub async fn list_bridge_blocks_by_span(
     let rows = if let Some(id) = span_id {
         sqlx::query(
             r#"
-            SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
+            SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made, embedding
             FROM bridge_blocks
             WHERE span_id = ?
             ORDER BY created_at DESC
@@ -602,7 +791,7 @@ pub async fn list_bridge_blocks_by_span(
     } else {
         sqlx::query(
             r#"
-            SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
+            SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made, embedding
             FROM bridge_blocks
             ORDER BY created_at DESC
             LIMIT ?
@@ -613,64 +802,7 @@ pub async fn list_bridge_blocks_by_span(
         .await?
     };
 
-    let mut blocks = Vec::new();
-    for row in rows {
-        let raw_block_id: String = match row.try_get("block_id") {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("Skipping bridge block with missing block_id: {e}");
-                continue;
-            }
-        };
-        let block_id = match Uuid::parse_str(&raw_block_id) {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("Skipping bridge block with invalid id '{raw_block_id}': {e}");
-                continue;
-            }
-        };
-
-        let created_at_raw: String = match row.try_get("created_at") {
-            Ok(raw) => raw,
-            Err(e) => {
-                warn!("Skipping bridge block {block_id} with missing created_at: {e}");
-                continue;
-            }
-        };
-        let created_at = match parse_datetime(
-            &created_at_raw,
-            "created_at",
-            &format!("bridge_block {block_id}"),
-        ) {
-            Ok(dt) => dt,
-            Err(e) => {
-                warn!("Skipping corrupt bridge block {block_id}: {e}");
-                continue;
-            }
-        };
-
-        let keywords: String = row.try_get("keywords").unwrap_or_default();
-        let content_json: String = row.try_get("content_json").unwrap_or_default();
-        let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
-        let open_loops: String = row.try_get("open_loops").unwrap_or_default();
-        let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
-
-        blocks.push(BridgeBlock {
-            block_id,
-            span_id: row.try_get("span_id").ok().flatten(),
-            topic_label: row.try_get("topic_label").ok().flatten(),
-            keywords: serde_json::from_str(&keywords).unwrap_or_default(),
-            status: row.try_get("status").ok().flatten(),
-            exit_reason: row.try_get("exit_reason").ok().flatten(),
-            content: serde_json::from_str(&content_json)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
-            created_at,
-            open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
-            decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
-        });
-    }
-
+    let blocks: Vec<BridgeBlock> = rows.iter().filter_map(bridge_block_from_row).collect();
     Ok(blocks)
 }
 
@@ -1486,7 +1618,7 @@ pub async fn get_recent_bridge_blocks_for_agent(
 ) -> crate::Result<Vec<BridgeBlock>> {
     let rows = sqlx::query(
         r#"
-        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made, embedding
         FROM bridge_blocks
         WHERE agent_id = ?
         ORDER BY created_at DESC
@@ -1498,64 +1630,7 @@ pub async fn get_recent_bridge_blocks_for_agent(
     .fetch_all(pool)
     .await?;
 
-    let mut blocks = Vec::new();
-    for row in rows {
-        let raw_block_id: String = match row.try_get("block_id") {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("Skipping bridge block with missing block_id: {e}");
-                continue;
-            }
-        };
-        let block_id = match Uuid::parse_str(&raw_block_id) {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("Skipping bridge block with invalid id '{raw_block_id}': {e}");
-                continue;
-            }
-        };
-
-        let created_at_raw: String = match row.try_get("created_at") {
-            Ok(raw) => raw,
-            Err(e) => {
-                warn!("Skipping bridge block {block_id} with missing created_at: {e}");
-                continue;
-            }
-        };
-        let created_at = match parse_datetime(
-            &created_at_raw,
-            "created_at",
-            &format!("bridge_block {block_id}"),
-        ) {
-            Ok(dt) => dt,
-            Err(e) => {
-                warn!("Skipping corrupt bridge block {block_id}: {e}");
-                continue;
-            }
-        };
-
-        let keywords: String = row.try_get("keywords").unwrap_or_default();
-        let content_json: String = row.try_get("content_json").unwrap_or_default();
-        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
-        let open_loops: String = row.try_get("open_loops").unwrap_or_default();
-        let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
-
-        blocks.push(BridgeBlock {
-            block_id,
-            span_id: row.try_get("span_id").ok().flatten(),
-            topic_label: row.try_get("topic_label").ok().flatten(),
-            keywords: serde_json::from_str(&keywords).unwrap_or_default(),
-            status: row.try_get("status").ok().flatten(),
-            exit_reason: row.try_get("exit_reason").ok().flatten(),
-            content: serde_json::from_str(&content_json)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
-            created_at,
-            open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
-            decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
-        });
-    }
-
+    let blocks: Vec<BridgeBlock> = rows.iter().filter_map(bridge_block_from_row).collect();
     Ok(blocks)
 }
 
@@ -1566,7 +1641,7 @@ pub async fn get_bridge_block(
 ) -> crate::Result<Option<BridgeBlock>> {
     let row = sqlx::query(
         r#"
-        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made, embedding
         FROM bridge_blocks
         WHERE block_id = ?
         "#,
@@ -1575,42 +1650,7 @@ pub async fn get_bridge_block(
     .fetch_optional(pool)
     .await?;
 
-    if let Some(row) = row {
-        let raw_block_id: String = row.try_get("block_id")?;
-        let parsed_block_id = Uuid::parse_str(&raw_block_id).map_err(|e| {
-            crate::Error::InvalidInput(format!("Invalid bridge_block id '{raw_block_id}': {e}"))
-        })?;
-
-        let created_at_raw: String = row.try_get("created_at")?;
-        let created_at = parse_datetime(
-            &created_at_raw,
-            "created_at",
-            &format!("bridge_block {parsed_block_id}"),
-        )?;
-
-        let keywords: String = row.try_get("keywords").unwrap_or_default();
-        let content_json: String = row.try_get("content_json").unwrap_or_default();
-        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
-        let open_loops: String = row.try_get("open_loops").unwrap_or_default();
-        let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
-
-        Ok(Some(BridgeBlock {
-            block_id: parsed_block_id,
-            span_id: row.try_get("span_id").ok().flatten(),
-            topic_label: row.try_get("topic_label").ok().flatten(),
-            keywords: serde_json::from_str(&keywords).unwrap_or_default(),
-            status: row.try_get("status").ok().flatten(),
-            exit_reason: row.try_get("exit_reason").ok().flatten(),
-            content: serde_json::from_str(&content_json)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
-            created_at,
-            open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
-            decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
-        }))
-    } else {
-        Ok(None)
-    }
+    Ok(row.as_ref().and_then(bridge_block_from_row))
 }
 
 /// Get facts for a specific agent event (memory)
@@ -1815,7 +1855,7 @@ pub async fn get_bridge_block_by_span(
 ) -> crate::Result<Option<BridgeBlock>> {
     let row = sqlx::query(
         r#"
-        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made
+        SELECT block_id, span_id, topic_label, keywords, status, exit_reason, content_json, agent_id, created_at, open_loops, decisions_made, embedding
         FROM bridge_blocks
         WHERE span_id = ?
         "#,
@@ -1824,42 +1864,7 @@ pub async fn get_bridge_block_by_span(
     .fetch_optional(pool)
     .await?;
 
-    if let Some(row) = row {
-        let raw_block_id: String = row.try_get("block_id")?;
-        let parsed_block_id = Uuid::parse_str(&raw_block_id).map_err(|e| {
-            crate::Error::InvalidInput(format!("Invalid bridge_block id '{raw_block_id}': {e}"))
-        })?;
-
-        let created_at_raw: String = row.try_get("created_at")?;
-        let created_at = parse_datetime(
-            &created_at_raw,
-            "created_at",
-            &format!("bridge_block {parsed_block_id}"),
-        )?;
-
-        let keywords: String = row.try_get("keywords").unwrap_or_default();
-        let content_json: String = row.try_get("content_json").unwrap_or_default();
-        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
-        let open_loops: String = row.try_get("open_loops").unwrap_or_default();
-        let decisions_made: String = row.try_get("decisions_made").unwrap_or_default();
-
-        Ok(Some(BridgeBlock {
-            block_id: parsed_block_id,
-            span_id: row.try_get("span_id").ok().flatten(),
-            topic_label: row.try_get("topic_label").ok().flatten(),
-            keywords: serde_json::from_str(&keywords).unwrap_or_default(),
-            status: row.try_get("status").ok().flatten(),
-            exit_reason: row.try_get("exit_reason").ok().flatten(),
-            content: serde_json::from_str(&content_json)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            agent_id: agent_id_str.and_then(|id| Uuid::parse_str(&id).ok()),
-            created_at,
-            open_loops: serde_json::from_str(&open_loops).unwrap_or_default(),
-            decisions_made: serde_json::from_str(&decisions_made).unwrap_or_default(),
-        }))
-    } else {
-        Ok(None)
-    }
+    Ok(row.as_ref().and_then(bridge_block_from_row))
 }
 
 /// Search facts by query (key or value contains)
@@ -1945,4 +1950,91 @@ pub async fn search_facts(
     }
 
     Ok(facts)
+}
+
+/// Update a memory's bridge_block_id
+pub async fn update_memory_bridge_block(
+    pool: &SqlitePool,
+    memory_id: Uuid,
+    bridge_block_id: Uuid,
+) -> crate::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE memories
+        SET bridge_block_id = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(bridge_block_id.to_string())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(memory_id.to_string())
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Get all memories belonging to a specific bridge block
+pub async fn get_memories_by_bridge_block(
+    pool: &SqlitePool,
+    bridge_block_id: Uuid,
+    limit: i64,
+) -> crate::Result<Vec<crate::memory::Memory>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+        FROM memories
+        WHERE bridge_block_id = ?
+        ORDER BY created_at ASC
+        LIMIT ?
+        "#,
+    )
+    .bind(bridge_block_id.to_string())
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut memories = Vec::new();
+    for row in rows {
+        match memory_from_row(&row) {
+            Ok(memory) => memories.push(memory),
+            Err(e) => {
+                let id_str: String = row.try_get("id").unwrap_or_else(|_| "unknown".to_string());
+                warn!("Skipping corrupt memory row {id_str}: {e}");
+            }
+        }
+    }
+
+    Ok(memories)
+}
+
+/// Get all memories belonging to a specific bridge block (no limit)
+pub async fn get_all_memories_by_bridge_block(
+    pool: &SqlitePool,
+    bridge_block_id: Uuid,
+) -> crate::Result<Vec<crate::memory::Memory>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+        FROM memories
+        WHERE bridge_block_id = ?
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(bridge_block_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut memories = Vec::new();
+    for row in rows {
+        match memory_from_row(&row) {
+            Ok(memory) => memories.push(memory),
+            Err(e) => {
+                let id_str: String = row.try_get("id").unwrap_or_else(|_| "unknown".to_string());
+                warn!("Skipping corrupt memory row {id_str}: {e}");
+            }
+        }
+    }
+
+    Ok(memories)
 }

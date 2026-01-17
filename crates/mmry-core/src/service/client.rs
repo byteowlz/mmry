@@ -484,5 +484,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
             Some(mem.total_chunks)
         },
         chunk_method,
+        bridge_block_id: None,
     })
 }

@@ -45,6 +45,11 @@ pub struct HmlrSearchOptions {
     pub max_facts_per_memory: usize,
     /// Search facts as well as memories
     pub search_facts: bool,
+    /// Expand results to include all memories from matched bridge blocks
+    /// This provides full conversation context when a memory matches
+    pub expand_block_context: bool,
+    /// Maximum memories to retrieve per block when expanding (0 = unlimited)
+    pub max_memories_per_block: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -173,6 +178,9 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let source_reinforcement_score: Option<f32> = row.try_get("source_reinforcement_score").ok();
     let source_reinforcement_score = source_reinforcement_score.unwrap_or(0.0);
 
+    let bridge_block_id: Option<String> = row.try_get("bridge_block_id").ok().flatten();
+    let bridge_block_id = bridge_block_id.and_then(|s| Uuid::parse_str(&s).ok());
+
     Ok(Memory {
         id,
         memory_type: serde_json::from_str(row.try_get("type")?)?,
@@ -194,6 +202,7 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
         chunk_method,
+        bridge_block_id,
     })
 }
 
@@ -659,29 +668,52 @@ impl SearchService {
         }
 
         // Collect bridge blocks and facts for each memory
+        // Use direct bridge_block_id FK when available, fallback to agent events
         let mut seen_blocks: HashSet<Uuid> = HashSet::new();
 
         for memory in memories {
             let memory_id = memory.id;
 
-            // Get agent events for this memory to find bridge blocks
-            let events = operations::get_agent_events_for_memory(&self.pool, memory_id, 5).await?;
-
-            let mut memory_block_id: Option<Uuid> = None;
+            // First try direct bridge_block_id FK (new approach)
+            let mut memory_block_id: Option<Uuid> = memory.bridge_block_id;
             let mut block_status: Option<String> = None;
 
-            for event in &events {
-                if let Some(span_id) = &event.span_id {
+            if let Some(block_id) = memory_block_id {
+                // Fetch the block if we haven't seen it yet
+                if !seen_blocks.contains(&block_id) {
                     if let Ok(Some(block)) =
-                        operations::get_bridge_block_by_span(&self.pool, span_id).await
+                        operations::get_bridge_block(&self.pool, block_id).await
                     {
-                        memory_block_id = Some(block.block_id);
                         block_status = block.status.clone();
+                        seen_blocks.insert(block_id);
+                        result.bridge_blocks.push(block);
+                    }
+                } else {
+                    // Get status from already-seen block
+                    block_status = result
+                        .bridge_blocks
+                        .iter()
+                        .find(|b| b.block_id == block_id)
+                        .and_then(|b| b.status.clone());
+                }
+            } else {
+                // Fallback: Get agent events for this memory to find bridge blocks (legacy approach)
+                let events =
+                    operations::get_agent_events_for_memory(&self.pool, memory_id, 5).await?;
 
-                        if seen_blocks.insert(block.block_id) {
-                            result.bridge_blocks.push(block);
+                for event in &events {
+                    if let Some(span_id) = &event.span_id {
+                        if let Ok(Some(block)) =
+                            operations::get_bridge_block_by_span(&self.pool, span_id).await
+                        {
+                            memory_block_id = Some(block.block_id);
+                            block_status = block.status.clone();
+
+                            if seen_blocks.insert(block.block_id) {
+                                result.bridge_blocks.push(block);
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
@@ -716,6 +748,51 @@ impl SearchService {
             }
 
             result.memories.push(memory);
+        }
+
+        // Expand block context: fetch all memories from matched blocks
+        if options.expand_block_context && !result.bridge_blocks.is_empty() {
+            let existing_memory_ids: HashSet<Uuid> = result.memories.iter().map(|m| m.id).collect();
+
+            for block in &result.bridge_blocks {
+                let block_memories = if options.max_memories_per_block > 0 {
+                    operations::get_memories_by_bridge_block(
+                        &self.pool,
+                        block.block_id,
+                        options.max_memories_per_block as i64,
+                    )
+                    .await?
+                } else {
+                    operations::get_all_memories_by_bridge_block(&self.pool, block.block_id).await?
+                };
+
+                for memory in block_memories {
+                    // Don't add duplicates
+                    if existing_memory_ids.contains(&memory.id) {
+                        continue;
+                    }
+
+                    // Track memory -> block mapping
+                    result.memory_blocks.insert(memory.id, block.block_id);
+
+                    // Get facts for expanded memories if requested
+                    if options.include_facts {
+                        let max_facts = if options.max_facts_per_memory > 0 {
+                            options.max_facts_per_memory as i64
+                        } else {
+                            10
+                        };
+                        let memory_facts =
+                            operations::get_facts_for_memory(&self.pool, memory.id, max_facts)
+                                .await?;
+                        if !memory_facts.is_empty() {
+                            result.memory_facts.insert(memory.id, memory_facts);
+                        }
+                    }
+
+                    result.memories.push(memory);
+                }
+            }
         }
 
         // Group by blocks if requested
@@ -873,7 +950,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method FROM memories WHERE id IN (",
+                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");

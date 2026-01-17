@@ -184,6 +184,8 @@ pub async fn handle(
             inactive_block_strategy: inactive_strategy,
             max_facts_per_memory: 10,
             search_facts: cmd.search_facts,
+            expand_block_context: false,
+            max_memories_per_block: 0,
         };
 
         let result = search_service

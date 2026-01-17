@@ -1,11 +1,16 @@
 use crate::state::ServiceState;
 use anyhow::Result;
+use axum::body::Body;
 use axum::extract::Query;
 use axum::extract::State as AxumState;
 use axum::http::HeaderMap;
+use axum::http::Request as AxumRequest;
 use axum::http::StatusCode;
+use axum::middleware;
+use axum::middleware::Next;
 use axum::response::Html;
 use axum::response::IntoResponse;
+use axum::response::Response as AxumResponse;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Json;
@@ -52,6 +57,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use tokio::signal;
 use tokio::time::timeout;
 use tonic::transport::Server;
@@ -810,7 +816,7 @@ fn enforce_api_key(
             .strip_prefix("Bearer ")
             .or_else(|| auth_header.strip_prefix("bearer "))
         {
-            if token == expected {
+            if bool::from(token.as_bytes().ct_eq(expected.as_bytes())) {
                 return Ok(());
             }
         }
@@ -819,6 +825,20 @@ fn enforce_api_key(
     }
 
     Ok(())
+}
+
+async fn api_key_middleware(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    headers: HeaderMap,
+    request: AxumRequest<Body>,
+    next: Next,
+) -> Result<AxumResponse, ApiError> {
+    enforce_api_key(
+        app_state.api_config.require_api_key,
+        &app_state.api_key,
+        &headers,
+    )?;
+    Ok(next.run(request).await)
 }
 
 fn validate_batch(inputs: &[String], cfg: &ExternalApiConfig, field: &str) -> Result<(), ApiError> {
@@ -854,14 +874,8 @@ fn validate_text_len(text: &str, cfg: &ExternalApiConfig, field: &str) -> Result
 
 async fn embeddings_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<EmbeddingRequestPayload>,
 ) -> Result<Json<EmbeddingResponsePayload>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let EmbeddingRequestPayload { model, input } = payload;
@@ -914,14 +928,8 @@ async fn embeddings_handler(
 
 async fn rerank_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<RerankRequestPayload>,
 ) -> Result<Json<RerankResponsePayload>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     if payload.documents.is_empty() {
@@ -976,13 +984,7 @@ async fn rerank_handler(
 /// OpenAI-compatible /v1/models endpoint
 async fn models_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
 ) -> Result<Json<ModelsListResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let mut models = Vec::new();
@@ -1031,18 +1033,13 @@ async fn models_handler(
 
 async fn agent_memory_create_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<AgentMemoryCreateRequest>,
 ) -> Result<Json<AgentMemoryCreateResponse>, ApiError> {
+    use mmry_core::hmlr::generate_block_embedding;
     use mmry_core::hmlr::HmlrContext;
     use mmry_core::hmlr::HmlrPipeline;
     use mmry_core::memory::MemoryType;
 
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     if payload.content.is_empty() {
@@ -1181,6 +1178,28 @@ async fn agent_memory_create_handler(
                         .content
                         .get("memory_ids")
                         .is_none_or(|ids| ids.as_array().is_none_or(|arr| arr.len() <= 1));
+
+                    // Generate embedding for the block if it doesn't have one
+                    // This enables semantic routing in subsequent requests
+                    if block.embedding.is_none() {
+                        let embeddings = Arc::clone(&app_state.state.embeddings_wrapper);
+                        let pool = app_state.state.db.pool().clone();
+                        let block_for_embed = block.clone();
+                        tokio::spawn(async move {
+                            let result =
+                                generate_block_embedding(&pool, &block_for_embed, |text| {
+                                    let emb = embeddings.clone();
+                                    async move {
+                                        let mut guard = emb.lock().await;
+                                        guard.embed(&text).await
+                                    }
+                                })
+                                .await;
+                            if let Err(e) = result {
+                                tracing::debug!("Failed to generate block embedding: {e}");
+                            }
+                        });
+                    }
                 }
             }
             Err(e) => {
@@ -1221,17 +1240,12 @@ async fn agent_memory_create_handler(
 /// This endpoint does NOT create a new memory - use /v1/agents/memories for that.
 async fn agent_enrich_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<AgentEnrichRequest>,
 ) -> Result<Json<AgentEnrichResponse>, ApiError> {
+    use mmry_core::hmlr::generate_block_embedding;
     use mmry_core::hmlr::HmlrContext;
     use mmry_core::hmlr::HmlrPipeline;
 
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     // Parse memory ID
@@ -1306,6 +1320,27 @@ async fn agent_enrich_handler(
                         .content
                         .get("memory_ids")
                         .is_none_or(|ids| ids.as_array().is_none_or(|arr| arr.len() <= 1));
+
+                    // Generate embedding for the block if it doesn't have one
+                    if block.embedding.is_none() {
+                        let embeddings = Arc::clone(&app_state.state.embeddings_wrapper);
+                        let pool = app_state.state.db.pool().clone();
+                        let block_for_embed = block.clone();
+                        tokio::spawn(async move {
+                            let result =
+                                generate_block_embedding(&pool, &block_for_embed, |text| {
+                                    let emb = embeddings.clone();
+                                    async move {
+                                        let mut guard = emb.lock().await;
+                                        guard.embed(&text).await
+                                    }
+                                })
+                                .await;
+                            if let Err(e) = result {
+                                tracing::debug!("Failed to generate block embedding: {e}");
+                            }
+                        });
+                    }
                 }
             }
             Err(e) => {
@@ -1340,14 +1375,8 @@ async fn agent_enrich_handler(
 
 async fn agent_route_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<AgentRouteRequest>,
 ) -> Result<Json<AgentRouteResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     validate_text_len(&payload.query, &app_state.api_config, "query")?;
@@ -1510,14 +1539,8 @@ fn parse_search_mode(mode: Option<&str>) -> Option<MmrySearchMode> {
 
 async fn federation_search_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<FederationSearchRequest>,
 ) -> Result<Json<FederationSearchResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     validate_text_len(&payload.query, &app_state.api_config, "query")?;
@@ -1603,14 +1626,8 @@ fn is_local_console_host(host: &str) -> bool {
 
 async fn memory_list_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Query(query): Query<MemoryListQuery>,
 ) -> Result<Json<MemoryListResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
@@ -1622,15 +1639,10 @@ async fn memory_list_handler(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to count memories: {e}")))?;
 
-    let mut memories = operations::list_memories(&pool, query.category.as_deref(), limit + offset)
-        .await
-        .map_err(|e| ApiError::internal(format!("Failed to list memories: {e}")))?;
-
-    // Apply offset manually since list_memories doesn't support it
-    if offset > 0 {
-        memories = memories.into_iter().skip(offset as usize).collect();
-    }
-    memories.truncate(limit as usize);
+    let mut memories =
+        operations::list_memories_paged(&pool, query.category.as_deref(), limit, offset)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to list memories: {e}")))?;
 
     // Don't ship embeddings over the wire
     for memory in &mut memories {
@@ -1652,19 +1664,13 @@ async fn memory_list_handler(
 
 async fn memory_get_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Query(query): Query<MemoryGetQuery>,
 ) -> Result<Json<Memory>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
-    let memory_id = Uuid::parse_str(&id)
-        .map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
+    let memory_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
 
     let (pool, db_guard) = pool_for_store(&app_state, query.store.as_deref()).await?;
 
@@ -1686,19 +1692,13 @@ async fn memory_get_handler(
 
 async fn memory_update_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(payload): Json<MemoryUpdateRequest>,
 ) -> Result<Json<MemoryUpdateResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
-    let memory_id = Uuid::parse_str(&id)
-        .map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
+    let memory_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
 
     let (pool, db_guard) = pool_for_store(&app_state, payload.store.as_deref()).await?;
 
@@ -1733,7 +1733,9 @@ async fn memory_update_handler(
         if let Some(service) = service_guard.as_ref() {
             let timeout_duration =
                 Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
-            if let Ok(Ok(Some(vector))) = timeout(timeout_duration, service.embed(&memory.content)).await {
+            if let Ok(Ok(Some(vector))) =
+                timeout(timeout_duration, service.embed(&memory.content)).await
+            {
                 memory.embedding = Some(vector);
             }
         }
@@ -1768,19 +1770,13 @@ async fn memory_update_handler(
 
 async fn memory_delete_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Query(query): Query<MemoryDeleteQuery>,
 ) -> Result<Json<MemoryDeleteResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
-    let memory_id = Uuid::parse_str(&id)
-        .map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
+    let memory_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("Invalid memory ID format"))?;
 
     let (pool, db_guard) = pool_for_store(&app_state, query.store.as_deref()).await?;
 
@@ -1813,13 +1809,7 @@ async fn memory_delete_handler(
 
 async fn stores_list_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
 ) -> Result<Json<StoresListResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let stores = mmry_core::stores::list_stores(&app_state.state.config)
@@ -1851,14 +1841,8 @@ async fn pool_for_store(
 
 async fn profile_blocks_list_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<ProfileBlocksListRequest>,
 ) -> Result<Json<ProfileBlocksListResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let user_id = parse_uuid("user_id", &payload.user_id)?;
@@ -1882,14 +1866,8 @@ async fn profile_blocks_list_handler(
 
 async fn profile_blocks_get_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<ProfileBlocksGetRequest>,
 ) -> Result<Json<ProfileBlocksGetResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let user_id = parse_uuid("user_id", &payload.user_id)?;
@@ -1910,14 +1888,8 @@ async fn profile_blocks_get_handler(
 
 async fn profile_blocks_set_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<ProfileBlocksSetRequest>,
 ) -> Result<Json<ProfileBlocksSetResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let user_id = parse_uuid("user_id", &payload.user_id)?;
@@ -1955,14 +1927,8 @@ async fn profile_blocks_set_handler(
 
 async fn profile_blocks_patch_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<ProfileBlocksPatchRequest>,
 ) -> Result<Json<ProfileBlocksPatchResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let user_id = parse_uuid("user_id", &payload.user_id)?;
@@ -2000,14 +1966,8 @@ async fn profile_blocks_patch_handler(
 
 async fn context_pack_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<ContextPackRequest>,
 ) -> Result<Json<ContextPackResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     validate_text_len(&payload.query, &app_state.api_config, "query")?;
@@ -2074,14 +2034,8 @@ async fn context_pack_handler(
 
 async fn conversation_summarize_prune_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
-    headers: HeaderMap,
     Json(payload): Json<SummarizePruneRequest>,
 ) -> Result<Json<SummarizePruneResponse>, ApiError> {
-    enforce_api_key(
-        app_state.api_config.require_api_key,
-        &app_state.api_key,
-        &headers,
-    )?;
     app_state.state.record_activity().await;
 
     let max_batch = app_state.api_config.max_batch_size.max(1);
@@ -2193,6 +2147,7 @@ async fn console_handler(AxumState(app_state): AxumState<ExternalApiState>) -> H
   <div class="row">
     <label>Store <input id="store" placeholder="__DEFAULT_STORE__" /></label>
     <label>User ID <input id="userId" placeholder="(optional UUID)" size="40" /></label>
+    <label>API Key <input id="apiKey" placeholder="(optional)" type="password" size="28" /></label>
     <label><input id="redact" type="checkbox" __REDACT_CHECKED__ /> Redact secrets</label>
     <button id="refresh">Refresh</button>
     <span id="status" class="muted"></span>
@@ -2225,7 +2180,13 @@ async fn console_handler(AxumState(app_state): AxumState<ExternalApiState>) -> H
     async function refresh() {
       $("status").textContent = "Loading…";
       try {
-        const resp = await fetch("/console/data?" + qs().toString());
+        const headers = {};
+        const apiKey = $("apiKey").value.trim();
+        if (apiKey) {
+          headers.Authorization = "Bearer " + apiKey;
+        }
+
+        const resp = await fetch("/console/data?" + qs().toString(), { headers });
         const data = await resp.json();
         $("service").textContent = JSON.stringify(data.service, null, 2);
         $("profile").textContent = JSON.stringify(data.profile_blocks, null, 2);
@@ -2393,9 +2354,10 @@ async fn run_http_api(
         api_config,
     };
 
-    use axum::routing::{delete, put};
+    use axum::routing::delete;
+    use axum::routing::put;
 
-    let mut app = Router::new()
+    let mut protected_routes = Router::new()
         .route("/v1/models", get(models_handler))
         .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/rerank", post(rerank_handler))
@@ -2425,9 +2387,18 @@ async fn run_http_api(
         );
 
     if console_enabled {
-        app = app
-            .route("/console", get(console_handler))
-            .route("/console/data", get(console_data_handler));
+        protected_routes = protected_routes.route("/console/data", get(console_data_handler));
+    }
+
+    let protected_routes = protected_routes.layer(middleware::from_fn_with_state(
+        external_state.clone(),
+        api_key_middleware,
+    ));
+
+    let mut app = Router::new().merge(protected_routes);
+
+    if console_enabled {
+        app = app.route("/console", get(console_handler));
     }
 
     let app = app.with_state(external_state);
@@ -2633,8 +2604,11 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::Request as AxumRequest;
     use mmry_core::agents::FactCategory;
     use tempfile::tempdir;
+    use tower::util::ServiceExt;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_route_returns_new_topic_and_logs_event() {
@@ -2665,10 +2639,9 @@ mod tests {
             agent_id: None,
         };
 
-        let response =
-            agent_route_handler(AxumState(external_state), HeaderMap::new(), Json(payload))
-                .await
-                .expect("route handler ok");
+        let response = agent_route_handler(AxumState(external_state), Json(payload))
+            .await
+            .expect("route handler ok");
 
         assert!(response.routing.is_new_topic);
         assert_eq!(response.contexts.len(), 0);
@@ -2730,7 +2703,6 @@ mod tests {
 
         let resp_default = federation_search_handler(
             AxumState(external_state.clone()),
-            HeaderMap::new(),
             Json(FederationSearchRequest {
                 query: "alpha".to_string(),
                 category: None,
@@ -2748,7 +2720,6 @@ mod tests {
 
         let resp_b = federation_search_handler(
             AxumState(external_state),
-            HeaderMap::new(),
             Json(FederationSearchRequest {
                 query: "beta".to_string(),
                 category: None,
@@ -2851,7 +2822,6 @@ mod tests {
 
         let set_resp = profile_blocks_set_handler(
             AxumState(external_state.clone()),
-            HeaderMap::new(),
             Json(ProfileBlocksSetRequest {
                 user_id: user_id.to_string(),
                 block: "persona".to_string(),
@@ -2871,7 +2841,6 @@ mod tests {
 
         let get_resp = profile_blocks_get_handler(
             AxumState(external_state.clone()),
-            HeaderMap::new(),
             Json(ProfileBlocksGetRequest {
                 user_id: user_id.to_string(),
                 block: "persona".to_string(),
@@ -2888,7 +2857,6 @@ mod tests {
 
         let list_resp = profile_blocks_list_handler(
             AxumState(external_state.clone()),
-            HeaderMap::new(),
             Json(ProfileBlocksListRequest {
                 user_id: user_id.to_string(),
                 store: None,
@@ -2901,7 +2869,6 @@ mod tests {
 
         let patch_resp = profile_blocks_patch_handler(
             AxumState(external_state.clone()),
-            HeaderMap::new(),
             Json(ProfileBlocksPatchRequest {
                 user_id: user_id.to_string(),
                 block: "persona".to_string(),
@@ -2977,7 +2944,6 @@ mod tests {
 
         let resp = context_pack_handler(
             AxumState(external_state),
-            HeaderMap::new(),
             Json(ContextPackRequest {
                 query: "hello".to_string(),
                 category: None,
@@ -3026,7 +2992,6 @@ mod tests {
 
         let resp = conversation_summarize_prune_handler(
             AxumState(external_state),
-            HeaderMap::new(),
             Json(SummarizePruneRequest {
                 turns,
                 max_turns: Some(2),
@@ -3082,7 +3047,6 @@ mod tests {
         let agent_id = Uuid::new_v4();
         let resp = conversation_summarize_prune_handler(
             AxumState(external_state),
-            HeaderMap::new(),
             Json(SummarizePruneRequest {
                 turns,
                 max_turns: Some(2),
@@ -3228,10 +3192,9 @@ mod tests {
             agent_id: None,
         };
 
-        let response =
-            agent_route_handler(AxumState(external_state), HeaderMap::new(), Json(payload))
-                .await
-                .expect("route handler ok");
+        let response = agent_route_handler(AxumState(external_state), Json(payload))
+            .await
+            .expect("route handler ok");
 
         if response.routing.chosen_block.is_none() {
             panic!(
@@ -3566,8 +3529,7 @@ mod tests {
             input: EmbeddingInput::Multiple(vec![]),
         };
 
-        let result =
-            embeddings_handler(AxumState(external_state), HeaderMap::new(), Json(payload)).await;
+        let result = embeddings_handler(AxumState(external_state), Json(payload)).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -3603,8 +3565,7 @@ mod tests {
             ]),
         };
 
-        let result =
-            embeddings_handler(AxumState(external_state), HeaderMap::new(), Json(payload)).await;
+        let result = embeddings_handler(AxumState(external_state), Json(payload)).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -3637,8 +3598,7 @@ mod tests {
             model: None,
         };
 
-        let result =
-            rerank_handler(AxumState(external_state), HeaderMap::new(), Json(payload)).await;
+        let result = rerank_handler(AxumState(external_state), Json(payload)).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -3676,9 +3636,7 @@ mod tests {
             conversation_history: None,
         };
 
-        let result =
-            agent_memory_create_handler(AxumState(external_state), HeaderMap::new(), Json(payload))
-                .await;
+        let result = agent_memory_create_handler(AxumState(external_state), Json(payload)).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -3717,9 +3675,7 @@ mod tests {
             conversation_history: None,
         };
 
-        let result =
-            agent_memory_create_handler(AxumState(external_state), HeaderMap::new(), Json(payload))
-                .await;
+        let result = agent_memory_create_handler(AxumState(external_state), Json(payload)).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -3755,8 +3711,7 @@ mod tests {
             agent_id: None,
         };
 
-        let result =
-            agent_route_handler(AxumState(external_state), HeaderMap::new(), Json(payload)).await;
+        let result = agent_route_handler(AxumState(external_state), Json(payload)).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -3784,7 +3739,7 @@ mod tests {
             api_config: config.external_api.clone(),
         };
 
-        let result = models_handler(AxumState(external_state), HeaderMap::new()).await;
+        let result = models_handler(AxumState(external_state)).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.object, "list");
@@ -3813,16 +3768,36 @@ mod tests {
             api_config: config.external_api.clone(),
         };
 
-        // Without auth header
-        let result = models_handler(AxumState(external_state.clone()), HeaderMap::new()).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        let app = Router::new()
+            .route("/v1/models", get(models_handler))
+            .layer(middleware::from_fn_with_state(
+                external_state.clone(),
+                api_key_middleware,
+            ))
+            .with_state(external_state);
 
-        // With correct auth header
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer secret".parse().unwrap());
-        let result = models_handler(AxumState(external_state), headers).await;
-        assert!(result.is_ok());
+        let response = app
+            .clone()
+            .oneshot(
+                AxumRequest::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                AxumRequest::builder()
+                    .uri("/v1/models")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

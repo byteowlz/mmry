@@ -192,21 +192,30 @@ impl ContextHydrator {
     }
 
     /// Get memories referenced in a bridge block
+    ///
+    /// Uses direct FK relationship (bridge_block_id) when available,
+    /// falls back to JSON content.memory_ids for legacy data.
     async fn get_block_memories(
         &self,
         pool: &SqlitePool,
         block: &BridgeBlock,
     ) -> Result<Vec<Memory>> {
-        let mut memories = Vec::new();
+        // First try direct FK relationship (new approach)
+        let memories = operations::get_memories_by_bridge_block(pool, block.block_id, 100).await?;
 
-        // Extract memory IDs from block content
+        if !memories.is_empty() {
+            return Ok(memories);
+        }
+
+        // Fallback: Extract memory IDs from block content (legacy approach)
+        let mut fallback_memories = Vec::new();
         if let Some(memory_ids) = block.content.get("memory_ids") {
             if let Some(ids) = memory_ids.as_array() {
                 for id_val in ids {
                     if let Some(id_str) = id_val.as_str() {
                         if let Ok(id) = Uuid::parse_str(id_str) {
                             if let Some(memory) = operations::get_memory(pool, id).await? {
-                                memories.push(memory);
+                                fallback_memories.push(memory);
                             }
                         }
                     }
@@ -214,7 +223,7 @@ impl ContextHydrator {
             }
         }
 
-        Ok(memories)
+        Ok(fallback_memories)
     }
 
     /// Extract metadata from a bridge block
@@ -223,7 +232,8 @@ impl ContextHydrator {
         pool: &SqlitePool,
         block: &BridgeBlock,
     ) -> Result<BlockMetadata> {
-        let memories = self.get_block_memories(pool, block).await?;
+        // Count memories directly via FK (faster than fetching all)
+        let memories = operations::get_memories_by_bridge_block(pool, block.block_id, 1000).await?;
 
         Ok(BlockMetadata {
             block_id: block.block_id,

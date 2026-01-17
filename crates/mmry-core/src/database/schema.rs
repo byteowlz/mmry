@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS memories (
     parent_id TEXT,
     chunk_index INTEGER,
     total_chunks INTEGER,
-    chunk_method TEXT
+    chunk_method TEXT,
+    bridge_block_id TEXT REFERENCES bridge_blocks(block_id)
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -77,7 +78,8 @@ CREATE TABLE IF NOT EXISTS bridge_blocks (
     exit_reason TEXT,
     content_json JSON,
     agent_id TEXT REFERENCES agents(id),
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    embedding BLOB
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -114,3 +116,6 @@ CREATE INDEX IF NOT EXISTS idx_bridge_blocks_span ON bridge_blocks(span_id);
 CREATE INDEX IF NOT EXISTS idx_facts_key ON facts(fact_key);
 CREATE INDEX IF NOT EXISTS idx_facts_observed ON facts(observed_at DESC);
 "#;
+
+// Note: bridge_block_id indexes are created in apply_schema_updates after the column is added
+// This ensures backward compatibility with databases that don't have the column yet
