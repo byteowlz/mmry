@@ -35,7 +35,7 @@ pub async fn upsert_entity(pool: &SqlitePool, entity: &Entity) -> Result<Uuid> {
         .execute(pool)
         .await?;
 
-        Ok(Uuid::parse_str(&id_str).unwrap())
+        Ok(parse_uuid("entity id", &id_str)?)
     } else {
         // Insert new entity
         sqlx::query(
@@ -249,7 +249,7 @@ pub async fn upsert_relationship(pool: &SqlitePool, relationship: &Relationship)
         .execute(pool)
         .await?;
 
-        Ok(Uuid::parse_str(&id_str).unwrap())
+        Ok(parse_uuid("relationship id", &id_str)?)
     } else {
         // Insert new relationship
         sqlx::query(
@@ -382,6 +382,11 @@ pub struct EntityStats {
     pub total_memory_links: usize,
 }
 
+fn parse_uuid(field: &str, value: &str) -> Result<Uuid> {
+    Uuid::parse_str(value)
+        .map_err(|e| crate::Error::InvalidInput(format!("Invalid {field} '{value}': {e}")))
+}
+
 fn entity_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Entity> {
     let id_str: String = row.try_get("id")?;
     let name: String = row.try_get("name")?;
@@ -395,7 +400,7 @@ fn entity_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Entity> {
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
 
     Ok(Entity {
-        id: Uuid::parse_str(&id_str).unwrap(),
+        id: parse_uuid("entity id", &id_str)?,
         name,
         entity_type,
         metadata,
@@ -414,9 +419,9 @@ fn relationship_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Relationship> 
     let relation_type: RelationType = relation_type_str.parse().unwrap_or(RelationType::RelatedTo);
 
     Ok(Relationship {
-        id: Uuid::parse_str(&id_str).unwrap(),
-        from_entity_id: Uuid::parse_str(&from_str).unwrap(),
-        to_entity_id: Uuid::parse_str(&to_str).unwrap(),
+        id: parse_uuid("relationship id", &id_str)?,
+        from_entity_id: parse_uuid("from_entity", &from_str)?,
+        to_entity_id: parse_uuid("to_entity", &to_str)?,
         relation_type,
         strength,
         metadata: serde_json::Value::Object(serde_json::Map::new()),

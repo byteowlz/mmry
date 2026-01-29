@@ -62,7 +62,7 @@ impl EmbeddingServiceWrapper {
             #[cfg(feature = "service")]
             daemon: None,
             #[cfg(feature = "remote-http")]
-            http: std::sync::Arc::new(ReqwestJsonHttpClient),
+            http: std::sync::Arc::new(ReqwestJsonHttpClient::default()),
         })
     }
 

@@ -78,7 +78,7 @@ impl RerankerService {
                 #[cfg(feature = "remote-http")]
                 remote: None,
                 #[cfg(feature = "remote-http")]
-                http: Arc::new(ReqwestJsonHttpClient),
+                http: Arc::new(ReqwestJsonHttpClient::default()),
             });
         }
 
@@ -97,7 +97,7 @@ impl RerankerService {
                 .clone()
                 .filter(|c| !c.base_url.trim().is_empty()),
             #[cfg(feature = "remote-http")]
-            http: Arc::new(ReqwestJsonHttpClient),
+            http: Arc::new(ReqwestJsonHttpClient::default()),
         })
     }
 

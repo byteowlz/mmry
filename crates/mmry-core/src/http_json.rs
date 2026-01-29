@@ -27,8 +27,19 @@ pub trait JsonHttpClient: Send + Sync {
 }
 
 #[cfg(feature = "remote-http")]
-#[derive(Debug, Default, Clone)]
-pub struct ReqwestJsonHttpClient;
+#[derive(Debug, Clone)]
+pub struct ReqwestJsonHttpClient {
+    client: reqwest::Client,
+}
+
+#[cfg(feature = "remote-http")]
+impl Default for ReqwestJsonHttpClient {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+}
 
 #[cfg(feature = "remote-http")]
 impl JsonHttpClient for ReqwestJsonHttpClient {
@@ -39,13 +50,9 @@ impl JsonHttpClient for ReqwestJsonHttpClient {
         timeout: std::time::Duration,
         body: Value,
     ) -> PostJsonFuture {
+        let client = self.client.clone();
         Box::pin(async move {
-            let client = reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .map_err(|e| crate::Error::Service(format!("Failed to build HTTP client: {e}")))?;
-
-            let mut request = client.post(url).json(&body);
+            let mut request = client.post(url).timeout(timeout).json(&body);
             if let Some(key) = api_key.filter(|k| !k.trim().is_empty()) {
                 request = request.header(AUTHORIZATION, format!("Bearer {key}"));
             }

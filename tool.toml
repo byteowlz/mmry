@@ -1,5 +1,7 @@
 # tool.toml - mmry metadata for byteowlz.com/toolz/mmry
 
+"$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/govnr/tool.schema.json"
+
 name = "mmry"
 title = "mmry"
 tagline = "Local-first memory system for humans and AI agents"
