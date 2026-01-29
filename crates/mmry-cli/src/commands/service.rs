@@ -38,7 +38,7 @@ enum ServiceCommands {
 
 pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()> {
     if cmd.check_llm {
-        let config = Config::load_with_path(config_path)?;
+        let config = Config::load_with_path(config_path.clone())?;
         match check_analyzer_health(&config).await {
             Ok(()) => println!("✓ Analyzer endpoint reachable"),
             Err(e) => {
@@ -134,7 +134,19 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
                     println!("Service is running");
                     println!("  PID: {pid}");
                     if let Ok(port) = manager.read_port() {
-                        println!("  Port: {port}");
+                        println!("  gRPC port: {port}");
+                    }
+
+                    // Show HTTP API port from config if enabled
+                    if let Ok(config) = Config::load_with_path(config_path.clone()) {
+                        if config.external_api.enable {
+                            println!(
+                                "  HTTP port: {} ({}:{})",
+                                config.external_api.port,
+                                config.external_api.host,
+                                config.external_api.port
+                            );
+                        }
                     }
 
                     // Try to get health info
