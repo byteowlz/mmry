@@ -311,12 +311,17 @@ fn draw_hmlr_detail(f: &mut Frame, app: &App, area: Rect) {
             }
         }
         MiddleView::Facts => {
-            if let Some(fact) = app.selected_fact() {
+            if let Some(fact_with_store) = app.selected_fact() {
+                let fact = &fact_with_store.fact;
                 lines.push(Line::from(vec![
                     Span::styled("Fact ", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(fact.id.to_string()),
                 ]));
                 lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Store: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(&fact_with_store.store),
+                ]));
                 lines.push(Line::from(vec![
                     Span::styled("Key: ", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(&fact.fact_key),

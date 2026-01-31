@@ -40,19 +40,20 @@ use mmry_core::guardrails::GuardrailsAccumulator;
 use mmry_core::hmlr::get_or_create_human_agent;
 use mmry_core::hmlr::HmlrContext;
 use mmry_core::hmlr::HmlrPipeline;
-use mmry_core::memory::Memory;
 use mmry_core::memory::SourceAttribution;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use mmry_core::stores::export_all_stores_to_json;
 use mmry_core::stores::export_store_to_json;
+use mmry_core::stores::list_all_facts;
 use mmry_core::stores::list_all_stores;
 use mmry_core::stores::list_stores;
 use mmry_core::stores::move_memory_to_store;
 use mmry_core::stores::store_exists;
 use mmry_core::stores::validate_store_name;
 use mmry_core::stores::write_export_to_file;
+use mmry_core::stores::FactWithStore;
 use mmry_core::stores::MemoryWithStore;
 use mmry_core::stores::StoreInfo;
 use std::collections::HashSet;
@@ -108,7 +109,7 @@ pub struct App {
     search_backup: Option<Vec<MemoryWithStore>>,
     pub memories: Vec<MemoryWithStore>,
     pub bridge_blocks: Vec<BridgeBlock>,
-    pub facts: Vec<FactRecord>,
+    pub facts: Vec<FactWithStore>,
     pub agent_events: Vec<AgentEvent>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
@@ -459,7 +460,18 @@ impl App {
                     .min(self.bridge_blocks.len().saturating_sub(1));
             }
             MiddleView::Facts => {
-                self.facts = operations::list_recent_facts(self.db.pool(), 200).await?;
+                if self.viewing_all_stores {
+                    self.facts = list_all_facts(&self.config, 200).await?;
+                } else {
+                    let store_facts = operations::list_recent_facts(self.db.pool(), 200).await?;
+                    self.facts = store_facts
+                        .into_iter()
+                        .map(|fact| FactWithStore {
+                            fact,
+                            store: self.current_store.clone(),
+                        })
+                        .collect();
+                }
                 self.middle_selection.index = self
                     .middle_selection
                     .index
@@ -511,7 +523,7 @@ impl App {
         self.bridge_blocks.get(self.middle_selection.index)
     }
 
-    pub fn selected_fact(&self) -> Option<&FactRecord> {
+    pub fn selected_fact(&self) -> Option<&FactWithStore> {
         if self.middle_view != MiddleView::Facts {
             return None;
         }
@@ -2370,6 +2382,7 @@ mod tests {
     use super::*;
     use crate::state::CategoryInputContext;
     use crate::state::WhichKeyContext;
+    use mmry_core::memory::Memory;
     use mmry_core::memory::MemoryType;
 
     struct TestContext {

@@ -254,7 +254,8 @@ fn draw_facts(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
         .facts
         .iter()
         .enumerate()
-        .map(|(idx, fact)| {
+        .map(|(idx, fact_with_store)| {
+            let fact = &fact_with_store.fact;
             let selection_marker = if app.middle_selection.is_selected(idx) {
                 Span::styled(
                     "◉ ",
@@ -277,13 +278,21 @@ fn draw_facts(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
                 Span::raw(&fact.fact_value),
             ]);
 
+            // Show store name in the second line when viewing all stores
+            let store_info = if app.viewing_all_stores {
+                format!(" | store: {}", fact_with_store.store)
+            } else {
+                String::new()
+            };
+
             let line2 = Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
                     format!(
-                        "observed: {} | recency: {:.2}",
+                        "observed: {} | recency: {:.2}{}",
                         fact.observed_at.format("%Y-%m-%d"),
-                        fact.recency_score
+                        fact.recency_score,
+                        store_info
                     ),
                     Style::default().fg(Color::DarkGray),
                 ),
