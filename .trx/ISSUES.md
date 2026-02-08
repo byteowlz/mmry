@@ -2,8 +2,6 @@
 
 ## Open
 
-### [mmry-yay2.7] Agent provenance in JSON output - all --json output includes agent name, kind, and meta so consumers know who created each memory/learning (P1, feature)
-
 ### [mmry-yay2] Agent Identity & Provenance - pass agent/repo/session identity through all mmry interfaces (CLI, MCP, gRPC) so every memory and learning has clear attribution (P1, epic)
 
 ### [mmry-xrbv.4] LLM-based learning extraction pipeline - analyze hstry chat sessions and distill actionable learnings/rules into the learnings store (P1, feature)
@@ -11,8 +9,6 @@
 ### [mmry-xrbv.3] 'mmry context <task>' command - search learnings (not memories) within a store and optionally across stores, return relevant rules + anti-patterns as JSON (P1, feature)
 
 ### [mmry-xrbv.2] Confidence decay & maturity tracking - time-decayed feedback scoring (90-day half-life, 4x harmful multiplier) with maturity transitions (candidate/established/proven/deprecated) (P1, feature)
-
-### [mmry-xrbv.1] Learnings table & data model - store distilled rules/insights separate from raw memories, with category, scope, maturity, and provenance (P1, feature)
 
 ### [mmry-xrbv] Learnings & Context System - distill agent sessions into actionable rules with confidence tracking, inspired by cass-memory (P1, epic)
 
@@ -54,6 +50,8 @@
 
 ## Closed
 
+- [mmry-xrbv.1] Learnings table & data model - store distilled rules/insights separate from raw memories, with category, scope, maturity, and provenance (closed 2026-02-08)
+- [mmry-yay2.7] Agent provenance in JSON output - all --json output includes agent name, kind, and meta so consumers know who created each memory/learning (closed 2026-02-08)
 - [mmry-yay2.8] MMRY_AGENT and MMRY_AGENT_KIND env vars - allow setting agent identity via environment so wrapper scripts (agntz) don't need to pass flags every time (closed 2026-02-08)
 - [mmry-yay2.3] Extend AgentRecord with repo, workspace, session_id fields in agent_meta JSON. Support structured metadata beyond just name/kind. (closed 2026-02-08)
 - [mmry-yay2.2] Add agent/agent_kind/agent_meta fields to MCP MemoryAddArgs and gRPC SearchRequest/AddRequest so MCP clients can identify themselves (closed 2026-02-08)
