@@ -164,18 +164,190 @@ Candidate ──────────→ Deprecated (different exit: quality 
 
 This separates two semantically distinct reasons for leaving the active set: "never confirmed" (staleness) vs "actively disproven" (deprecation). The downstream behavior differs — deprecated learnings might be converted to cautionary principles (as cass-memory suggests), while dormant learnings are silently absorbed or pruned.
 
-### 5. Convergence and Minimality
+### 5. Feedback Ingestion: How Learnings Receive Evidence
+
+The entire scoring, maturity, staleness, and consolidation machinery is driven by one primitive: `FeedbackEvent`s (helpful/harmful) recorded against learnings. But the current system has **no feedback path implemented** — the `record_learning_feedback` DB operation exists, but nothing calls it. No CLI command, no MCP tool, no automatic trigger. The learnings table can be written to but never *validated*. This makes the confidence model a dead letter.
+
+**The core question**: What are the viable feedback channels for a procedural memory system, which should be automatic vs manual, and how do we ensure feedback volume is sufficient to drive the maturity lifecycle without imposing cognitive burden on human users or hallucination risk from agent self-assessment?
+
+#### 5a. Manual Feedback Channels
+
+The most trustworthy signal comes from explicit human or agent judgment:
+
+- **CLI `mmry feedback <learning-id> helpful|harmful [--reason "..."]`**: Direct, unambiguous, but requires the user to know the learning ID. Realistic after `mmry context <task>` shows which learnings were served — the user can evaluate whether the advice was good. This is the `mmry-xrbv.5` issue in our tracker.
+
+- **MCP tool `RecordFeedback`**: Agents call this after using a learning in a session. The agent must decide "did this learning help me succeed?" — but agents are notoriously bad at self-assessment (Reflexion showed that LLM self-reflection is noisy, and EvolveR's ablation confirms that self-distillation quality depends on model scale).
+
+- **Inline thumbs-up/down in TUI**: When learnings are displayed in `mmry-tui`, the user presses a key to rate them. Low friction, high quality signal, but only works for interactive sessions.
+
+- **Batch review `mmry learnings review [--stale] [--category X]`**: Present learnings one by one, user rates each. High quality but high effort — only practical for periodic curation sessions.
+
+The problem with all manual channels: **feedback is sparse**. Humans won't rate every learning every time. If the maturity lifecycle requires ≥3 helpful events to reach Established and ≥10 for Proven, and the average user provides feedback on 5% of served learnings, the system needs 200 context retrievals before a learning can be Proven. At one session per day, that's 7 months for a frequently-served learning — far too slow.
+
+#### 5b. Automatic Feedback Channels
+
+To achieve sufficient feedback volume, the system needs automatic signals:
+
+- **Outcome-based attribution**: Record whether a session *succeeded* (task completed, tests pass, user satisfied) and attribute that outcome to all learnings served during the session. This is coarse — a session may succeed despite bad advice from one learning — but at scale, the noise averages out. This is the **outcome recording** part of `mmry-xrbv.5`.
+
+  ```
+  mmry outcome <session-path> success|failure [--learnings <ids>]
+  ```
+
+  If no explicit learning IDs are given, the system attributes the outcome to all learnings returned by the most recent `mmry context` call for that session.
+
+- **Implicit retrieval-as-validation**: Every time `mmry context <task>` returns a learning and the agent *uses it* (detectable via the agent's tool call trace or session transcript), count that as weak positive evidence. If the learning is returned but the agent *ignores it* (present in context but not referenced in the agent's reasoning), count that as weak negative evidence. This requires session analysis but could be part of the HMLR pipeline.
+
+- **CI/build signal integration**: For code-scoped learnings, integrate with CI outcomes. If a learning says "Always run lint before commit" and the CI pipeline shows lint failures decreased after the learning was introduced, that's automatic positive evidence. Conversely, if the learning says "Use pattern X for error handling" and error-handling bugs increase, that's automatic negative evidence. This requires external event ingestion.
+
+- **Peer corroboration**: When multiple independent agents (or agents + human) provide the same feedback on a learning, weight it more heavily. The first "helpful" from an agent might be noisy, but if 3 different agents across different sessions all find it helpful, that's strong evidence. This connects to the trust-weighting-by-agent-kind work in `mmry-yay2.6`.
+
+- **Contradiction detection**: When a new learning is extracted that directly contradicts an existing one (detected via semantic similarity + polarity inversion), that's automatic harmful evidence for one of them (or both, pending resolution). The extraction pipeline can detect this during the dedup step.
+
+#### 5c. Feedback Quality vs Quantity Tradeoff
+
+Different feedback sources have different reliability:
+
+| Source | Quality | Volume | Latency | Availability |
+|--------|---------|--------|---------|-------------|
+| Human explicit (`mmry feedback`) | Very high | Very low | Immediate | Requires active curation |
+| Agent explicit (`RecordFeedback` MCP) | Medium | Medium | Immediate | Requires agent integration |
+| TUI inline rating | High | Low-medium | Immediate | Only interactive sessions |
+| Outcome attribution | Medium-low | High | End of session | Requires outcome tracking |
+| Implicit retrieval usage | Low | Very high | Post-session analysis | Requires session transcript parsing |
+| CI/build signal | High (for code) | Medium | Minutes-hours | Requires CI integration |
+| Peer corroboration | High | Low (rare) | Varies | Requires multi-agent setup |
+| Contradiction detection | Medium | Low | At extraction time | Automatic |
+
+**Question**: Should different sources receive different weights in the scoring function? Currently `compute_effective_score` treats all `FeedbackEvent`s equally (modulo time decay). A more nuanced model would be:
+
+```
+S(ℓ) = Σ_{e ∈ helpful(ℓ)} w(source(e)) · 0.5^(age(e)/τ)
+     − λ · Σ_{e ∈ harmful(ℓ)} w(source(e)) · 0.5^(age(e)/τ)
+```
+
+where `w(source)` ∈ (0, 1] weights feedback by source reliability (e.g., `w(human_explicit) = 1.0`, `w(outcome_attribution) = 0.3`, `w(implicit_retrieval) = 0.1`). This prevents a flood of low-quality automatic feedback from drowning out a few high-quality human judgments.
+
+#### 5d. The Cold Start Problem
+
+A freshly extracted learning has zero feedback events. Under our maturity model, it's a Candidate with `effective_score = 0.0`. It will be served by `mmry context` (since Candidates are included in retrieval) but ranked below any learning with even one helpful event. This creates a vicious cycle: new learnings are rarely surfaced, so they rarely receive feedback, so they stay as Candidates indefinitely.
+
+**Potential solutions**:
+
+- **Initial score boost**: Give new learnings a small positive score (like EvolveR's Laplace smoothing: `(0 + 1)/(0 + 2) = 0.5`). This ensures they're competitive in retrieval until real feedback accumulates.
+- **Exploration-exploitation balance**: Occasionally serve a random Candidate learning alongside the top-scored results (like an ε-greedy bandit). This guarantees every learning gets some exposure.
+- **Extraction confidence as initial score**: The LLM extraction pipeline can assign a confidence score to each extracted learning. Use this as the initial effective score, decaying as real feedback replaces it.
+- **Source session quality**: If the session that produced the learning was itself successful (task completed), give the learning an initial "helpful" event attributed to the source session.
+
+#### 5e. Feedback Loop Integrity
+
+A critical risk: if the agent both *uses* learnings and *provides feedback* on them, there's a reinforcement loop. A learning that happens to be served frequently gets more feedback, which raises its score, which makes it served more frequently. This is the "rich get richer" problem.
+
+Conversely, a learning that is never served (due to embedding space distance from common queries) never receives feedback, never matures, and eventually goes stale — even if it's perfectly valid.
+
+**Question**: Can we define a **fairness constraint** on the feedback loop that ensures all learnings receive minimum exposure? This connects to the multi-armed bandit literature (UCB, Thompson sampling) where the exploration-exploitation tradeoff is well-studied. In our setting:
+
+- Each learning is an "arm"
+- "Pulling" an arm = serving it via `mmry context`
+- "Reward" = subsequent feedback (helpful = 1, harmful = 0)
+- The objective: maximize cumulative reward while ensuring all arms are tried sufficiently
+
+Thompson sampling is particularly natural here: model each learning's "helpfulness probability" as a Beta distribution (matching our Bayesian staleness approach from §4), sample from the posterior to decide which learnings to serve, and update the posterior with observed feedback. This gives principled exploration without explicit ε-greedy randomness.
+
+### 6. Recursive Language Models (RLMs) as a Consolidation Paradigm
+
+A recent and potentially transformative approach: **Recursive Language Models** (Zhang, Kraska & Khattab, MIT CSAIL, arXiv:2512.24601). RLMs treat long inputs not as something to stuff into a context window, but as an **external environment** that the LLM can programmatically examine, decompose, and recursively process through a REPL. Inspired by out-of-core algorithms (where a system with small fast memory processes datasets too large to fit by cleverly managing data fetches), RLMs handle inputs 100× beyond model context windows while *outperforming* brute-force long-context approaches — and at comparable or lower cost.
+
+**The analogy to learning consolidation is striking**: our learnings table is exactly the kind of large, structured knowledge base that doesn't fit neatly into a single LLM context pass for consolidation. Just as RLMs decompose a 10M-token document into recursive sub-queries that the model manages programmatically, a consolidation system could decompose a 500-learning knowledge base into recursive sub-problems:
+
+#### 6a. RLM-Driven Recursive Consolidation
+
+Instead of asking a single LLM call to "consolidate all 500 learnings," an RLM approach would:
+
+1. **Examine**: The LLM inspects the learning set metadata (categories, scopes, polarity, scores) as a variable in a REPL environment, without loading all learning texts into context.
+2. **Decompose**: The LLM programmatically clusters learnings by category/scope (e.g., "all debugging learnings", "all Rust-specific cautionary principles") and identifies which clusters are large enough to warrant consolidation.
+3. **Recursive sub-consolidation**: For each cluster, the LLM recursively calls itself with just that subset — say, 20 debugging learnings — which fits comfortably in context. Within each call, it performs the actual semantic merges (generalizing overlapping principles, pairing guiding/cautionary complements, identifying subsumption).
+4. **Merge upward**: Results from sub-consolidations are combined. Cross-cluster redundancies (e.g., a debugging learning and a testing learning that both say "always validate inputs") are resolved in a final pass that only needs to compare the *reduced* representatives from each cluster.
+
+This directly addresses the scalability concern from Sub-Question 2: instead of O(|L|²) pairwise comparisons in a single context window, the RLM approach gives O(|L|) with recursive decomposition, and each sub-problem stays within the model's effective capacity.
+
+#### 6b. RLM for Staleness Triage
+
+RLMs are equally natural for the staleness detection problem from §4. Rather than hard-coding a staleness predicate with fixed thresholds (W_feedback, k_min, θ_stale), the LLM can *programmatically inspect* the learning set and reason about staleness:
+
+```python
+# Pseudocode: RLM staleness triage
+learnings = load_all_learnings()  # external environment variable
+stale_candidates = [l for l in learnings if l.effective_score < 0.1 and l.last_feedback_age > 180]
+
+for candidate in stale_candidates:
+    # Recursive sub-query: is this learning still relevant?
+    similar_active = find_similar_active_learnings(candidate, threshold=0.7)
+    if similar_active:
+        # Knowledge is preserved in a more active learning — safe to prune
+        absorb(candidate, into=similar_active[0])
+    else:
+        # Unique knowledge — check criticality before quarantining
+        criticality = assess_criticality(candidate)  # recursive LLM sub-call
+        if criticality > HIGH:
+            protect(candidate)  # pin it
+        else:
+            quarantine(candidate)
+```
+
+The RLM doesn't need all learnings in context simultaneously. It works *out-of-core*, fetching only the subset it needs for each decision. This is fundamentally different from both (a) hard-coded threshold rules (brittle, no semantic understanding) and (b) a single LLM call with all learnings dumped into context (context rot, expensive, lossy).
+
+#### 6c. RLM vs Deterministic Consolidation
+
+A key tension with our design constraint: we committed to **deterministic curation** (no LLM in the merge step) per ACE/Copilot research, because LLM-based curation is noisy and expensive. RLMs challenge this assumption in two ways:
+
+1. **Quality at scale**: EvolveR's ablation showed that self-distillation (model distilling its own principles) outperforms teacher-distillation for models ≥3B parameters. RLMs push this further — the model doesn't just distill, it *programs its own distillation algorithm*. This may produce higher-quality consolidation than any fixed algorithm we can hand-code.
+
+2. **Cost**: RLMs are explicitly designed to be cost-comparable to single-pass approaches despite doing more work, because each recursive sub-call uses a small context window. A consolidation sweep over 500 learnings might cost the same as a single long-context call that stuffs them all in.
+
+**Question**: Should consolidation be a **hybrid** — deterministic for the cheap, high-confidence operations (dedup at 0.85 similarity, maturity transitions, staleness thresholds) and RLM-based for the expensive, judgment-requiring operations (generalization, cross-polarity pairing, absorbing stale learnings into active ones)?
+
+This would give us the best of both worlds:
+- **Deterministic layer**: runs on every feedback event, zero cost, provably correct for the operations it handles (dedup, maturity transitions, score updates)
+- **RLM layer**: runs periodically (daily/weekly consolidation sweep), handles the semantic reasoning that requires judgment (which learnings subsume which, whether a stale learning should be absorbed or quarantined, whether a cluster of specific learnings can be generalized)
+
+The deterministic layer is the *always-on* maintenance; the RLM layer is the *periodic deep clean*.
+
+#### 6d. RLM for Feedback Generation
+
+RLMs also open a path for the cold-start feedback problem from §5d. An RLM can recursively analyze a completed session transcript, identify which learnings from the context pack were *actually relevant* to the task, and generate synthetic feedback events:
+
+1. Load session transcript as external variable
+2. Load learnings that were served via `mmry context` for this session
+3. For each learning, recursively examine whether the agent's actions were *consistent with* or *contradicted by* the learning
+4. Generate feedback events (helpful/harmful) with reasoning
+
+This is a form of **automated outcome attribution** (§5b) but done with the nuance of an LLM examining the full session, not just a binary success/failure signal. The recursive structure means it can handle sessions of arbitrary length without context rot — which is precisely the problem that makes naive "dump session + learnings into one prompt" approaches unreliable.
+
+#### 6e. Formal Properties of RLM-Based Consolidation
+
+A concern: if consolidation involves LLM calls, even recursive ones, the result is **non-deterministic**. Two runs of the consolidation operator may produce different outputs. This breaks the convergence analysis from §7 (formerly §5), which assumes a deterministic operator.
+
+**Question**: Can we define an RLM consolidation operator that is:
+- **Idempotent**: Running it twice produces the same result as running it once (the consolidated set is a fixed point)?
+- **Monotone**: Each run can only reduce `|L|`, never increase it?
+- **Bounded-divergent**: Two independent runs produce results that are ε-close in embedding space (even if textually different)?
+
+The bounded-divergence property is the most achievable — if two different consolidation runs both produce valid generalizations of the same learning cluster, the generalizations should be semantically similar even if phrased differently. This can be verified post-hoc via embedding similarity, and the system can reject consolidation results that diverge too far from the input learnings.
+
+### 7. Convergence and Minimality
 
 EvolveR's metric score `s(p) = (c_succ + 1) / (c_use + 2)` (Laplace-smoothed success rate) converges to the true success probability as usage grows, by the law of large numbers. Our decay-weighted score does not have this convergence property because old evidence vanishes.
 
-**Question**: Under what conditions does repeated application of the consolidation operator (including staleness-based phase-out) converge to a fixed point (a *minimal knowledge base*)? Specifically:
+**Question**: Under what conditions does repeated application of the consolidation operator (including staleness-based phase-out and optional RLM-based generalization) converge to a fixed point (a *minimal knowledge base*)? Specifically:
 
 - Is there a Lyapunov function over the learning set that decreases with each consolidation step?
 - Does the fixed point depend on the order of pairwise merges (i.e., is the operator confluent)?
 - Can we bound the number of consolidation steps needed to reach ε-optimality?
 - Does the staleness phase-out guarantee that the active set size is bounded (i.e., is there a steady-state equilibrium between extraction rate and phase-out rate)?
+- For the RLM-based consolidation layer (§6), does bounded-divergence (§6e) compose with convergence — i.e., if each run is ε-close to the previous, does the sequence of consolidated sets form a Cauchy sequence in embedding space?
 
-### 6. Empirical Evaluation Framework
+### 8. Empirical Evaluation Framework
 
 None of the above is useful without measurable impact. The evaluation should measure:
 
@@ -187,6 +359,8 @@ None of the above is useful without measurable impact. The evaluation should mea
 - **Rare-critical survival rate**: Of learnings manually tagged as safety-critical, what fraction survives staleness phase-out after 6/12/18 months without feedback?
 - **Steady-state size**: Given a constant extraction rate, does `|active(L)|` converge to a bounded value over time, or does it grow without limit?
 - **Dormant recovery rate**: Of learnings moved to quarantine, what fraction is later reactivated by new feedback (indicating the quarantine was premature)?
+- **RLM consolidation cost**: Total tokens consumed per consolidation sweep. Compare against single-pass long-context approach and against no-LLM deterministic-only approach.
+- **RLM consolidation consistency**: Run the same RLM consolidation twice — what is the average pairwise cosine similarity between the two output learning sets? (Measures bounded-divergence from §6e.)
 
 ## Related Work
 
@@ -199,6 +373,7 @@ None of the above is useful without measurable impact. The evaluation should mea
 | **MemGPT/Letta** | Filesystem with agent-driven search | No automatic staleness handling; agent may choose to update/delete | No consolidation — relies on LLM's ability to curate. Dormant memories accumulate indefinitely. |
 | **Mem0** | Structured summarization + conflict resolution | Conflict resolution may overwrite stale facts | Summarization is lossy without guarantees. No explicit staleness lifecycle. |
 | **TITANS** | Neural memory with adaptive weight decay + surprise momentum | Continuous forgetting via gradient-based decay; "surprise" signal retains novel information | Hardware-level (weight space), not applicable to symbolic/textual learnings directly, but the surprise-gated retention is a relevant design pattern. |
+| **RLM** (Zhang et al. 2025) | N/A (not a memory system) — but provides the recursive decomposition paradigm for processing arbitrarily large knowledge bases | N/A | Not designed for memory consolidation, but the out-of-core / recursive self-invocation pattern is directly applicable: treat the learning set as an external environment, let the LLM programmatically decompose and consolidate it. |
 
 None of these systems provide formal guarantees on consolidation quality. The closest work is in **belief revision** (AGM theory) and **knowledge base contraction** (Hansson 1999), but these assume propositional logic — our learnings are natural language with embedding-space semantics.
 
@@ -217,3 +392,5 @@ None of these systems provide formal guarantees on consolidation quality. The cl
 6. **Surprise-gated retention** (from TITANS/MIRAS): Adapt the neural "surprise" signal to symbolic learnings — a learning's retention priority is proportional to how *unexpected* its retrieval would be given the current active set. A learning that is semantically far from all others (high surprise) is retained even without recent feedback; a learning that is semantically redundant with well-supported neighbors (low surprise) is a prime candidate for staleness-based absorption. This connects staleness detection to the consolidation operator: redundant learnings go stale faster, unique learnings are protected.
 
 7. **Bayesian staleness estimation**: Model each learning's "alive" probability as a Beta distribution updated by feedback events (observation) and time (prior drift). A learning with no observations in W days has its posterior `P(alive | no_feedback, W)` shrink toward a prior that depends on scope and criticality. Phase-out triggers when `P(alive) < θ_alive`. This gives a principled, calibrated staleness probability rather than a hard threshold, and naturally handles the rare-but-critical case (high-criticality prior = slow drift toward staleness).
+
+8. **RLM-based recursive consolidation** (from Zhang, Kraska & Khattab 2025): Treat the learning set as an external environment variable in a REPL. The LLM programmatically inspects metadata, clusters learnings, and recursively invokes itself over manageable subsets to perform semantic generalization, cross-polarity pairing, and staleness triage. Each sub-call operates within comfortable context limits (no context rot), and the recursive structure naturally produces a divide-and-conquer algorithm over the knowledge base. This is the only approach that can handle *both* the structural operations (dedup, subsumption) *and* the semantic judgment calls (is this generalization valid? is this stale learning's knowledge preserved elsewhere?) in a unified framework. The hybrid design (§6c) — deterministic layer for cheap operations, RLM layer for periodic deep consolidation — may be the most practical architecture.
