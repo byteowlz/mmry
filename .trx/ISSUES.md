@@ -2,15 +2,7 @@
 
 ## Open
 
-### [mmry-yay2.8] MMRY_AGENT and MMRY_AGENT_KIND env vars - allow setting agent identity via environment so wrapper scripts (agntz) don't need to pass flags every time (P1, feature)
-
 ### [mmry-yay2.7] Agent provenance in JSON output - all --json output includes agent name, kind, and meta so consumers know who created each memory/learning (P1, feature)
-
-### [mmry-yay2.3] Extend AgentRecord with repo, workspace, session_id fields in agent_meta JSON. Support structured metadata beyond just name/kind. (P1, feature)
-
-### [mmry-yay2.2] Add agent/agent_kind/agent_meta fields to MCP MemoryAddArgs and gRPC SearchRequest/AddRequest so MCP clients can identify themselves (P1, feature)
-
-### [mmry-yay2.1] Add --agent, --agent-kind, --agent-meta flags to 'mmry add' CLI with 'human' as default. Agent record is get-or-created automatically. (P1, feature)
 
 ### [mmry-yay2] Agent Identity & Provenance - pass agent/repo/session identity through all mmry interfaces (CLI, MCP, gRPC) so every memory and learning has clear attribution (P1, epic)
 
@@ -60,3 +52,9 @@
 
 ### [mmry-jadt] Memory as Reasoning - treat memory as prediction/reasoning task, not just storage (P3, epic)
 
+## Closed
+
+- [mmry-yay2.8] MMRY_AGENT and MMRY_AGENT_KIND env vars - allow setting agent identity via environment so wrapper scripts (agntz) don't need to pass flags every time (closed 2026-02-08)
+- [mmry-yay2.3] Extend AgentRecord with repo, workspace, session_id fields in agent_meta JSON. Support structured metadata beyond just name/kind. (closed 2026-02-08)
+- [mmry-yay2.2] Add agent/agent_kind/agent_meta fields to MCP MemoryAddArgs and gRPC SearchRequest/AddRequest so MCP clients can identify themselves (closed 2026-02-08)
+- [mmry-yay2.1] Add --agent, --agent-kind, --agent-meta flags to 'mmry add' CLI with 'human' as default. Agent record is get-or-created automatically. (closed 2026-02-08)
