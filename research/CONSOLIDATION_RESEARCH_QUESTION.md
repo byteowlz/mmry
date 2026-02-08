@@ -76,17 +76,106 @@ S_bipolar(g, c) = 0              when g and c fully contradict
 
 This would make the consolidation operator polarity-aware: it would never eliminate one half of a complementary pair.
 
-### 4. Convergence and Minimality
+### 4. Staleness Detection and Principled Phase-Out
+
+Our decay model erodes evidence over time but never *removes* a learning. A learning with a single helpful event from 18 months ago has an effective score of `0.5^(540/90) ≈ 0.016` — technically positive, so it survives, yet it carries almost no decision value and occupies space in the retrieval index. The maturity system can only deprecate learnings with a bad harmful ratio; it has no mechanism for deprecating learnings that are simply *forgotten by the world* — never reinforced, never contradicted, just abandoned.
+
+This is a distinct failure mode from low quality. A stale learning may have been excellent advice once, but the codebase evolved, the framework changed, or the team moved on. The system currently cannot distinguish "still valid but untested recently" from "silently obsolete."
+
+**The core question**: How should a procedural memory system identify, quarantine, and phase out stale learnings — and can this be done without false positives on rare-but-valid principles?
+
+#### 4a. Defining Staleness Formally
+
+A learning ℓ is *stale* at time t if it meets some combination of:
+
+- **Evidence desert**: No feedback event (helpful or harmful) within a window W. The current decay function makes old events *weak* but never zero — there is no hard cutoff. Should there be? EvolveR uses a hard pruning threshold (`θ_prune = 0.3` on Laplace-smoothed success rate), which is clean but risks killing a principle that hasn't been *tried* recently, not one that has *failed*.
+
+- **Retrieval neglect**: The learning is never retrieved by `mmry context` queries (it sits in embedding space far from any actual task). This is measurable — we can track retrieval hits per learning — but absence of retrieval isn't proof of obsolescence; it may mean the learning covers a rare edge case that will matter catastrophically when it finally applies.
+
+- **Environmental drift**: The scope key (workspace, framework version, language version) has changed. A learning scoped to `"rust 1.75"` may be stale after `"rust 1.82"` ships. This requires external signals the system currently doesn't ingest.
+
+A formal staleness predicate might combine these:
+
+```
+stale(ℓ, t) = (last_feedback_age(ℓ, t) > W_feedback)
+            ∧ (retrieval_count(ℓ, [t-W_retrieval, t]) < k_min)
+            ∧ (effective_score(ℓ, t) < θ_stale)
+```
+
+But what are the right values for W_feedback, W_retrieval, k_min, and θ_stale? These form a multi-dimensional decision boundary. Can we learn them from data, or must they be set by policy?
+
+#### 4b. Phase-Out Strategies
+
+Once a learning is identified as stale, what happens to it? Several strategies exist, each with different tradeoffs:
+
+| Strategy | Description | Pro | Con |
+|----------|------------|-----|-----|
+| **Hard pruning** | Delete stale learnings (EvolveR's `θ_prune`) | Simple, keeps index small | Irreversible; no recovery if the learning was actually valid |
+| **Soft quarantine** | Move to a "dormant" pool, excluded from retrieval but retained in storage | Recoverable; no information loss | Dormant pool grows unboundedly; need a second-stage cleanup |
+| **Score floor** | Clamp effective score to 0 when stale; learning remains retrievable only if directly queried | Zero retrieval cost; reversible if new feedback arrives | Pollutes the index with zero-score entries |
+| **Tombstoning** | Mark as deprecated with a reason ("stale: no feedback since X") and keep for audit trail | Full provenance; teaches the system *why* things were removed | Never reclaims storage; must filter at query time |
+| **Absorption into consolidation** | Stale learnings are preferentially targeted by the consolidation operator — merged into more general active principles before removal | Information is preserved in abstract form; drives consolidation | Requires the consolidation operator to exist first (circular dependency) |
+
+The most promising approach may be a **two-phase lifecycle**: staleness triggers quarantine (soft removal from retrieval), and then the consolidation operator periodically scans the quarantine pool to absorb any residual value into active learnings before final pruning. This connects staleness management to consolidation as two parts of the same knowledge lifecycle.
+
+#### 4c. The Rare-but-Critical Problem
+
+The hardest case is a learning that is rarely relevant but catastrophically important when it is — e.g., "PITFALL: Never run migrations without a backup on the production DB." This learning might go years without feedback because production migrations are rare. Any staleness heuristic based on feedback frequency would kill it.
+
+**Question**: Can we define a **criticality weight** that protects certain learnings from staleness-based phase-out? This might be:
+
+- Derived from the cautionary polarity (cautionary learnings about destructive operations get higher protection)
+- Derived from the scope (global learnings are more likely rare-but-critical than task-scoped ones)
+- Explicitly set via the `pinned` flag (but this requires human curation, which doesn't scale)
+- Inferred from the *content* via a lightweight classifier (e.g., learnings mentioning "production", "data loss", "security", "irreversible" get automatic protection)
+
+Formally, the staleness predicate becomes:
+
+```
+stale(ℓ, t) = staleness_signal(ℓ, t) > θ_stale / criticality(ℓ)
+```
+
+where `criticality(ℓ) ≥ 1` raises the bar for phase-out. This ensures rare-but-critical learnings require much stronger staleness evidence before removal.
+
+#### 4d. Interaction with Temporal Decay
+
+Our decay model and staleness detection are two overlapping mechanisms that both address the passage of time but at different granularities:
+
+- **Decay** is continuous and score-level: every feedback event weakens gradually, making the learning's *weight* in retrieval ranking decrease over time.
+- **Staleness** is discrete and membership-level: at some point, the learning should be *removed* from the active set entirely.
+
+These should compose cleanly. One natural formulation: decay handles the "how much should I trust this?" question (continuous), while staleness handles the "should this even be in the candidate set?" question (binary). The staleness threshold then operates on the *decayed* score, not on raw time — a learning with lots of recent harmful feedback has a low decayed score and should be deprecated (not stale), while a learning with no feedback at all has a near-zero decayed score and should be stale (not deprecated). The maturity lifecycle should distinguish these two exit paths:
+
+```
+              helpful
+Candidate ──────────→ Established ──────────→ Proven
+    │                     │                      │
+    │ stale               │ stale                │ stale
+    ▼                     ▼                      ▼
+ Dormant              Dormant               Dormant (quarantine)
+    │                     │                      │
+    │ absorbed/pruned     │ absorbed/pruned      │ absorbed/pruned
+    ▼                     ▼                      ▼
+ Removed              Removed               Removed
+    
+              harmful ratio
+Candidate ──────────→ Deprecated (different exit: quality failure, not staleness)
+```
+
+This separates two semantically distinct reasons for leaving the active set: "never confirmed" (staleness) vs "actively disproven" (deprecation). The downstream behavior differs — deprecated learnings might be converted to cautionary principles (as cass-memory suggests), while dormant learnings are silently absorbed or pruned.
+
+### 5. Convergence and Minimality
 
 EvolveR's metric score `s(p) = (c_succ + 1) / (c_use + 2)` (Laplace-smoothed success rate) converges to the true success probability as usage grows, by the law of large numbers. Our decay-weighted score does not have this convergence property because old evidence vanishes.
 
-**Question**: Under what conditions does repeated application of the consolidation operator converge to a fixed point (a *minimal knowledge base*)? Specifically:
+**Question**: Under what conditions does repeated application of the consolidation operator (including staleness-based phase-out) converge to a fixed point (a *minimal knowledge base*)? Specifically:
 
 - Is there a Lyapunov function over the learning set that decreases with each consolidation step?
 - Does the fixed point depend on the order of pairwise merges (i.e., is the operator confluent)?
 - Can we bound the number of consolidation steps needed to reach ε-optimality?
+- Does the staleness phase-out guarantee that the active set size is bounded (i.e., is there a steady-state equilibrium between extraction rate and phase-out rate)?
 
-### 5. Empirical Evaluation Framework
+### 6. Empirical Evaluation Framework
 
 None of the above is useful without measurable impact. The evaluation should measure:
 
@@ -94,17 +183,22 @@ None of the above is useful without measurable impact. The evaluation should mea
 - **Decision fidelity**: Given a held-out set of tasks, does `mmry context <task>` return equally good learnings from C(L) vs L? (Measured by retrieval recall@k and downstream task success rate.)
 - **Latency**: Retrieval over C(L) should be faster due to smaller set.
 - **Contradiction rate**: How often does C(L) serve a guiding principle without its protective cautionary refinement?
+- **False positive staleness rate**: How often does the staleness detector quarantine a learning that would have been useful within the next N sessions? (Measured via held-out future session replay.)
+- **Rare-critical survival rate**: Of learnings manually tagged as safety-critical, what fraction survives staleness phase-out after 6/12/18 months without feedback?
+- **Steady-state size**: Given a constant extraction rate, does `|active(L)|` converge to a bounded value over time, or does it grow without limit?
+- **Dormant recovery rate**: Of learnings moved to quarantine, what fraction is later reactivated by new feedback (indicating the quarantine was premature)?
 
 ## Related Work
 
-| System | Consolidation Approach | Limitation |
-|--------|----------------------|------------|
-| **EvolveR** | Semantic dedup at θ_sim, Laplace-scored quality pruning | No generalization (specific → abstract). Dedup is binary (merge or don't). |
-| **cass-memory** | Anti-pattern conversion when harmful > 50%, manual curation | Conversion is polarity flip, not true consolidation. No merge of similar rules. |
-| **GitHub Copilot** | Just-in-time verification against live code citations | No consolidation at all — relies on citation freshness. Memory grows unboundedly. |
-| **Reflexion** | Sliding window of self-reflections | Fixed window size, no quality-weighted retention. Old reflections fall off regardless of value. |
-| **MemGPT/Letta** | Filesystem with agent-driven search | No consolidation — relies on LLM's ability to search effectively. |
-| **Mem0** | Structured summarization + conflict resolution | Summarization is lossy without guarantees. Conflict resolution is heuristic. |
+| System | Consolidation Approach | Staleness Handling | Limitation |
+|--------|----------------------|-------------------|------------|
+| **EvolveR** | Semantic dedup at θ_sim, Laplace-scored quality pruning | Hard prune at `θ_prune = 0.3` on Laplace score | No generalization. Pruning kills untested principles indiscriminately — no distinction between "failed" and "forgotten". |
+| **cass-memory** | Anti-pattern conversion when harmful > 50%, manual curation | Confidence decay makes old rules weak; manual `stale` command shows rules without recent feedback | Staleness is surfaced but not acted upon automatically. Conversion is polarity flip, not true consolidation. |
+| **GitHub Copilot** | Just-in-time verification against live code citations | Stale memories naturally fail citation verification at read time | No consolidation. Elegant staleness model (freshness = verifiability) but only works for code-grounded memories, not abstract principles. |
+| **Reflexion** | Sliding window of self-reflections | FIFO eviction — oldest reflections fall off the window | No quality weighting. Rare-but-critical reflections are evicted purely by age. |
+| **MemGPT/Letta** | Filesystem with agent-driven search | No automatic staleness handling; agent may choose to update/delete | No consolidation — relies on LLM's ability to curate. Dormant memories accumulate indefinitely. |
+| **Mem0** | Structured summarization + conflict resolution | Conflict resolution may overwrite stale facts | Summarization is lossy without guarantees. No explicit staleness lifecycle. |
+| **TITANS** | Neural memory with adaptive weight decay + surprise momentum | Continuous forgetting via gradient-based decay; "surprise" signal retains novel information | Hardware-level (weight space), not applicable to symbolic/textual learnings directly, but the surprise-gated retention is a relevant design pattern. |
 
 None of these systems provide formal guarantees on consolidation quality. The closest work is in **belief revision** (AGM theory) and **knowledge base contraction** (Hansson 1999), but these assume propositional logic — our learnings are natural language with embedding-space semantics.
 
@@ -119,3 +213,7 @@ None of these systems provide formal guarantees on consolidation quality. The cl
 4. **Bipolar argumentation frameworks**: Model guiding principles as arguments, cautionary principles as attacks, and use Dung's preferred extensions to find the maximal self-consistent learning set. Well-studied with known algorithms for preferred/stable semantics.
 
 5. **Deterministic merge via textual entailment**: Use a lightweight NLI model (not a full LLM) to detect when learning A entails learning B, then keep only A. This is the "subsumption" check. Polynomial in |L|² and fully deterministic.
+
+6. **Surprise-gated retention** (from TITANS/MIRAS): Adapt the neural "surprise" signal to symbolic learnings — a learning's retention priority is proportional to how *unexpected* its retrieval would be given the current active set. A learning that is semantically far from all others (high surprise) is retained even without recent feedback; a learning that is semantically redundant with well-supported neighbors (low surprise) is a prime candidate for staleness-based absorption. This connects staleness detection to the consolidation operator: redundant learnings go stale faster, unique learnings are protected.
+
+7. **Bayesian staleness estimation**: Model each learning's "alive" probability as a Beta distribution updated by feedback events (observation) and time (prior drift). A learning with no observations in W days has its posterior `P(alive | no_feedback, W)` shrink toward a prior that depends on scope and criticality. Phase-out triggers when `P(alive) < θ_alive`. This gives a principled, calibrated staleness probability rather than a hard threshold, and naturally handles the rare-but-critical case (high-criticality prior = slow drift toward staleness).
