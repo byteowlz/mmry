@@ -17,6 +17,7 @@ pub mod integrations;
 pub mod memory;
 pub mod ner;
 pub mod profile_blocks;
+pub mod reasoning;
 pub mod reranker;
 pub mod search;
 pub mod sparse_embeddings;

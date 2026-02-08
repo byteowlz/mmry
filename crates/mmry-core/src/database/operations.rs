@@ -1420,6 +1420,62 @@ pub async fn list_recent_facts(pool: &SqlitePool, limit: i64) -> crate::Result<V
     Ok(facts)
 }
 
+/// Get a single fact by ID
+pub async fn get_fact(pool: &SqlitePool, fact_id: Uuid) -> crate::Result<Option<FactRecord>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, fact_key, fact_value, category, evidence_snippet, source_span, turn_id, source_chunk_id, source_paragraph_id, observed_at, recency_score, metadata, agent_id
+        FROM facts
+        WHERE id = ?
+        "#,
+    )
+    .bind(fact_id.to_string())
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let raw_id: String = row.try_get("id")?;
+    let parsed_id = Uuid::parse_str(&raw_id).map_err(|e| {
+        crate::Error::Database(sqlx::Error::Decode(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid UUID: {e}"),
+        ))))
+    })?;
+
+    let observed_at_raw: String = row.try_get("observed_at")?;
+    let observed_at = parse_datetime(
+        &observed_at_raw,
+        "observed_at",
+        &format!("fact {parsed_id}"),
+    )?;
+
+    let metadata: String = row.try_get("metadata").unwrap_or_default();
+    let agent_id: Option<String> = row.try_get("agent_id").ok().flatten();
+    let category_str: String = row
+        .try_get("category")
+        .unwrap_or_else(|_| "General".to_string());
+
+    Ok(Some(FactRecord {
+        id: parsed_id,
+        fact_key: row.try_get("fact_key").unwrap_or_default(),
+        fact_value: row.try_get("fact_value").unwrap_or_default(),
+        category: FactCategory::parse(&category_str),
+        evidence_snippet: row.try_get("evidence_snippet").ok().flatten(),
+        source_span: row.try_get("source_span").ok().flatten(),
+        turn_id: row.try_get("turn_id").ok().flatten(),
+        source_chunk_id: row.try_get("source_chunk_id").ok().flatten(),
+        source_paragraph_id: row.try_get("source_paragraph_id").ok().flatten(),
+        observed_at,
+        recency_score: row.try_get("recency_score").unwrap_or(0.0),
+        metadata: serde_json::from_str(&metadata)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+        agent_id: agent_id.and_then(|id| Uuid::parse_str(&id).ok()),
+    }))
+}
+
 pub async fn list_agent_events(pool: &SqlitePool, limit: i64) -> crate::Result<Vec<AgentEvent>> {
     let rows = sqlx::query(
         r#"

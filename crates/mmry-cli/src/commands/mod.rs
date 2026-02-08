@@ -11,6 +11,7 @@ pub mod ls;
 pub mod models;
 pub mod profile;
 pub mod prune;
+pub mod reason;
 pub mod reembed;
 pub mod reextract;
 pub mod rerankers;

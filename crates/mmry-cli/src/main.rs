@@ -105,6 +105,9 @@ enum Commands {
 
     /// Manage user profile blocks
     Profile(commands::profile::ProfileCmd),
+
+    /// Reasoning-based memory access (inference over facts)
+    Reason(commands::reason::ReasonCmd),
 }
 
 fn main() {
@@ -255,6 +258,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Commands::Prune(cmd) => commands::prune::handle(cmd, &config, &db).await,
         Commands::Profile(cmd) => commands::profile::handle(cmd, &config, &db).await,
+        Commands::Reason(cmd) => commands::reason::handle(cmd, &config, &db).await,
         Commands::Import(cmd) => {
             commands::import::handle(
                 cmd,

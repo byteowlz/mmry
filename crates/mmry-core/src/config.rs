@@ -172,6 +172,8 @@ pub struct Config {
     pub analyzer: AnalyzerConfig,
     #[serde(default)]
     pub hmlr: HmlrConfig,
+    #[serde(default)]
+    pub reasoning: crate::reasoning::ReasoningConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

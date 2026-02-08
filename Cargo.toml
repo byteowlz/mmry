@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/mmry-core", "crates/mmry-cli", "crates/mmry-mcp", "crates/mmry-tui", "crates/mmry-service"]
+members = [
+  "crates/mmry-core",
+  "crates/mmry-cli",
+  "crates/mmry-mcp",
+  "crates/mmry-tui",
+  "crates/mmry-service",
+]
 resolver = "2"
 
 [workspace.package]
@@ -53,7 +59,38 @@ zerocopy = "0.8.27"
 tempfile = "3.10"
 tokenizers = "0.22"
 libc = "0.2"
-ort = { version = "2.0.0-rc.10", default-features = false, features = ["ndarray", "std", "download-binaries"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+ort = { version = "2.0.0-rc.10", default-features = false, features = [
+  "ndarray",
+  "std",
+  "download-binaries",
+] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+  "blocking",
+] }
 subtle = "2.6"
 tower = "0.5"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cast_precision_loss = { level = "allow", priority = 1 }
+doc_markdown = { level = "allow", priority = 1 }
+missing_const_for_fn = { level = "allow", priority = 1 }
+uninlined_format_args = { level = "allow", priority = 1 }
+missing_errors_doc = { level = "allow", priority = 1 }
+missing_panics_doc = { level = "allow", priority = 1 }
+module_name_repetitions = { level = "allow", priority = 1 }
+must_use_candidate = { level = "allow", priority = 1 }
+option_if_let_else = { level = "allow", priority = 1 }

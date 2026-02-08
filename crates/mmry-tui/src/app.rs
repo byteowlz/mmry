@@ -1098,8 +1098,8 @@ impl App {
                     } else {
                         let current_idx = self.current_store_index();
                         let mut selected = std::collections::BTreeSet::new();
-                        if self.search_scope_override.is_some() {
-                            for source in self.search_scope_override.as_ref().unwrap() {
+                        if let Some(scope) = &self.search_scope_override {
+                            for source in scope {
                                 selected.insert(source.id());
                             }
                         } else if self.viewing_all_stores {

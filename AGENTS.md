@@ -142,6 +142,26 @@ Bonus power moves
 • Plugin system: discover commands from $PATH like tool-foo → tool foo.
 • Generate shell completions dynamically from your parser so help & completion never drift.
 
+## Testing
+
+### Running Tests
+
+```bash
+# Run all tests across the entire workspace
+cargo test --workspace
+
+# Run with output visible
+cargo test --workspace -- --nocapture
+
+# Run tests for a specific crate
+cargo test -p mmry-core
+cargo test -p mmry-cli
+cargo test -p mmry-tui
+
+# Run a specific test by name
+cargo test --workspace -- test_name_here
+```
+
 ## Issue Tracking (trx)
 
 ```bash
@@ -153,3 +173,34 @@ trx sync               # Commit .trx/ changes
 ```
 
 Priorities: 0=critical, 1=high, 2=medium, 3=low, 4=backlog
+
+### Session Protocol
+
+**Before ending a session, run this checklist:**
+
+```bash
+git status              # Check what changed
+git add <files>         # Stage code changes
+git commit -m "..."     # Commit everything together
+git push                # Push to remote
+```
+
+### Best Practices
+
+- Check `trx ready` at session start to find available work
+- Update status as you work (in_progress -> closed)
+- Create new issues with `trx create` when you discover tasks
+- Use descriptive titles and set appropriate priority/type
+
+---
+
+Note regarding file edits you did not do:
+
+DO NOT STOP AND ASK ABOUT THESE CHANGES. Those are changes created by other agents working on the project at the same time as you. This is a common occurrence. DO NOT, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just assume that YOU made the changes and simply don't recall it for some reason. Should I ask you to commit, create sensible commit messages for these changes as well.
+
+---
+
+### Continuous Improvements for our own tools
+
+Many of the tools we are building like trx, agntz etc. live in ../
+If you run into any issues with these tools or find that the ergonomics could be improved, just file trx isuues in that repo so we can constantly improve our own tools. You can run ```byt catalog list``` to get an overview of all of our tools.

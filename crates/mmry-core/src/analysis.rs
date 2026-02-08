@@ -127,6 +127,13 @@ pub trait Analyzer: Send + Sync {
         Ok(None)
     }
 
+    /// Generic completion for reasoning tasks
+    /// Takes a prompt and returns the model's response as a string
+    async fn complete(&self, _prompt: &str) -> Result<String> {
+        // Default: return empty (reasoning disabled)
+        Ok(String::new())
+    }
+
     fn is_noop(&self) -> bool {
         false
     }
@@ -172,6 +179,10 @@ impl Analyzer for NoOpAnalyzer {
         _memories: &[String],
     ) -> Result<Option<SynthesisResult>> {
         Ok(None)
+    }
+
+    async fn complete(&self, _prompt: &str) -> Result<String> {
+        Ok(String::new())
     }
 
     fn is_noop(&self) -> bool {
@@ -410,6 +421,38 @@ impl Analyzer for RigAnalyzer {
             }
             _ => None,
         });
+
+        Ok(result)
+    }
+
+    async fn complete(&self, prompt: &str) -> crate::Result<String> {
+        log_llm_prompt("complete", prompt);
+        let start = Instant::now();
+        let prompt_owned = prompt.to_string();
+        let response: RigCompletionResponse<_> = self
+            .completion_with_retry("complete", || {
+                self.client
+                    .completion_model(self.model_name.clone())
+                    .completion_request(RigMessage::User {
+                        content: OneOrMany::one(UserContent::text(prompt_owned.clone())),
+                    })
+                    .temperature(0.0)
+                    .build()
+            })
+            .await?;
+        log_llm_timing("complete", start.elapsed(), true);
+
+        let result = response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                AssistantContent::Text(t) => {
+                    log_llm_response("complete", &t.text);
+                    Some(t.text.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
 
         Ok(result)
     }

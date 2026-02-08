@@ -759,6 +759,9 @@ impl Database {
         .execute(pool)
         .await?;
 
+        // Initialize reasoning schema tables (inferences, contradictions, etc.)
+        crate::reasoning::init_reasoning_schema(pool).await?;
+
         Ok(())
     }
 
