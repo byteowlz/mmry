@@ -14,6 +14,7 @@ pub mod guardrails;
 pub mod hmlr;
 pub mod http_json;
 pub mod integrations;
+pub mod learnings;
 pub mod memory;
 pub mod ner;
 pub mod profile_blocks;

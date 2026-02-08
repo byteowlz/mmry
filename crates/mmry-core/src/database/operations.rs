@@ -6,6 +6,12 @@ use crate::agents::BridgeBlock;
 use crate::agents::FactCategory;
 use crate::agents::FactRecord;
 use crate::agents::UserProfileEntry;
+use crate::learnings::FeedbackEvent;
+use crate::learnings::FeedbackType;
+use crate::learnings::Learning;
+use crate::learnings::LearningKind;
+use crate::learnings::LearningScope;
+use crate::learnings::Maturity;
 use crate::memory::Memory;
 use crate::memory::SourceAttribution;
 use crate::memory::SourceEntry;
@@ -2093,4 +2099,274 @@ pub async fn get_all_memories_by_bridge_block(
     }
 
     Ok(memories)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Learnings CRUD
+// ═══════════════════════════════════════════════════════════════════════
+
+fn learning_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<Learning> {
+    let raw_id: String = match row.try_get("id") {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("Skipping learning with missing id: {e}");
+            return None;
+        }
+    };
+    let id = Uuid::parse_str(&raw_id).ok()?;
+
+    let created_at_raw: String = row.try_get("created_at").ok()?;
+    let created_at =
+        parse_datetime(&created_at_raw, "created_at", &format!("learning {id}")).ok()?;
+    let updated_at_raw: String = row.try_get("updated_at").ok()?;
+    let updated_at =
+        parse_datetime(&updated_at_raw, "updated_at", &format!("learning {id}")).ok()?;
+
+    let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+    let source_sessions_raw: String = row.try_get("source_sessions").unwrap_or_default();
+    let tags_raw: String = row.try_get("tags").unwrap_or_default();
+    let metadata_raw: String = row.try_get("metadata").unwrap_or_default();
+
+    Some(Learning {
+        id,
+        content: row.try_get("content").ok()?,
+        kind: LearningKind::parse(
+            row.try_get::<String, _>("kind")
+                .unwrap_or_default()
+                .as_str(),
+        ),
+        category: row
+            .try_get("category")
+            .unwrap_or_else(|_| "general".to_string()),
+        scope: LearningScope::parse(
+            row.try_get::<String, _>("scope")
+                .unwrap_or_default()
+                .as_str(),
+        ),
+        scope_key: row.try_get("scope_key").ok().flatten(),
+        maturity: Maturity::parse(
+            row.try_get::<String, _>("maturity")
+                .unwrap_or_default()
+                .as_str(),
+        ),
+        pinned: row.try_get::<bool, _>("pinned").unwrap_or(false),
+        helpful_count: row.try_get("helpful_count").unwrap_or(0),
+        harmful_count: row.try_get("harmful_count").unwrap_or(0),
+        effective_score: row.try_get("effective_score").unwrap_or(0.0),
+        agent_id: agent_id_str.and_then(|s| Uuid::parse_str(&s).ok()),
+        source_sessions: serde_json::from_str(&source_sessions_raw).unwrap_or_default(),
+        reasoning: row.try_get("reasoning").ok().flatten(),
+        tags: serde_json::from_str(&tags_raw).unwrap_or_default(),
+        metadata: serde_json::from_str(&metadata_raw)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+        created_at,
+        updated_at,
+    })
+}
+
+/// Insert or update a learning.
+pub async fn upsert_learning(pool: &SqlitePool, learning: &Learning) -> crate::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO learnings (
+            id, content, kind, category, scope, scope_key,
+            maturity, pinned, helpful_count, harmful_count, effective_score,
+            agent_id, source_sessions, reasoning, tags, metadata,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            content = excluded.content,
+            kind = excluded.kind,
+            category = excluded.category,
+            scope = excluded.scope,
+            scope_key = excluded.scope_key,
+            maturity = excluded.maturity,
+            pinned = excluded.pinned,
+            helpful_count = excluded.helpful_count,
+            harmful_count = excluded.harmful_count,
+            effective_score = excluded.effective_score,
+            agent_id = excluded.agent_id,
+            source_sessions = excluded.source_sessions,
+            reasoning = excluded.reasoning,
+            tags = excluded.tags,
+            metadata = excluded.metadata,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(learning.id.to_string())
+    .bind(&learning.content)
+    .bind(learning.kind.as_str())
+    .bind(&learning.category)
+    .bind(learning.scope.as_str())
+    .bind(&learning.scope_key)
+    .bind(learning.maturity.as_str())
+    .bind(learning.pinned)
+    .bind(learning.helpful_count)
+    .bind(learning.harmful_count)
+    .bind(learning.effective_score)
+    .bind(learning.agent_id.map(|id| id.to_string()))
+    .bind(serde_json::to_string(&learning.source_sessions)?)
+    .bind(&learning.reasoning)
+    .bind(serde_json::to_string(&learning.tags)?)
+    .bind(learning.metadata.to_string())
+    .bind(learning.created_at.to_rfc3339())
+    .bind(learning.updated_at.to_rfc3339())
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Get a single learning by ID.
+pub async fn get_learning(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Learning>> {
+    let row = sqlx::query("SELECT * FROM learnings WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(row.and_then(|r| learning_from_row(&r)))
+}
+
+/// List learnings, optionally filtered by category and/or maturity.
+pub async fn list_learnings(
+    pool: &SqlitePool,
+    category: Option<&str>,
+    maturity: Option<Maturity>,
+    limit: i64,
+) -> crate::Result<Vec<Learning>> {
+    let mut sql = String::from("SELECT * FROM learnings WHERE 1=1");
+    if category.is_some() {
+        sql.push_str(" AND category = ?");
+    }
+    if maturity.is_some() {
+        sql.push_str(" AND maturity = ?");
+    }
+    sql.push_str(" ORDER BY effective_score DESC LIMIT ?");
+
+    let mut query = sqlx::query(&sql);
+    if let Some(cat) = category {
+        query = query.bind(cat);
+    }
+    if let Some(mat) = maturity {
+        query = query.bind(mat.as_str());
+    }
+    query = query.bind(limit);
+
+    let rows = query.fetch_all(pool).await?;
+    Ok(rows.iter().filter_map(learning_from_row).collect())
+}
+
+/// Count total learnings.
+pub async fn count_learnings(pool: &SqlitePool) -> crate::Result<i64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM learnings")
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
+/// Count learnings per category (for gap analysis).
+pub async fn count_learnings_by_category(pool: &SqlitePool) -> crate::Result<Vec<(String, i64)>> {
+    let rows = sqlx::query(
+        "SELECT category, COUNT(*) as cnt FROM learnings GROUP BY category ORDER BY cnt DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        let category: String = row.try_get("category")?;
+        let count: i64 = row.try_get("cnt")?;
+        result.push((category, count));
+    }
+    Ok(result)
+}
+
+/// Delete a learning by ID.
+pub async fn delete_learning(pool: &SqlitePool, id: Uuid) -> crate::Result<bool> {
+    let result = sqlx::query("DELETE FROM learnings WHERE id = ?")
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Record a feedback event on a learning and update counters.
+pub async fn record_learning_feedback(
+    pool: &SqlitePool,
+    event: &FeedbackEvent,
+) -> crate::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO learning_feedback (id, learning_id, feedback_type, timestamp, session_path, reason, agent_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(event.id.to_string())
+    .bind(event.learning_id.to_string())
+    .bind(event.feedback_type.as_str())
+    .bind(event.timestamp.to_rfc3339())
+    .bind(&event.session_path)
+    .bind(&event.reason)
+    .bind(event.agent_id.map(|id| id.to_string()))
+    .execute(pool)
+    .await?;
+
+    // Update counters on the learning
+    let col = match event.feedback_type {
+        FeedbackType::Helpful => "helpful_count",
+        FeedbackType::Harmful => "harmful_count",
+    };
+    let update_sql = format!("UPDATE learnings SET {col} = {col} + 1, updated_at = ? WHERE id = ?");
+    sqlx::query(&update_sql)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(event.learning_id.to_string())
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Get all feedback events for a learning.
+pub async fn list_learning_feedback(
+    pool: &SqlitePool,
+    learning_id: Uuid,
+) -> crate::Result<Vec<FeedbackEvent>> {
+    let rows = sqlx::query(
+        "SELECT * FROM learning_feedback WHERE learning_id = ? ORDER BY timestamp DESC",
+    )
+    .bind(learning_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let raw_id: String = row.try_get("id")?;
+        let id = Uuid::parse_str(&raw_id).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid feedback id '{raw_id}': {e}"))
+        })?;
+        let raw_learning_id: String = row.try_get("learning_id")?;
+        let lid = Uuid::parse_str(&raw_learning_id).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid learning_id '{raw_learning_id}': {e}"))
+        })?;
+        let ts_raw: String = row.try_get("timestamp")?;
+        let timestamp = parse_datetime(&ts_raw, "timestamp", &format!("feedback {id}"))?;
+        let agent_id_str: Option<String> = row.try_get("agent_id").ok().flatten();
+
+        events.push(FeedbackEvent {
+            id,
+            learning_id: lid,
+            feedback_type: FeedbackType::parse(
+                row.try_get::<String, _>("feedback_type")
+                    .unwrap_or_default()
+                    .as_str(),
+            ),
+            timestamp,
+            session_path: row.try_get("session_path").ok().flatten(),
+            reason: row.try_get("reason").ok().flatten(),
+            agent_id: agent_id_str.and_then(|s| Uuid::parse_str(&s).ok()),
+        });
+    }
+
+    Ok(events)
 }

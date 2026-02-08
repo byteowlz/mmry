@@ -4,6 +4,7 @@ use std::io::Read;
 use std::io::{self};
 use std::sync::Arc;
 
+use mmry_core::agents::AgentIdentity;
 use mmry_core::analysis::build_analyzer;
 use mmry_core::analysis::Analyzer;
 use mmry_core::chunking::Chunker;
@@ -16,7 +17,6 @@ use mmry_core::graph::Entity;
 use mmry_core::graph::MemoryEntityLink;
 use mmry_core::graph::RelationType;
 use mmry_core::graph::Relationship;
-use mmry_core::hmlr::get_or_create_human_agent;
 use mmry_core::hmlr::HmlrContext;
 use mmry_core::hmlr::HmlrPipeline;
 use mmry_core::memory::Memory;
@@ -56,6 +56,22 @@ pub struct AddCmd {
         help = "Expiration timestamp for the memory (RFC3339 or YYYY-MM-DD)"
     )]
     pub expires_at: Option<String>,
+
+    /// Agent name (who is adding this memory). Defaults to "human".
+    #[arg(long, env = "MMRY_AGENT")]
+    pub agent: Option<String>,
+
+    /// Agent kind (human, coding_agent, review_agent, …). Defaults to "human".
+    #[arg(long, env = "MMRY_AGENT_KIND")]
+    pub agent_kind: Option<String>,
+
+    /// Free-form agent metadata as JSON (e.g. '{"repo":"mmry","session":"abc"}')
+    #[arg(long, env = "MMRY_AGENT_META", value_parser = parse_json_value)]
+    pub agent_meta: Option<serde_json::Value>,
+}
+
+fn parse_json_value(s: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(s).map_err(|e| format!("invalid JSON for --agent-meta: {e}"))
 }
 
 pub async fn handle(
@@ -79,6 +95,14 @@ pub async fn handle(
         anyhow::bail!("Content cannot be empty");
     }
 
+    // Resolve agent identity (--agent / MMRY_AGENT, defaults to "human")
+    let agent_identity = AgentIdentity {
+        name: cmd.agent.clone(),
+        kind: cmd.agent_kind.clone(),
+        meta: cmd.agent_meta.clone(),
+    };
+    let agent = agent_identity.resolve(db.pool()).await?;
+
     let analyzer = build_analyzer(config);
 
     // Try to parse as JSON first
@@ -90,6 +114,7 @@ pub async fn handle(
             sparse_embeddings: &sparse_embeddings,
             ner: &ner,
             analyzer: &analyzer,
+            agent: &agent,
         };
 
         // Handle JSON input
@@ -205,23 +230,29 @@ pub async fn handle(
         operations::insert_memory(db.pool(), &memory).await?;
 
         if cmd.json {
-            // Return all chunks
-            let json = if cmd.full {
-                serde_json::to_string_pretty(&chunk_memories)?
-            } else {
-                let values: Vec<serde_json::Value> = chunk_memories
-                    .iter()
-                    .map(|m| {
-                        let mut v = serde_json::to_value(m).unwrap();
+            // Return all chunks with agent provenance
+            let values: Vec<serde_json::Value> = chunk_memories
+                .iter()
+                .map(|m| {
+                    let mut v = serde_json::to_value(m).unwrap();
+                    if !cmd.full {
                         if let Some(obj) = v.as_object_mut() {
                             obj.remove("embedding");
                             obj.remove("sparse_embedding");
                         }
-                        v
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&values)?
-            };
+                    }
+                    v
+                })
+                .collect();
+            let envelope = serde_json::json!({
+                "memories": values,
+                "agent": {
+                    "name": agent.name,
+                    "kind": agent.kind,
+                    "meta": agent.metadata,
+                },
+            });
+            let json = serde_json::to_string_pretty(&envelope)?;
             println!("{json}");
         } else {
             println!(
@@ -260,20 +291,20 @@ pub async fn handle(
         // HMLR enrichment (if enabled)
         let hmlr_result = if config.hmlr.enabled {
             let pipeline = HmlrPipeline::new(config.hmlr.clone(), analyzer.clone());
-            let human_id = get_or_create_human_agent(db.pool(), config).await?;
-            let context = HmlrContext::for_human(human_id);
+            let context = HmlrContext::for_human(agent.id);
             Some(pipeline.enrich_memory(db.pool(), &memory, context).await?)
         } else {
             None
         };
 
         if cmd.json {
-            let json = serialize_memory(&memory, cmd.full)?;
+            let json = serialize_memory_with_agent(&memory, &agent, cmd.full)?;
             println!("{json}");
         } else {
             println!("+ Added memory: {}", memory.id);
             println!("  Type: {:?}", memory.memory_type);
             println!("  Content: {}", memory.content);
+            println!("  Agent: {} ({})", agent.name, agent.kind);
             if entity_count > 0 {
                 println!("  Entities: {entity_count} extracted");
             }
@@ -364,6 +395,7 @@ struct AddContext<'a> {
     sparse_embeddings: &'a Arc<SparseEmbeddingService>,
     ner: &'a Arc<NerService>,
     analyzer: &'a Arc<dyn Analyzer + Send + Sync>,
+    agent: &'a mmry_core::agents::AgentRecord,
 }
 
 async fn handle_json_input(
@@ -373,9 +405,9 @@ async fn handle_json_input(
 ) -> anyhow::Result<()> {
     // Prepare HMLR pipeline if enabled
     let hmlr_pipeline = if ctx.config.hmlr.enabled {
-        Some((
-            HmlrPipeline::new(ctx.config.hmlr.clone(), ctx.analyzer.clone()),
-            get_or_create_human_agent(ctx.db.pool(), ctx.config).await?,
+        Some(HmlrPipeline::new(
+            ctx.config.hmlr.clone(),
+            ctx.analyzer.clone(),
         ))
     } else {
         None
@@ -398,8 +430,8 @@ async fn handle_json_input(
             // Extract entities for each memory
             extract_and_link_entities(ctx.db, ctx.ner, &memory, true).await?;
             // HMLR enrichment
-            if let Some((ref pipeline, human_id)) = hmlr_pipeline {
-                let context = HmlrContext::for_human(human_id);
+            if let Some(ref pipeline) = hmlr_pipeline {
+                let context = HmlrContext::for_human(ctx.agent.id);
                 let _ = pipeline
                     .enrich_memory(ctx.db.pool(), &memory, context)
                     .await;
@@ -408,22 +440,27 @@ async fn handle_json_input(
         }
 
         if cmd.json {
-            if cmd.full {
-                let json = serde_json::to_string_pretty(&results)?;
-                println!("{json}");
-            } else {
-                let mut values: Vec<serde_json::Value> = Vec::new();
-                for memory in &results {
-                    let mut value = serde_json::to_value(memory)?;
+            let mut values: Vec<serde_json::Value> = Vec::new();
+            for memory in &results {
+                let mut value = serde_json::to_value(memory)?;
+                if !cmd.full {
                     if let Some(obj) = value.as_object_mut() {
                         obj.remove("embedding");
                         obj.remove("sparse_embedding");
                     }
-                    values.push(value);
                 }
-                let json = serde_json::to_string_pretty(&values)?;
-                println!("{json}");
+                values.push(value);
             }
+            let envelope = serde_json::json!({
+                "memories": values,
+                "agent": {
+                    "name": ctx.agent.name,
+                    "kind": ctx.agent.kind,
+                    "meta": ctx.agent.metadata,
+                },
+            });
+            let json = serde_json::to_string_pretty(&envelope)?;
+            println!("{json}");
         } else {
             println!("+ Added {} memories", results.len());
             for memory in &results {
@@ -450,8 +487,8 @@ async fn handle_json_input(
     // Extract entities
     extract_and_link_entities(ctx.db, ctx.ner, &memory, cmd.json).await?;
     // HMLR enrichment
-    let hmlr_result = if let Some((ref pipeline, human_id)) = hmlr_pipeline {
-        let context = HmlrContext::for_human(human_id);
+    let hmlr_result = if let Some(ref pipeline) = hmlr_pipeline {
+        let context = HmlrContext::for_human(ctx.agent.id);
         Some(
             pipeline
                 .enrich_memory(ctx.db.pool(), &memory, context)
@@ -462,12 +499,13 @@ async fn handle_json_input(
     };
 
     if cmd.json {
-        let json = serialize_memory(&memory, cmd.full)?;
+        let json = serialize_memory_with_agent(&memory, ctx.agent, cmd.full)?;
         println!("{json}");
     } else {
         println!("+ Added memory: {}", memory.id);
         println!("  Type: {:?}", memory.memory_type);
         println!("  Content: {}", memory.content);
+        println!("  Agent: {} ({})", ctx.agent.name, ctx.agent.kind);
         if let Some(ref result) = hmlr_result {
             if !result.facts.is_empty() {
                 println!("  Facts extracted: {}", result.facts.len());
@@ -626,17 +664,29 @@ fn parse_expiration_input(raw: &str) -> anyhow::Result<chrono::DateTime<chrono::
     anyhow::bail!("Invalid expires_at format: {raw}");
 }
 
-fn serialize_memory(memory: &Memory, full: bool) -> anyhow::Result<String> {
-    if full {
-        serde_json::to_string_pretty(&memory).map_err(Into::into)
-    } else {
-        let mut value = serde_json::to_value(memory)?;
+/// Serialize a memory with agent provenance attached at the top level.
+fn serialize_memory_with_agent(
+    memory: &Memory,
+    agent: &mmry_core::agents::AgentRecord,
+    full: bool,
+) -> anyhow::Result<String> {
+    let mut value = serde_json::to_value(memory)?;
+    if !full {
         if let Some(obj) = value.as_object_mut() {
             obj.remove("embedding");
             obj.remove("sparse_embedding");
         }
-        serde_json::to_string_pretty(&value).map_err(Into::into)
     }
+    // Wrap in an envelope with agent provenance
+    let envelope = serde_json::json!({
+        "memory": value,
+        "agent": {
+            "name": agent.name,
+            "kind": agent.kind,
+            "meta": agent.metadata,
+        },
+    });
+    serde_json::to_string_pretty(&envelope).map_err(Into::into)
 }
 
 fn classify_memory(content: &str) -> MemoryType {
@@ -713,6 +763,9 @@ mod tests {
             expires_at: None,
             json: false,
             full: false,
+            agent: None,
+            agent_kind: None,
+            agent_meta: None,
         };
 
         handle(
@@ -755,6 +808,9 @@ mod tests {
             expires_at: None,
             json: true,
             full: false,
+            agent: None,
+            agent_kind: None,
+            agent_meta: None,
         };
 
         handle(

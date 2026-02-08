@@ -28,7 +28,6 @@ pub use lattice_crawler::LatticeCrawler;
 pub use scribe::Scribe;
 
 use crate::agents::AgentEvent;
-use crate::agents::AgentRecord;
 use crate::agents::BridgeBlock;
 use crate::agents::FactRecord;
 use crate::analysis::Analyzer;
@@ -199,24 +198,21 @@ where
 
 /// Get or create the human agent record for manual operations
 pub async fn get_or_create_human_agent(pool: &SqlitePool, config: &Config) -> Result<Uuid> {
-    let agent_name = &config.hmlr.human_agent_name;
+    use crate::agents::AgentIdentity;
 
-    // Try to find existing
-    if let Some(agent) = operations::get_agent_by_name(pool, agent_name).await? {
-        return Ok(agent.id);
-    }
-
-    // Create new human agent
-    let mut agent = AgentRecord::new(agent_name.clone(), "human_operator".to_string());
-    agent.description = Some("Manual memory operations via CLI/TUI".to_string());
-
-    operations::upsert_agent(pool, &agent).await?;
+    let identity = AgentIdentity {
+        name: Some(config.hmlr.human_agent_name.clone()),
+        kind: Some("human_operator".to_string()),
+        meta: None,
+    };
+    let agent = identity.resolve(pool).await?;
     Ok(agent.id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentRecord;
     use crate::analysis::NoOpAnalyzer;
     use crate::database::Database;
     use crate::memory::MemoryType;

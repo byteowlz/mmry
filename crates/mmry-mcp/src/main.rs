@@ -9,6 +9,7 @@ use mcp_spec::protocol::ServerCapabilities;
 use mcp_spec::resource::Resource;
 use mcp_spec::tool::Tool;
 use mcp_spec::ResourceContents;
+use mmry_core::agents::AgentIdentity;
 use mmry_core::agents::FactCategory;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
@@ -124,6 +125,15 @@ struct MemoryAddArgs {
     sparse_embed: Option<bool>,
     #[serde(default)]
     store: Option<String>,
+    /// Agent name (who is adding this memory). Defaults to "human".
+    #[serde(default)]
+    agent: Option<String>,
+    /// Agent kind (human, coding_agent, review_agent, …). Defaults to "human".
+    #[serde(default)]
+    agent_kind: Option<String>,
+    /// Free-form agent metadata (repo, workspace, session_id, …).
+    #[serde(default)]
+    agent_meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -529,6 +539,18 @@ impl MmryMcpRouter {
         }
 
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
+
+        // Resolve agent identity (defaults to "human")
+        let agent_identity = AgentIdentity {
+            name: args.agent,
+            kind: args.agent_kind,
+            meta: args.agent_meta,
+        };
+        let agent = agent_identity
+            .resolve(&pool)
+            .await
+            .map_err(|e| ToolError::ExecutionError(format!("agent resolution failed: {e}")))?;
+
         let category = args
             .category
             .unwrap_or_else(|| self.inner.config.memory.default_category.clone());
@@ -580,6 +602,11 @@ impl MmryMcpRouter {
             json!({
                 "store": store,
                 "memory": Self::strip_embeddings(memory),
+                "agent": {
+                    "name": agent.name,
+                    "kind": agent.kind,
+                    "meta": agent.metadata,
+                },
             }),
         )
     }
@@ -1147,7 +1174,7 @@ impl mcp_server::Router for MmryMcpRouter {
             ),
             Tool::new(
                 "mmry.memory.add",
-                "Add a new memory (optionally embedding it).",
+                "Add a new memory (optionally embedding it). Pass agent/agent_kind/agent_meta to attribute the memory to a specific agent.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -1158,7 +1185,10 @@ impl mcp_server::Router for MmryMcpRouter {
                         "importance": { "type": ["integer", "null"], "minimum": 1, "maximum": 10 },
                         "embed": { "type": ["boolean", "null"], "default": true },
                         "sparse_embed": { "type": ["boolean", "null"], "default": true },
-                        "store": { "type": ["string", "null"] }
+                        "store": { "type": ["string", "null"] },
+                        "agent": { "type": ["string", "null"], "description": "Agent name (defaults to 'human')" },
+                        "agent_kind": { "type": ["string", "null"], "description": "Agent kind: human, coding_agent, review_agent, …" },
+                        "agent_meta": { "type": ["object", "null"], "description": "Free-form metadata (repo, workspace, session_id, …)" }
                     },
                     "required": ["content"],
                     "additionalProperties": false
@@ -1574,6 +1604,9 @@ mod tests {
                 embed: Some(false),
                 sparse_embed: Some(false),
                 store: None,
+                agent: None,
+                agent_kind: None,
+                agent_meta: None,
             })
             .await?;
         let add_json = extract_json(add);
