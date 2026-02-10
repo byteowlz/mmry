@@ -1,5 +1,4 @@
 // Database schema definitions
-// Migrations are in crates/mmry-core/migrations/
 
 pub const INIT_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS memories (
@@ -22,29 +21,7 @@ CREATE TABLE IF NOT EXISTS memories (
     parent_id TEXT,
     chunk_index INTEGER,
     total_chunks INTEGER,
-    chunk_method TEXT,
-    bridge_block_id TEXT REFERENCES bridge_blocks(block_id)
-);
-
-CREATE TABLE IF NOT EXISTS entities (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    type TEXT,
-    metadata JSON
-);
-
-CREATE TABLE IF NOT EXISTS memory_entities (
-    memory_id TEXT REFERENCES memories(id) ON DELETE CASCADE,
-    entity_id TEXT REFERENCES entities(id) ON DELETE CASCADE,
-    PRIMARY KEY (memory_id, entity_id)
-);
-
-CREATE TABLE IF NOT EXISTS relationships (
-    id TEXT PRIMARY KEY,
-    from_entity TEXT REFERENCES entities(id),
-    to_entity TEXT REFERENCES entities(id),
-    relation_type TEXT,
-    strength REAL DEFAULT 1.0
+    chunk_method TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -69,53 +46,41 @@ CREATE TABLE IF NOT EXISTS agent_events (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS bridge_blocks (
-    block_id TEXT PRIMARY KEY,
-    span_id TEXT,
-    topic_label TEXT,
-    keywords JSON DEFAULT '[]',
-    status TEXT,
-    exit_reason TEXT,
-    content_json JSON,
-    agent_id TEXT REFERENCES agents(id),
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    embedding BLOB
-);
-
-CREATE TABLE IF NOT EXISTS facts (
+CREATE TABLE IF NOT EXISTS learnings (
     id TEXT PRIMARY KEY,
-    fact_key TEXT NOT NULL,
-    fact_value TEXT NOT NULL,
-    category TEXT DEFAULT 'General',
-    evidence_snippet TEXT,
-    source_span TEXT,
-    turn_id TEXT,
-    source_chunk_id TEXT,
-    source_paragraph_id TEXT,
-    observed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    recency_score REAL DEFAULT 1.0,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'general',
+    kind TEXT NOT NULL DEFAULT 'pattern',
+    source TEXT,
+    confidence REAL DEFAULT 0.5,
+    maturity TEXT DEFAULT 'candidate',
+    score REAL DEFAULT 0.0,
+    embedding BLOB,
+    agent_id TEXT,
+    scope TEXT DEFAULT 'global',
     metadata JSON DEFAULT '{}',
-    agent_id TEXT REFERENCES agents(id),
-    fact_fingerprint TEXT
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS user_profiles (
+CREATE TABLE IF NOT EXISTS learning_feedback_events (
     id TEXT PRIMARY KEY,
-    profile JSON NOT NULL,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    learning_id TEXT REFERENCES learnings(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    delta REAL DEFAULT 0.0,
+    context TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
-CREATE INDEX IF NOT EXISTS idx_memory_entities_memory ON memory_entities(memory_id);
-CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);
 CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id);
-CREATE INDEX IF NOT EXISTS idx_bridge_blocks_span ON bridge_blocks(span_id);
-CREATE INDEX IF NOT EXISTS idx_facts_key ON facts(fact_key);
-CREATE INDEX IF NOT EXISTS idx_facts_observed ON facts(observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings(category);
+CREATE INDEX IF NOT EXISTS idx_learnings_kind ON learnings(kind);
+CREATE INDEX IF NOT EXISTS idx_learnings_maturity ON learnings(maturity);
+CREATE INDEX IF NOT EXISTS idx_learnings_score ON learnings(score DESC);
+CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id);
+CREATE INDEX IF NOT EXISTS idx_learnings_scope ON learnings(scope);
 "#;
-
-// Note: bridge_block_id indexes are created in apply_schema_updates after the column is added
-// This ensures backward compatibility with databases that don't have the column yet

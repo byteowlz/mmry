@@ -112,33 +112,6 @@ pub enum SearchMode {
     SparseEmbedding,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum GuardPatternKind {
-    #[default]
-    Literal,
-    Regex,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct GuardPattern {
-    pub pattern: String,
-    #[serde(default)]
-    pub kind: GuardPatternKind,
-    #[serde(default)]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct GuardrailsConfig {
-    pub enabled: bool,
-    pub patterns: Vec<GuardPattern>,
-    pub max_patterns: usize,
-    pub max_pattern_length: usize,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[derive(Default)]
@@ -146,22 +119,14 @@ pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub stores: StoresConfig,
-    #[serde(default)]
-    pub federation: FederationConfig,
     pub embeddings: EmbeddingsConfig,
     pub sparse_embeddings: SparseEmbeddingsConfig,
     pub search: SearchConfig,
-    #[serde(default)]
-    pub guardrails: GuardrailsConfig,
     pub memory: MemoryConfig,
     pub chunking: ChunkingConfig,
     #[serde(default)]
     pub ingest: IngestConfig,
     pub entities: EntitiesConfig,
-    #[serde(default)]
-    pub profile_blocks: ProfileBlocksConfig,
-    #[serde(default)]
-    pub ner: NerConfig,
     pub cleanup: CleanupConfig,
     pub integrations: IntegrationsConfig,
     #[serde(default)]
@@ -170,10 +135,6 @@ pub struct Config {
     pub external_api: ExternalApiConfig,
     #[serde(default)]
     pub analyzer: AnalyzerConfig,
-    #[serde(default)]
-    pub hmlr: HmlrConfig,
-    #[serde(default)]
-    pub reasoning: crate::reasoning::ReasoningConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -184,26 +145,6 @@ pub struct StoresConfig {
     pub default: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct FederationConfig {
-    pub enabled: bool,
-    pub remotes: Vec<FederationRemoteConfig>,
-    pub request_timeout_seconds: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct FederationRemoteConfig {
-    /// Stable name for this remote (used as source id in results)
-    pub name: String,
-    /// Base URL to mmry-service external API (e.g. "http://127.0.0.1:8081")
-    pub base_url: String,
-    /// Optional API key (Authorization: Bearer ...)
-    pub api_key: Option<String>,
-    /// Optional store name on the remote (defaults to remote's default store)
-    pub store: Option<String>,
-}
-
 impl Default for StoresConfig {
     fn default() -> Self {
         let data_dir = default_data_dir().join("stores");
@@ -211,16 +152,6 @@ impl Default for StoresConfig {
         Self {
             directory: data_dir,
             default: "default".to_string(),
-        }
-    }
-}
-
-impl Default for FederationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            remotes: Vec::new(),
-            request_timeout_seconds: 10,
         }
     }
 }
@@ -336,31 +267,6 @@ pub struct EntitiesConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct NerConfig {
-    /// Enable NER-based entity extraction
-    pub enabled: bool,
-    /// GLiNER model to use (HuggingFace repo name)
-    /// Recommended: "urchade/gliner_multi-v2.1" for multilingual
-    pub model: String,
-    /// Minimum confidence threshold for accepting entities (0.0 - 1.0)
-    pub confidence_threshold: f32,
-    /// Entity labels to extract (GLiNER is zero-shot, so you can specify any labels)
-    /// Examples: ["person", "company", "technology", "project", "location"]
-    #[serde(default = "default_ner_labels")]
-    pub labels: Vec<String>,
-}
-
-fn default_ner_labels() -> Vec<String> {
-    vec![
-        "person".to_string(),
-        "organization".to_string(),
-        "location".to_string(),
-        "technology".to_string(),
-        "project".to_string(),
-    ]
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct CleanupConfig {
     pub auto_prune: bool,
@@ -384,21 +290,6 @@ pub struct LstIntegrationConfig {
     pub interactive: bool,
     pub min_task_length: usize,
     pub min_note_length: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct ProfileBlocksConfig {
-    /// Maximum characters allowed in a single profile block
-    pub max_block_chars: usize,
-    /// Optional: use `ingestr` to convert non-text files to Markdown when ingesting directories
-    pub ingestr_enabled: bool,
-    /// Path to `ingestr` binary (or just `ingestr` if on PATH)
-    pub ingestr_bin: PathBuf,
-    /// Optional directory to store converted Markdown outputs (if unset, uses a temp directory)
-    pub ingestr_output_dir: Option<PathBuf>,
-    /// Timeout for ingestr conversion (seconds)
-    pub ingestr_timeout_seconds: u64,
 }
 
 impl Default for DatabaseConfig {
@@ -442,17 +333,6 @@ impl Default for SparseEmbeddingsConfig {
         Self {
             enabled: false,
             model: "Qdrant/Splade_PP_en_v1".to_string(),
-        }
-    }
-}
-
-impl Default for GuardrailsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            patterns: Vec::new(),
-            max_patterns: 200,
-            max_pattern_length: 512,
         }
     }
 }
@@ -624,51 +504,6 @@ impl Default for ExternalApiConfig {
     }
 }
 
-/// Configuration for HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct HmlrConfig {
-    /// Enable HMLR enrichment pipeline (opt-in, disabled by default)
-    pub enabled: bool,
-    /// Extract structured facts from memory content
-    pub extract_facts: bool,
-    /// Assign memories to conversational bridge blocks
-    pub bridge_routing: bool,
-    /// Log all ingestion events for auditability
-    pub audit_trail: bool,
-    /// Auto-create agent record for human operators
-    pub track_human_agent: bool,
-    /// Name for the human operator agent (used when track_human_agent=true)
-    pub human_agent_name: String,
-    /// Interval in seconds for background synthesis (0 disables)
-    pub synthesis_interval_seconds: u64,
-}
-
-impl Default for HmlrConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            extract_facts: true,
-            bridge_routing: true,
-            audit_trail: true,
-            track_human_agent: true,
-            human_agent_name: "human".to_string(),
-            synthesis_interval_seconds: 0,
-        }
-    }
-}
-
-impl Default for NerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: "urchade/gliner_multi-v2.1".to_string(), // Multilingual GLiNER
-            confidence_threshold: 0.5,                      // GLiNER works well with 0.5
-            labels: default_ner_labels(),
-        }
-    }
-}
-
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
@@ -689,18 +524,6 @@ impl Default for SearchConfig {
             importance_weight: 0.05,
             bm25_k1: 1.2,
             bm25_b: 0.75,
-        }
-    }
-}
-
-impl Default for ProfileBlocksConfig {
-    fn default() -> Self {
-        Self {
-            max_block_chars: 16_000,
-            ingestr_enabled: false,
-            ingestr_bin: PathBuf::from("ingestr"),
-            ingestr_output_dir: None,
-            ingestr_timeout_seconds: 300,
         }
     }
 }
@@ -796,11 +619,6 @@ impl Config {
         self.ingest.ingestr_bin = expand_path(&self.ingest.ingestr_bin);
         if let Some(ref dir) = self.ingest.ingestr_output_dir {
             self.ingest.ingestr_output_dir = Some(expand_path(dir));
-        }
-
-        self.profile_blocks.ingestr_bin = expand_path(&self.profile_blocks.ingestr_bin);
-        if let Some(ref dir) = self.profile_blocks.ingestr_output_dir {
-            self.profile_blocks.ingestr_output_dir = Some(expand_path(dir));
         }
     }
 

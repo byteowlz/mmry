@@ -8,7 +8,6 @@ use std::sync::Arc;
 use mmry_core::config::Config;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
-use mmry_core::ner::NerService;
 use mmry_core::reranker::RerankerService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use tracing_subscriber::layer::SubscriberExt;
@@ -69,9 +68,6 @@ enum Commands {
     /// Regenerate embeddings for existing memories
     Reembed(commands::reembed::ReembedCmd),
 
-    /// Extract entities from existing memories and build knowledge graph
-    Reextract(commands::reextract::ReextractCmd),
-
     /// List available embedding models
     Models(commands::models::ModelsCmd),
 
@@ -91,23 +87,11 @@ enum Commands {
     /// Manage memory stores
     Stores(commands::stores::StoresCmd),
 
-    /// HMLR enrichment operations (backfill, stats)
-    Hmlr(commands::hmlr::HmlrCmd),
-
-    /// Manage guardrails
-    Guard(commands::guard::GuardCmd),
-
     /// Ingest files and directories into memories
     Ingest(commands::ingest::IngestCmd),
 
     /// Remove duplicate memories (keeping the oldest)
     Prune(commands::prune::PruneCmd),
-
-    /// Manage user profile blocks
-    Profile(commands::profile::ProfileCmd),
-
-    /// Reasoning-based memory access (inference over facts)
-    Reason(commands::reason::ReasonCmd),
 }
 
 fn main() {
@@ -147,7 +131,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Load config
     tracing::debug!("Loading config");
-    let mut config = Config::load_with_path(cli.config.clone())?;
+    let config = Config::load_with_path(cli.config.clone())?;
     tracing::debug!("Config loaded");
 
     // Handle commands that don't need database initialization
@@ -162,9 +146,6 @@ async fn async_main() -> anyhow::Result<()> {
         Commands::Export(cmd) => {
             return commands::export::handle(cmd, &config, cli.store.as_deref()).await
         }
-        Commands::Guard(cmd) => {
-            return commands::guard::handle(cmd, &mut config, cli.config.clone()).await
-        }
         other => other,
     };
 
@@ -177,11 +158,9 @@ async fn async_main() -> anyhow::Result<()> {
     // Try service-backed search before starting local services
     if config.service.enabled {
         if let Commands::Search(cmd) = &command {
-            if !cmd.uses_federation() {
-                match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
-                    Ok(()) => return Ok(()),
-                    Err(e) => tracing::warn!("Service search failed, falling back to local: {}", e),
-                }
+            match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::warn!("Service search failed, falling back to local: {e}"),
             }
         }
     }
@@ -200,8 +179,6 @@ async fn async_main() -> anyhow::Result<()> {
     let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
     tracing::debug!("Creating reranker");
     let reranker = Arc::new(RerankerService::from_config(&config.search)?);
-    tracing::debug!("Creating NER service");
-    let ner = Arc::new(NerService::new(&config.ner)?);
     tracing::debug!("All services created");
 
     // Execute command
@@ -213,7 +190,6 @@ async fn async_main() -> anyhow::Result<()> {
                 &db,
                 Arc::clone(&embeddings),
                 Arc::clone(&sparse_embeddings),
-                Arc::clone(&ner),
             )
             .await
         }
@@ -241,10 +217,6 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await
         }
-        Commands::Reextract(cmd) => {
-            commands::reextract::handle(cmd, &config, &db, Arc::clone(&ner)).await
-        }
-        Commands::Hmlr(cmd) => commands::hmlr::handle(cmd, &config, &db).await,
         Commands::Ingest(cmd) => {
             commands::ingest::handle(
                 cmd,
@@ -252,13 +224,10 @@ async fn async_main() -> anyhow::Result<()> {
                 &db,
                 Arc::clone(&embeddings),
                 Arc::clone(&sparse_embeddings),
-                Arc::clone(&ner),
             )
             .await
         }
         Commands::Prune(cmd) => commands::prune::handle(cmd, &config, &db).await,
-        Commands::Profile(cmd) => commands::profile::handle(cmd, &config, &db).await,
-        Commands::Reason(cmd) => commands::reason::handle(cmd, &config, &db).await,
         Commands::Import(cmd) => {
             commands::import::handle(
                 cmd,
@@ -273,7 +242,6 @@ async fn async_main() -> anyhow::Result<()> {
         | Commands::Rerankers(_)
         | Commands::Init(_)
         | Commands::Service(_)
-        | Commands::Guard(_)
         | Commands::Stores(_)
         | Commands::Export(_) => {
             unreachable!()
@@ -291,7 +259,6 @@ async fn async_main() -> anyhow::Result<()> {
     std::mem::forget(embeddings);
     std::mem::forget(sparse_embeddings);
     std::mem::forget(reranker);
-    std::mem::forget(ner);
 
     result
 }

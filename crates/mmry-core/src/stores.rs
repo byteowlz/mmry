@@ -265,7 +265,7 @@ pub async fn list_all_stores(
     }
 
     // Sort by created_at descending
-    all_results.sort_by(|a, b| b.memory.created_at.cmp(&a.memory.created_at));
+    all_results.sort_by_key(|b| std::cmp::Reverse(b.memory.created_at));
 
     // Limit total results
     all_results.truncate(limit as usize);
@@ -300,7 +300,7 @@ pub async fn list_all_facts(config: &Config, limit: i64) -> crate::Result<Vec<Fa
     }
 
     // Sort by observed_at descending
-    all_results.sort_by(|a, b| b.fact.observed_at.cmp(&a.fact.observed_at));
+    all_results.sort_by_key(|b| std::cmp::Reverse(b.fact.observed_at));
 
     // Limit total results
     all_results.truncate(limit as usize);
