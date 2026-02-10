@@ -2,10 +2,9 @@
 members = [
   "crates/mmry-core",
   "crates/mmry-cli",
-  # TODO: Re-enable after HMLR removal cleanup
-  # "crates/mmry-mcp",
-  # "crates/mmry-tui",
-  # "crates/mmry-service",
+  "crates/mmry-mcp",
+  "crates/mmry-tui",
+  "crates/mmry-service",
 ]
 resolver = "2"
 

@@ -29,33 +29,25 @@ impl SortState {
     pub fn sort_memories(&self, memories: &mut [MemoryWithStore]) {
         match self.mode {
             SortMode::DateNewest => {
-                memories.sort_by(|a, b| b.memory.created_at.cmp(&a.memory.created_at));
+                memories.sort_by_key(|b| std::cmp::Reverse(b.memory.created_at));
             }
             SortMode::DateOldest => {
-                memories.sort_by(|a, b| a.memory.created_at.cmp(&b.memory.created_at));
+                memories.sort_by_key(|a| a.memory.created_at);
             }
             SortMode::ImportanceHigh => {
-                memories.sort_by(|a, b| b.memory.importance.cmp(&a.memory.importance));
+                memories.sort_by_key(|b| std::cmp::Reverse(b.memory.importance));
             }
             SortMode::ImportanceLow => {
-                memories.sort_by(|a, b| a.memory.importance.cmp(&b.memory.importance));
+                memories.sort_by_key(|a| a.memory.importance);
             }
             SortMode::Category => {
-                memories.sort_by(|a, b| a.memory.category.cmp(&b.memory.category));
+                memories.sort_by_key(|a| a.memory.category.clone());
             }
             SortMode::Type => {
-                memories.sort_by(|a, b| {
-                    let a_val = match a.memory.memory_type {
-                        mmry_core::memory::MemoryType::Episodic => 0,
-                        mmry_core::memory::MemoryType::Semantic => 1,
-                        mmry_core::memory::MemoryType::Procedural => 2,
-                    };
-                    let b_val = match b.memory.memory_type {
-                        mmry_core::memory::MemoryType::Episodic => 0,
-                        mmry_core::memory::MemoryType::Semantic => 1,
-                        mmry_core::memory::MemoryType::Procedural => 2,
-                    };
-                    a_val.cmp(&b_val)
+                memories.sort_by_key(|a| match a.memory.memory_type {
+                    mmry_core::memory::MemoryType::Episodic => 0,
+                    mmry_core::memory::MemoryType::Semantic => 1,
+                    mmry_core::memory::MemoryType::Procedural => 2,
                 });
             }
         }
