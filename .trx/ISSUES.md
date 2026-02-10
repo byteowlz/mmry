@@ -2,6 +2,12 @@
 
 ## Open
 
+### [mmry-rbqc] Clean up mmry-tui/app.rs: remove HMLR/graph/guardrails UI and re-enable in workspace (P1, task)
+
+### [mmry-ssfb] Clean up mmry-service/server.rs: remove HMLR endpoints and re-enable in workspace (P1, task)
+
+### [mmry-gh9f] Clean up mmry-mcp: remove HMLR tools (bridge_blocks, facts, profile_blocks, context_pack, conversation) and re-enable in workspace (P1, task)
+
 ### [mmry-sfxf] Configurable LLM models for extraction/consolidation - support local models (Ollama, LM Studio) and API providers. Configure via config.toml [analyzer] section. (P1, feature)
 
 ### [mmry-kj8d] Service hstry integration - watch for new hstry sessions, auto-trigger learning extraction in background. (P1, feature)
@@ -12,8 +18,6 @@
 
 ### [mmry-z5wf] MEMORY.md bidirectional sync - generate human/agent-readable MEMORY.md from learnings store, parse edits back. Per-store file. (P1, feature)
 
-### [mmry-3xvs] Remove HMLR system - drop bridge blocks, fact scrubber, scribe, lattice crawler, context hydrator, governor. Keep only learnings table and core search. (P1, task)
-
 ### [mmry-xrbv.10] MCP tools for learnings - GetContext, AddLearning, RecordFeedback, RecordOutcome, ListLearnings, GapAnalysis (P1, feature)
 
 ### [mmry-xrbv.4] LLM-based learning extraction pipeline - analyze hstry chat sessions and distill actionable learnings/rules into the learnings store (P1, feature)
@@ -21,6 +25,10 @@
 ### [mmry-xrbv.3] 'mmry context <task>' command - search learnings (not memories) within a store and optionally across stores, return relevant rules + anti-patterns as JSON (P1, feature)
 
 ### [mmry-xrbv] Learnings & Context System - distill agent sessions into actionable rules with confidence tracking, inspired by cass-memory (P1, epic)
+
+### [mmry-a1e9] Remove unused crate dependencies from Cargo.toml files after HMLR removal (rig-core, ort NER models, etc) (P2, chore)
+
+### [mmry-kgen] Clean up agents.rs and operations.rs: remove BridgeBlock, FactRecord, UserProfileEntry types and their DB operations (dead code after HMLR removal) (P2, task)
 
 ### [mmry-yay2.6] Trust weighting by agent kind - human-added memories/learnings get higher initial trust than agent-extracted ones. Configurable per agent-kind. (P2, feature)
 
@@ -34,6 +42,7 @@
 
 ## Closed
 
+- [mmry-3xvs] Remove HMLR system - drop bridge blocks, fact scrubber, scribe, lattice crawler, context hydrator, governor. Keep only learnings table and core search. (closed 2026-02-10)
 - [mmry-xrbv.9] Agent-native onboarding - guided workflow for agents to analyze hstry sessions and build playbook, with progress tracking and resumability across sessions (closed 2026-02-10)
 - [mmry-yay2.4] Per-agent profiles in Scribe - track what each agent/repo works on, patterns, preferences. Replace single global profile with agent-scoped profiles. (closed 2026-02-10)
 - [mmry-xrbv.6] Anti-pattern conversion - automatically invert learnings with >50% harmful ratio into PITFALL warnings (closed 2026-02-10)
