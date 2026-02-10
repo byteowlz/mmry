@@ -2,12 +2,6 @@
 
 ## Open
 
-### [mmry-rbqc] Clean up mmry-tui/app.rs: remove HMLR/graph/guardrails UI and re-enable in workspace (P1, task)
-
-### [mmry-ssfb] Clean up mmry-service/server.rs: remove HMLR endpoints and re-enable in workspace (P1, task)
-
-### [mmry-gh9f] Clean up mmry-mcp: remove HMLR tools (bridge_blocks, facts, profile_blocks, context_pack, conversation) and re-enable in workspace (P1, task)
-
 ### [mmry-sfxf] Configurable LLM models for extraction/consolidation - support local models (Ollama, LM Studio) and API providers. Configure via config.toml [analyzer] section. (P1, feature)
 
 ### [mmry-kj8d] Service hstry integration - watch for new hstry sessions, auto-trigger learning extraction in background. (P1, feature)
@@ -42,6 +36,9 @@
 
 ## Closed
 
+- [mmry-rbqc] Clean up mmry-tui/app.rs: remove HMLR/graph/guardrails UI and re-enable in workspace (closed 2026-02-10)
+- [mmry-ssfb] Clean up mmry-service/server.rs: remove HMLR endpoints and re-enable in workspace (closed 2026-02-10)
+- [mmry-gh9f] Clean up mmry-mcp: remove HMLR tools (bridge_blocks, facts, profile_blocks, context_pack, conversation) and re-enable in workspace (closed 2026-02-10)
 - [mmry-3xvs] Remove HMLR system - drop bridge blocks, fact scrubber, scribe, lattice crawler, context hydrator, governor. Keep only learnings table and core search. (closed 2026-02-10)
 - [mmry-xrbv.9] Agent-native onboarding - guided workflow for agents to analyze hstry sessions and build playbook, with progress tracking and resumability across sessions (closed 2026-02-10)
 - [mmry-yay2.4] Per-agent profiles in Scribe - track what each agent/repo works on, patterns, preferences. Replace single global profile with agent-scoped profiles. (closed 2026-02-10)
