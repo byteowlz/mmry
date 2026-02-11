@@ -20,6 +20,8 @@
 
 ### [mmry-xrbv] Learnings & Context System - distill agent sessions into actionable rules with confidence tracking, inspired by cass-memory (P1, epic)
 
+### [mmry-8rhe] Research RLM/DSPy.RLM memory systems vs OM (LongMemEval) and assess fit for mmry/observational-memory (P2, task)
+
 ### [mmry-a1e9] Remove unused crate dependencies from Cargo.toml files after HMLR removal (rig-core, ort NER models, etc) (P2, chore)
 
 ### [mmry-kgen] Clean up agents.rs and operations.rs: remove BridgeBlock, FactRecord, UserProfileEntry types and their DB operations (dead code after HMLR removal) (P2, task)
