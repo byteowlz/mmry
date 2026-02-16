@@ -525,6 +525,24 @@ impl Database {
         .execute(pool)
         .await?;
 
+        // Check if bridge_block_id column exists, add if not (for HMLR feature)
+        let bridge_block_id_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='bridge_block_id'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !bridge_block_id_exists {
+            tracing::info!("Adding bridge_block_id column to memories table...");
+            sqlx::query("ALTER TABLE memories ADD COLUMN bridge_block_id TEXT")
+                .execute(pool)
+                .await?;
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_bridge_block ON memories(bridge_block_id)")
+                .execute(pool)
+                .await?;
+            tracing::info!("bridge_block_id column added");
+        }
+
         Ok(())
     }
 
