@@ -30,7 +30,6 @@ use mmry_core::memory::SourceAttribution;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
-use mmry_core::stores::export_all_stores_to_json;
 use mmry_core::stores::export_store_to_json;
 use mmry_core::stores::list_all_stores;
 use mmry_core::stores::list_stores;
@@ -1808,42 +1807,18 @@ impl App {
     }
 
     async fn handle_export_mode(&mut self, action: KeyAction) -> Result<bool> {
-        // Extract current state
-        let export_all = match &self.mode {
-            AppMode::Export(all) => *all,
-            _ => return Ok(true),
-        };
-
         match action {
-            KeyAction::Char('a') | KeyAction::Char('A') => {
-                // Toggle export all stores
-                self.mode = AppMode::Export(true);
-            }
-            KeyAction::Char('c') | KeyAction::Char('C') => {
-                // Toggle export current store only
-                self.mode = AppMode::Export(false);
-            }
             KeyAction::Select => {
                 self.mode = AppMode::Normal;
 
                 // Generate filename with timestamp
                 let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                let filename = if export_all {
-                    format!("mmry_export_all_{timestamp}.json")
-                } else {
-                    format!("mmry_export_{}_{timestamp}.json", self.current_store)
-                };
+                let filename = format!("mmry_export_{}_{timestamp}.json", self.current_store);
 
                 // Export to current directory
                 let path = std::path::PathBuf::from(&filename);
 
-                let result = if export_all {
-                    export_all_stores_to_json(&self.config).await
-                } else {
-                    export_store_to_json(&self.config, &self.current_store).await
-                };
-
-                match result {
+                match export_store_to_json(&self.config, &self.current_store).await {
                     Ok(export) => {
                         let count = export.memory_count;
                         match write_export_to_file(&export, &path) {

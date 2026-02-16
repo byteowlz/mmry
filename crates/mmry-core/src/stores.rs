@@ -353,117 +353,21 @@ impl From<&Memory> for ExportedMemory {
     }
 }
 
-/// Exported fact record (without embeddings)
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ExportedFact {
-    pub id: String,
-    pub fact_key: String,
-    pub fact_value: String,
-    pub category: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub evidence_snippet: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_chunk_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fact_fingerprint: Option<String>,
-    pub observed_at: String,
-}
-
-/// Exported bridge block
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ExportedBridgeBlock {
-    pub block_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub span_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub topic_label: Option<String>,
-    pub keywords: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub open_loops: Vec<String>,
-    #[serde(default)]
-    pub decisions_made: Vec<String>,
-    /// Memory IDs associated with this block
-    pub memory_ids: Vec<String>,
-    pub created_at: String,
-}
-
-/// Exported entity
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ExportedEntity {
-    pub id: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entity_type: Option<String>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-}
-
-/// Exported relationship between entities
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ExportedRelationship {
-    pub id: String,
-    pub from_entity: String,
-    pub to_entity: String,
-    pub relation_type: String,
-    pub strength: f32,
-}
-
-/// Memory-entity link for reconstruction
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ExportedMemoryEntity {
-    pub memory_id: String,
-    pub entity_id: String,
-}
-
-/// HMLR (Hierarchical Memory with Lattice Routing) data export
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct ExportedHmlr {
-    #[serde(default)]
-    pub facts: Vec<ExportedFact>,
-    #[serde(default)]
-    pub bridge_blocks: Vec<ExportedBridgeBlock>,
-    #[serde(default)]
-    pub entities: Vec<ExportedEntity>,
-    #[serde(default)]
-    pub relationships: Vec<ExportedRelationship>,
-    #[serde(default)]
-    pub memory_entities: Vec<ExportedMemoryEntity>,
-}
 
 /// Export result containing memories and metadata
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExportResult {
     pub exported_at: String,
     pub store: String,
-    /// Export format version (2 = includes HMLR)
-    #[serde(default = "default_version")]
     pub version: u32,
     pub memory_count: usize,
     pub memories: Vec<ExportedMemory>,
-    /// HMLR enrichment data (facts, bridge blocks, entities, relationships)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hmlr: Option<ExportedHmlr>,
 }
 
-fn default_version() -> u32 {
-    2
-}
-
-/// Export memories from a single store to JSON (without HMLR data)
+/// Export memories from a single store to JSON
 pub async fn export_store_to_json(
     config: &Config,
     store_name: &str,
-) -> crate::Result<ExportResult> {
-    export_store_to_json_with_options(config, store_name, false).await
-}
-
-/// Export memories from a single store to JSON with optional HMLR data
-pub async fn export_store_to_json_with_options(
-    config: &Config,
-    store_name: &str,
-    include_hmlr: bool,
 ) -> crate::Result<ExportResult> {
     let db = Database::init_store(config, Some(store_name)).await?;
     let pool = db.pool();
@@ -472,164 +376,14 @@ pub async fn export_store_to_json_with_options(
     let memories = crate::database::operations::list_memories(pool, None, i64::MAX).await?;
     let exported: Vec<ExportedMemory> = memories.iter().map(ExportedMemory::from).collect();
 
-    // Export HMLR data if requested
-    let hmlr = if include_hmlr {
-        Some(export_hmlr_data(pool).await?)
-    } else {
-        None
-    };
-
     db.close().await;
 
     Ok(ExportResult {
         exported_at: chrono::Utc::now().to_rfc3339(),
         store: store_name.to_string(),
-        version: 2,
+        version: 1,
         memory_count: exported.len(),
         memories: exported,
-        hmlr,
-    })
-}
-
-/// Export HMLR enrichment data from a database
-async fn export_hmlr_data(pool: &sqlx::SqlitePool) -> crate::Result<ExportedHmlr> {
-    use crate::database::operations;
-
-    // Export facts
-    let facts = operations::list_all_facts(pool).await?;
-    let exported_facts: Vec<ExportedFact> = facts
-        .into_iter()
-        .map(|f| {
-            let fingerprint = f.fingerprint();
-            ExportedFact {
-                id: f.id.to_string(),
-                fact_key: f.fact_key,
-                fact_value: f.fact_value,
-                category: f.category.as_str().to_string(),
-                evidence_snippet: f.evidence_snippet,
-                source_chunk_id: f.source_chunk_id,
-                fact_fingerprint: Some(fingerprint),
-                observed_at: f.observed_at.to_rfc3339(),
-            }
-        })
-        .collect();
-
-    // Export bridge blocks
-    let blocks = operations::list_all_bridge_blocks(pool).await?;
-    let exported_blocks: Vec<ExportedBridgeBlock> = blocks
-        .into_iter()
-        .map(|b| ExportedBridgeBlock {
-            block_id: b.block_id.to_string(),
-            span_id: b.span_id,
-            topic_label: b.topic_label,
-            keywords: b.keywords,
-            status: b.status,
-            open_loops: b.open_loops,
-            decisions_made: b.decisions_made,
-            memory_ids: Vec::new(), // Bridge blocks don't directly track memory IDs
-            created_at: b.created_at.to_rfc3339(),
-        })
-        .collect();
-
-    // Export entities
-    let entities = operations::list_all_entities(pool).await?;
-    let exported_entities: Vec<ExportedEntity> = entities
-        .into_iter()
-        .map(|e| ExportedEntity {
-            id: e.id.to_string(),
-            name: e.name,
-            entity_type: e.entity_type,
-            metadata: e.metadata,
-        })
-        .collect();
-
-    // Export relationships
-    let relationships = operations::list_all_relationships(pool).await?;
-    let exported_relationships: Vec<ExportedRelationship> = relationships
-        .into_iter()
-        .map(|r| ExportedRelationship {
-            id: r.id.to_string(),
-            from_entity: r.from_entity.to_string(),
-            to_entity: r.to_entity.to_string(),
-            relation_type: r.relation_type,
-            strength: r.strength,
-        })
-        .collect();
-
-    // Export memory-entity links
-    let memory_entities = operations::list_all_memory_entities(pool).await?;
-    let exported_memory_entities: Vec<ExportedMemoryEntity> = memory_entities
-        .into_iter()
-        .map(|me| ExportedMemoryEntity {
-            memory_id: me.memory_id.to_string(),
-            entity_id: me.entity_id.to_string(),
-        })
-        .collect();
-
-    Ok(ExportedHmlr {
-        facts: exported_facts,
-        bridge_blocks: exported_blocks,
-        entities: exported_entities,
-        relationships: exported_relationships,
-        memory_entities: exported_memory_entities,
-    })
-}
-
-/// Export memories from all stores to JSON (without HMLR data)
-pub async fn export_all_stores_to_json(config: &Config) -> crate::Result<ExportResult> {
-    export_all_stores_to_json_with_options(config, false).await
-}
-
-/// Export memories from all stores to JSON with optional HMLR data
-pub async fn export_all_stores_to_json_with_options(
-    config: &Config,
-    include_hmlr: bool,
-) -> crate::Result<ExportResult> {
-    let stores = list_stores(config)?;
-    let mut all_memories: Vec<ExportedMemory> = Vec::new();
-    let mut combined_hmlr = ExportedHmlr::default();
-
-    for store_info in stores {
-        let db = Database::init_store(config, Some(&store_info.name)).await?;
-        let pool = db.pool();
-
-        let memories = crate::database::operations::list_memories(pool, None, i64::MAX).await?;
-
-        for memory in memories {
-            let mut exported = ExportedMemory::from(&memory);
-            exported.store = Some(store_info.name.clone());
-            all_memories.push(exported);
-        }
-
-        // Merge HMLR data from each store
-        if include_hmlr {
-            let store_hmlr = export_hmlr_data(pool).await?;
-            combined_hmlr.facts.extend(store_hmlr.facts);
-            combined_hmlr.bridge_blocks.extend(store_hmlr.bridge_blocks);
-            combined_hmlr.entities.extend(store_hmlr.entities);
-            combined_hmlr.relationships.extend(store_hmlr.relationships);
-            combined_hmlr
-                .memory_entities
-                .extend(store_hmlr.memory_entities);
-        }
-
-        db.close().await;
-    }
-
-    // Sort by created_at descending
-    all_memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-    Ok(ExportResult {
-        exported_at: chrono::Utc::now().to_rfc3339(),
-        store: "all".to_string(),
-        version: 2,
-        memory_count: all_memories.len(),
-        memories: all_memories,
-        hmlr: if include_hmlr {
-            Some(combined_hmlr)
-        } else {
-            None
-        },
     })
 }
 
