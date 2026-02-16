@@ -175,14 +175,6 @@ pub struct MemoryWithStore {
     pub store: String,
 }
 
-/// A fact with its source store name
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FactWithStore {
-    #[serde(flatten)]
-    pub fact: crate::agents::FactRecord,
-    pub store: String,
-}
-
 /// Search across all stores
 pub async fn search_all_stores(
     opts: SearchAllStoresOptions<'_>,
@@ -273,40 +265,6 @@ pub async fn list_all_stores(
     Ok(all_results)
 }
 
-/// List facts from all stores
-pub async fn list_all_facts(config: &Config, limit: i64) -> crate::Result<Vec<FactWithStore>> {
-    let stores = list_stores(config)?;
-
-    if stores.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut all_results = Vec::new();
-    let per_store_limit = (limit / stores.len() as i64).max(10);
-
-    for store_info in stores {
-        let db = Database::init_store(config, Some(&store_info.name)).await?;
-        let facts =
-            crate::database::operations::list_recent_facts(db.pool(), per_store_limit).await?;
-
-        for fact in facts {
-            all_results.push(FactWithStore {
-                fact,
-                store: store_info.name.clone(),
-            });
-        }
-
-        db.close().await;
-    }
-
-    // Sort by observed_at descending
-    all_results.sort_by_key(|b| std::cmp::Reverse(b.fact.observed_at));
-
-    // Limit total results
-    all_results.truncate(limit as usize);
-
-    Ok(all_results)
-}
 
 /// Move a memory from one store to another
 /// Returns the memory as it exists in the new store
