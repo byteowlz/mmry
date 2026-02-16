@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::Subcommand;
-use mmry_core::analysis::check_analyzer_health;
 use mmry_core::config::Config;
 use mmry_core::service::manager::ServiceManager;
 use mmry_core::service::manager::ServiceStatus;
@@ -39,12 +38,14 @@ enum ServiceCommands {
 pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()> {
     if cmd.check_llm {
         let config = Config::load_with_path(config_path.clone())?;
-        match check_analyzer_health(&config).await {
-            Ok(()) => println!("✓ Analyzer endpoint reachable"),
-            Err(e) => {
-                println!("✗ Analyzer health check failed: {e}");
-                return Err(e.into());
+        if config.analyzer.enabled {
+            if let Some(ref endpoint) = config.analyzer.endpoint {
+                println!("Analyzer configured: endpoint={endpoint}");
+            } else {
+                println!("Analyzer enabled but no endpoint configured");
             }
+        } else {
+            println!("Analyzer is not enabled in config");
         }
     }
 

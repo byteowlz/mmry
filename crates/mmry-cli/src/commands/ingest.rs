@@ -7,24 +7,13 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mmry_core::analysis::build_analyzer;
-use mmry_core::analysis::Analyzer;
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
-use mmry_core::database::graph_ops;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
-use mmry_core::graph::Entity;
-use mmry_core::graph::MemoryEntityLink;
-use mmry_core::graph::RelationType;
-use mmry_core::graph::Relationship;
-use mmry_core::hmlr::get_or_create_human_agent;
-use mmry_core::hmlr::HmlrContext;
-use mmry_core::hmlr::HmlrPipeline;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
-use mmry_core::ner::NerService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 
 use notify::Event;
@@ -215,46 +204,16 @@ pub async fn handle(
     db: &Database,
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
-    ner: Arc<NerService>,
 ) -> anyhow::Result<()> {
-    let analyzer = build_analyzer(config);
-
     match cmd.command {
         IngestCommand::File(opts) => {
-            handle_file_ingest(
-                opts,
-                config,
-                db,
-                embeddings,
-                sparse_embeddings,
-                ner,
-                analyzer,
-            )
-            .await
+            handle_file_ingest(opts, config, db, embeddings, sparse_embeddings).await
         }
         IngestCommand::Watch(opts) => {
-            handle_watch(
-                opts,
-                config,
-                db,
-                embeddings,
-                sparse_embeddings,
-                ner,
-                analyzer,
-            )
-            .await
+            handle_watch(opts, config, db, embeddings, sparse_embeddings).await
         }
         IngestCommand::Stdin(opts) => {
-            handle_stdin(
-                opts,
-                config,
-                db,
-                embeddings,
-                sparse_embeddings,
-                ner,
-                analyzer,
-            )
-            .await
+            handle_stdin(opts, config, db, embeddings, sparse_embeddings).await
         }
     }
 }
@@ -286,16 +245,12 @@ async fn handle_file_ingest(
     db: &Database,
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
-    ner: Arc<NerService>,
-    analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
     let ctx = IngestContext {
         config,
         db,
         embeddings: &embeddings,
         sparse_embeddings: &sparse_embeddings,
-        ner: &ner,
-        analyzer: &analyzer,
     };
 
     let extensions: Vec<String> = opts
@@ -414,16 +369,12 @@ async fn handle_watch(
     db: &Database,
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
-    ner: Arc<NerService>,
-    analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
     let ctx = IngestContext {
         config,
         db,
         embeddings: &embeddings,
         sparse_embeddings: &sparse_embeddings,
-        ner: &ner,
-        analyzer: &analyzer,
     };
 
     let mut watch_root = opts.path.clone();
@@ -640,8 +591,6 @@ async fn handle_stdin(
     db: &Database,
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
-    ner: Arc<NerService>,
-    analyzer: Arc<dyn Analyzer + Send + Sync>,
 ) -> anyhow::Result<()> {
     let mut buffer = String::new();
     io::stdin().read_to_string(&mut buffer)?;
@@ -699,14 +648,6 @@ async fn handle_stdin(
         // Create chunk memories
         let mut chunk_memories = chunker.create_memory_chunks(&parent, text_chunks);
 
-        let mut hmlr_pipeline = None;
-        let mut hmlr_creator_id = None;
-        let hmlr_query = "ingest:stdin".to_string();
-        if config.hmlr.enabled {
-            hmlr_pipeline = Some(HmlrPipeline::new(config.hmlr.clone(), analyzer.clone()));
-            hmlr_creator_id = Some(get_or_create_human_agent(db.pool(), config).await?);
-        }
-
         // Embed and insert chunks
         for chunk in &mut chunk_memories {
             let embed_text = if config.chunking.embed_metadata {
@@ -736,13 +677,6 @@ async fn handle_stdin(
             }
 
             operations::insert_memory(db.pool(), chunk).await?;
-            extract_and_link_entities(db, &ner, chunk).await?;
-
-            if let (Some(pipeline), Some(creator_id)) = (hmlr_pipeline.as_ref(), hmlr_creator_id) {
-                let context =
-                    HmlrContext::for_agent(creator_id, Some(hmlr_query.clone()), Vec::new());
-                let _ = pipeline.enrich_memory(db.pool(), chunk, context).await;
-            }
         }
 
         // Insert parent (without embedding)
@@ -797,15 +731,8 @@ async fn handle_stdin(
         }
 
         operations::insert_memory(db.pool(), &memory).await?;
-        extract_and_link_entities(db, &ner, &memory).await?;
 
         // HMLR enrichment
-        if config.hmlr.enabled {
-            let pipeline = HmlrPipeline::new(config.hmlr.clone(), analyzer.clone());
-            let human_id = get_or_create_human_agent(db.pool(), config).await?;
-            let context = HmlrContext::for_human(human_id);
-            let _ = pipeline.enrich_memory(db.pool(), &memory, context).await;
-        }
 
         if opts.json {
             let result = IngestResult {
@@ -838,8 +765,6 @@ struct IngestContext<'a> {
     db: &'a Database,
     embeddings: &'a Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: &'a Arc<SparseEmbeddingService>,
-    ner: &'a Arc<NerService>,
-    analyzer: &'a Arc<dyn Analyzer + Send + Sync>,
 }
 
 async fn ingest_file(
@@ -851,8 +776,6 @@ async fn ingest_file(
     let db = ctx.db;
     let embeddings = ctx.embeddings;
     let sparse_embeddings = ctx.sparse_embeddings;
-    let ner = ctx.ner;
-    let analyzer = ctx.analyzer;
 
     let content = std::fs::read_to_string(path)?;
 
@@ -920,14 +843,6 @@ async fn ingest_file(
         // Create chunk memories
         let mut chunk_memories = chunker.create_memory_chunks(&parent, text_chunks);
 
-        let mut hmlr_pipeline = None;
-        let mut hmlr_creator_id = None;
-        let hmlr_query = format!("ingest:file:{}", path.display());
-        if config.hmlr.enabled {
-            hmlr_pipeline = Some(HmlrPipeline::new(config.hmlr.clone(), analyzer.clone()));
-            hmlr_creator_id = Some(get_or_create_human_agent(db.pool(), config).await?);
-        }
-
         // Embed and insert chunks
         for chunk in &mut chunk_memories {
             let embed_text = if config.chunking.embed_metadata {
@@ -957,13 +872,6 @@ async fn ingest_file(
             }
 
             operations::insert_memory(db.pool(), chunk).await?;
-            extract_and_link_entities(db, ner, chunk).await?;
-
-            if let (Some(pipeline), Some(creator_id)) = (hmlr_pipeline.as_ref(), hmlr_creator_id) {
-                let context =
-                    HmlrContext::for_agent(creator_id, Some(hmlr_query.clone()), Vec::new());
-                let _ = pipeline.enrich_memory(db.pool(), chunk, context).await;
-            }
         }
 
         // Insert parent (without embedding)
@@ -1021,15 +929,8 @@ async fn ingest_file(
         }
 
         operations::insert_memory(db.pool(), &memory).await?;
-        extract_and_link_entities(db, ner, &memory).await?;
 
         // HMLR enrichment
-        if config.hmlr.enabled {
-            let pipeline = HmlrPipeline::new(config.hmlr.clone(), analyzer.clone());
-            let human_id = get_or_create_human_agent(db.pool(), config).await?;
-            let context = HmlrContext::for_human(human_id);
-            let _ = pipeline.enrich_memory(db.pool(), &memory, context).await;
-        }
 
         Ok(IngestResult {
             path: path.display().to_string(),
@@ -1214,47 +1115,6 @@ fn parse_memory_type(explicit: Option<&str>, content: &str) -> MemoryType {
         return MemoryType::Semantic;
     }
     MemoryType::Episodic
-}
-
-async fn extract_and_link_entities(
-    db: &Database,
-    ner: &Arc<NerService>,
-    memory: &Memory,
-) -> anyhow::Result<usize> {
-    if !ner.is_enabled() {
-        return Ok(0);
-    }
-
-    let extracted = ner.extract_unique(&memory.content, None).await?;
-
-    if extracted.is_empty() {
-        return Ok(0);
-    }
-
-    let mut entity_ids = Vec::new();
-
-    for (name, (label, confidence)) in &extracted {
-        let entity = Entity::new(name.clone(), label.clone());
-        let entity_id = graph_ops::upsert_entity(db.pool(), &entity).await?;
-        entity_ids.push(entity_id);
-
-        let link = MemoryEntityLink::new(memory.id, entity_id, *confidence);
-        graph_ops::link_memory_entity(db.pool(), &link).await?;
-    }
-
-    // Create co-occurrence relationships
-    if entity_ids.len() > 1 {
-        for i in 0..entity_ids.len() {
-            for j in (i + 1)..entity_ids.len() {
-                let relationship =
-                    Relationship::new(entity_ids[i], entity_ids[j], RelationType::CoOccurs)
-                        .with_strength(0.1);
-                graph_ops::upsert_relationship(db.pool(), &relationship).await?;
-            }
-        }
-    }
-
-    Ok(extracted.len())
 }
 
 #[cfg(test)]

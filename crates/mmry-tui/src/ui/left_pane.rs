@@ -205,12 +205,6 @@ fn draw_hmlr_nav(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
         ),
         view_item("Memories", current == MiddleView::Memories, None),
         view_item(
-            "Bridge Blocks",
-            current == MiddleView::BridgeBlocks,
-            Some(app.bridge_blocks.len()),
-        ),
-        view_item("Facts", current == MiddleView::Facts, Some(app.facts.len())),
-        view_item(
             "Agent Events",
             current == MiddleView::AgentEvents,
             Some(app.agent_events.len()),

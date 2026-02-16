@@ -68,14 +68,6 @@ impl ServiceState {
         Arc::clone(&self.embedding_service)
     }
 
-    pub async fn unload_models(&self) {
-        let mut service_guard = self.embedding_service.lock().await;
-        if service_guard.is_some() {
-            tracing::info!("Unloading models due to inactivity");
-            *service_guard = None;
-        }
-    }
-
     pub async fn is_model_loaded(&self) -> bool {
         self.embedding_service.lock().await.is_some()
     }

@@ -21,39 +21,23 @@ use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use mmry_core::agents::AgentEvent;
-use mmry_core::agents::AgentRecord;
-use mmry_core::agents::BridgeBlock;
-use mmry_core::agents::FactRecord;
-use mmry_core::analysis::build_analyzer;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
-use mmry_core::database::graph_ops;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
-use mmry_core::federation::list_all_sources;
-use mmry_core::federation::search_federated;
-use mmry_core::federation::FederatedSearchOptions;
-use mmry_core::federation::StoreSource;
-use mmry_core::graph::Entity;
-use mmry_core::guardrails::GuardrailsAccumulator;
-use mmry_core::hmlr::get_or_create_human_agent;
-use mmry_core::hmlr::HmlrContext;
-use mmry_core::hmlr::HmlrPipeline;
 use mmry_core::memory::SourceAttribution;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use mmry_core::stores::export_all_stores_to_json;
 use mmry_core::stores::export_store_to_json;
-use mmry_core::stores::list_all_facts;
 use mmry_core::stores::list_all_stores;
 use mmry_core::stores::list_stores;
 use mmry_core::stores::move_memory_to_store;
 use mmry_core::stores::store_exists;
 use mmry_core::stores::validate_store_name;
 use mmry_core::stores::write_export_to_file;
-use mmry_core::stores::FactWithStore;
 use mmry_core::stores::MemoryWithStore;
 use mmry_core::stores::StoreInfo;
 use std::collections::HashSet;
@@ -108,8 +92,6 @@ pub struct App {
     sort_menu_index: usize,
     search_backup: Option<Vec<MemoryWithStore>>,
     pub memories: Vec<MemoryWithStore>,
-    pub bridge_blocks: Vec<BridgeBlock>,
-    pub facts: Vec<FactWithStore>,
     pub agent_events: Vec<AgentEvent>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
@@ -130,24 +112,10 @@ pub struct App {
     pub status_message: Option<String>,
     pub needs_redraw: bool,
 
-    /// Cached entities for the currently selected memory
-    pub selected_memory_entities: Vec<Entity>,
-    /// ID of the memory whose entities are cached
-    cached_entity_memory_id: Option<MemoryKey>,
-
-    /// HMLR enrichments for the currently selected memory
-    pub selected_memory_facts: Vec<FactRecord>,
-    pub selected_memory_bridge_block: Option<BridgeBlock>,
-    pub selected_memory_creator_agent: Option<AgentRecord>,
-    /// ID of the memory whose HMLR data is cached
-    cached_hmlr_memory_id: Option<MemoryKey>,
-
     /// Current store name (empty string means "All Stores")
     pub current_store: String,
     /// Whether we're viewing all stores
     pub viewing_all_stores: bool,
-    /// Optional override for search scope (local/remote sources)
-    search_scope_override: Option<Vec<StoreSource>>,
     /// Available stores (cached)
     pub available_stores: Vec<StoreInfo>,
     /// Shared embedding service (kept across store switches)
@@ -187,8 +155,6 @@ impl App {
             sort_menu_index: 0,
             search_backup: None,
             memories: Vec::new(),
-            bridge_blocks: Vec::new(),
-            facts: Vec::new(),
             agent_events: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
@@ -204,15 +170,8 @@ impl App {
             g_prefix: false,
             status_message: None,
             needs_redraw: false,
-            selected_memory_entities: Vec::new(),
-            cached_entity_memory_id: None,
-            selected_memory_facts: Vec::new(),
-            selected_memory_bridge_block: None,
-            selected_memory_creator_agent: None,
-            cached_hmlr_memory_id: None,
             current_store,
             viewing_all_stores: false,
-            search_scope_override: None,
             available_stores,
             embeddings,
             sparse_embeddings,
@@ -252,11 +211,7 @@ impl App {
         self.refresh_current_view().await?;
         self.middle_selection.reset();
         self.filter_state.clear();
-        self.search_backup = None;
-        self.selected_memory_entities.clear();
-        self.cached_entity_memory_id = None;
-
-        // Refresh available stores list
+        self.search_backup = None; // Refresh available stores list
         self.available_stores = list_stores(&self.config).unwrap_or_default();
 
         self.status_message = Some(format!("Switched to store: {store_name}"));
@@ -276,11 +231,7 @@ impl App {
         self.update_categories_and_tags();
         self.middle_selection.reset();
         self.filter_state.clear();
-        self.search_backup = None;
-        self.selected_memory_entities.clear();
-        self.cached_entity_memory_id = None;
-
-        // Refresh available stores list
+        self.search_backup = None; // Refresh available stores list
         self.available_stores = list_stores(&self.config).unwrap_or_default();
 
         self.status_message = Some("Viewing all stores".to_string());
@@ -360,20 +311,7 @@ impl App {
     }
 
     pub fn search_scope_display(&self) -> Option<String> {
-        let scope = self.search_scope_override.as_ref()?;
-        if scope.is_empty() {
-            return None;
-        }
-
-        let mut ids: Vec<String> = scope.iter().map(StoreSource::id).collect();
-        ids.sort();
-        ids.dedup();
-
-        if ids.len() <= 3 {
-            Some(ids.join(", "))
-        } else {
-            Some(format!("{} sources", ids.len()))
-        }
+        None
     }
 
     pub(crate) fn store_select_items(&self, query: &str) -> Vec<StoreSelectItem> {
@@ -391,17 +329,6 @@ impl App {
                 title: store.name.clone(),
                 detail: Some(mmry_core::stores::format_size(store.size_bytes)),
             });
-        }
-
-        if self.config.federation.enabled {
-            for remote in &self.config.federation.remotes {
-                let id = format!("remote:{}", remote.name);
-                items.push(StoreSelectItem {
-                    id: id.clone(),
-                    title: id,
-                    detail: Some(remote.base_url.clone()),
-                });
-            }
         }
 
         let query = query.trim();
@@ -452,31 +379,6 @@ impl App {
                     .index
                     .min(self.filtered_memories().len().saturating_sub(1));
             }
-            MiddleView::BridgeBlocks => {
-                self.bridge_blocks = operations::list_bridge_blocks(self.db.pool(), 200).await?;
-                self.middle_selection.index = self
-                    .middle_selection
-                    .index
-                    .min(self.bridge_blocks.len().saturating_sub(1));
-            }
-            MiddleView::Facts => {
-                if self.viewing_all_stores {
-                    self.facts = list_all_facts(&self.config, 200).await?;
-                } else {
-                    let store_facts = operations::list_recent_facts(self.db.pool(), 200).await?;
-                    self.facts = store_facts
-                        .into_iter()
-                        .map(|fact| FactWithStore {
-                            fact,
-                            store: self.current_store.clone(),
-                        })
-                        .collect();
-                }
-                self.middle_selection.index = self
-                    .middle_selection
-                    .index
-                    .min(self.facts.len().saturating_sub(1));
-            }
             MiddleView::AgentEvents => {
                 self.agent_events = operations::list_agent_events(self.db.pool(), 200).await?;
                 self.middle_selection.index = self
@@ -516,138 +418,11 @@ impl App {
             .copied()
     }
 
-    pub fn selected_bridge_block(&self) -> Option<&BridgeBlock> {
-        if self.middle_view != MiddleView::BridgeBlocks {
-            return None;
-        }
-        self.bridge_blocks.get(self.middle_selection.index)
-    }
-
-    pub fn selected_fact(&self) -> Option<&FactWithStore> {
-        if self.middle_view != MiddleView::Facts {
-            return None;
-        }
-        self.facts.get(self.middle_selection.index)
-    }
-
     pub fn selected_agent_event(&self) -> Option<&AgentEvent> {
         if self.middle_view != MiddleView::AgentEvents {
             return None;
         }
         self.agent_events.get(self.middle_selection.index)
-    }
-
-    /// Fetch entities for the currently selected memory (if not already cached)
-    pub async fn fetch_selected_memory_entities(&mut self) -> Result<()> {
-        if let Some(memory) = self.selected_memory() {
-            let key = MemoryKey {
-                id: memory.memory.id,
-                store: memory.store.clone(),
-            };
-
-            if Self::is_remote_store(&key.store) {
-                self.selected_memory_entities.clear();
-                self.cached_entity_memory_id = None;
-                return Ok(());
-            }
-
-            // Only fetch if we haven't cached this memory's entities
-            if self.cached_entity_memory_id.as_ref() != Some(&key) {
-                let id = key.id;
-                let store = key.store.clone();
-                self.selected_memory_entities = self
-                    .with_store_db(&store, move |db| {
-                        Self::boxed(async move {
-                            Ok(graph_ops::get_memory_entities(db.pool(), id).await?)
-                        })
-                    })
-                    .await?;
-                self.cached_entity_memory_id = Some(key);
-            }
-        } else {
-            self.selected_memory_entities.clear();
-            self.cached_entity_memory_id = None;
-        }
-        Ok(())
-    }
-
-    /// Fetch HMLR enrichments for the currently selected memory (if not already cached)
-    pub async fn fetch_selected_memory_hmlr(&mut self) -> Result<()> {
-        if let Some(memory) = self.selected_memory() {
-            let key = MemoryKey {
-                id: memory.memory.id,
-                store: memory.store.clone(),
-            };
-
-            if Self::is_remote_store(&key.store) {
-                self.selected_memory_facts.clear();
-                self.selected_memory_bridge_block = None;
-                self.selected_memory_creator_agent = None;
-                self.cached_hmlr_memory_id = None;
-                return Ok(());
-            }
-
-            // Only fetch if we haven't cached this memory's HMLR data
-            if self.cached_hmlr_memory_id.as_ref() != Some(&key) {
-                let memory_id = key.id;
-                let store = key.store.clone();
-
-                // Get agent events for this memory to find associated facts and bridge blocks
-                let events = self
-                    .with_store_db(&store, move |db| {
-                        Self::boxed(async move {
-                            Ok(
-                                operations::get_agent_events_for_memory(db.pool(), memory_id, 10)
-                                    .await?,
-                            )
-                        })
-                    })
-                    .await?;
-
-                // Get facts for this memory
-                self.selected_memory_facts = self
-                    .with_store_db(&store, move |db| {
-                        Self::boxed(async move {
-                            Ok(operations::get_facts_for_memory(db.pool(), memory_id, 20).await?)
-                        })
-                    })
-                    .await?;
-
-                // Get bridge block if any event has a span_id
-                self.selected_memory_bridge_block = None;
-                self.selected_memory_creator_agent = None;
-
-                for event in &events {
-                    // Get creator agent
-                    if self.selected_memory_creator_agent.is_none() {
-                        if let Ok(Some(agent)) =
-                            operations::get_agent(self.db.pool(), event.agent_id).await
-                        {
-                            self.selected_memory_creator_agent = Some(agent);
-                        }
-                    }
-
-                    // Get bridge block from span_id
-                    if self.selected_memory_bridge_block.is_none() {
-                        if let Some(span_id) = &event.span_id {
-                            if let Ok(Some(block)) =
-                                operations::get_bridge_block_by_span(self.db.pool(), span_id).await
-                            {
-                                self.selected_memory_bridge_block = Some(block);
-                            }
-                        }
-                    }
-                }
-
-                self.cached_hmlr_memory_id = Some(key);
-            }
-        } else {
-            self.selected_memory_facts.clear();
-            self.selected_memory_bridge_block = None;
-            self.selected_memory_creator_agent = None;
-            self.cached_hmlr_memory_id = None;
-        }
-        Ok(())
     }
 
     pub fn filtered_memories(&self) -> Vec<&MemoryWithStore> {
@@ -696,7 +471,7 @@ impl App {
 
     pub fn get_left_pane_item_count(&self) -> usize {
         if self.middle_view != MiddleView::Memories {
-            return 5;
+            return 3;
         }
         // FILTERS header (1) + All/Recent/Important (3) + separator (1)
         // + MEMORY TYPES header (1) + Episodic/Semantic/Procedural (3) + separator (1)
@@ -710,9 +485,7 @@ impl App {
         if self.middle_view != MiddleView::Memories {
             return match self.left_selection.index {
                 1 => Some(LeftPaneItem::Category("Memories".to_string())),
-                2 => Some(LeftPaneItem::Category("Bridge Blocks".to_string())),
-                3 => Some(LeftPaneItem::Category("Facts".to_string())),
-                4 => Some(LeftPaneItem::Category("Agent Events".to_string())),
+                2 => Some(LeftPaneItem::Category("Agent Events".to_string())),
                 _ => Some(LeftPaneItem::Separator),
             };
         }
@@ -801,52 +574,10 @@ impl App {
                 let result = self.handle_key_action(action).await;
 
                 // After key handling, check if we need to update entity cache
-                if self.middle_view == MiddleView::Memories
-                    && self.right_pane_view == RightPaneView::Graph
-                {
-                    self.fetch_selected_memory_entities().await?;
-                }
-
-                // Fetch HMLR data for preview pane
-                if self.middle_view == MiddleView::Memories
-                    && self.right_pane_view == RightPaneView::Preview
-                {
-                    self.fetch_selected_memory_hmlr().await?;
-                }
-
                 return result;
             }
             AppEvent::Resize(_, _) => {}
-            AppEvent::Tick => {
-                // On tick, fetch entities if in graph view and cache is stale
-                if self.middle_view == MiddleView::Memories
-                    && self.right_pane_view == RightPaneView::Graph
-                {
-                    if let Some(memory) = self.selected_memory() {
-                        let key = MemoryKey {
-                            id: memory.memory.id,
-                            store: memory.store.clone(),
-                        };
-                        if self.cached_entity_memory_id.as_ref() != Some(&key) {
-                            self.fetch_selected_memory_entities().await?;
-                        }
-                    }
-                }
-                // On tick, fetch HMLR data if in preview view and cache is stale
-                if self.middle_view == MiddleView::Memories
-                    && self.right_pane_view == RightPaneView::Preview
-                {
-                    if let Some(memory) = self.selected_memory() {
-                        let key = MemoryKey {
-                            id: memory.memory.id,
-                            store: memory.store.clone(),
-                        };
-                        if self.cached_hmlr_memory_id.as_ref() != Some(&key) {
-                            self.fetch_selected_memory_hmlr().await?;
-                        }
-                    }
-                }
-            }
+            AppEvent::Tick => {}
         }
         Ok(true)
     }
@@ -1048,29 +779,13 @@ impl App {
             }
 
             KeyAction::Char('v') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Graph view is only available for memories".to_string());
-                } else {
-                    self.right_pane_view = match self.right_pane_view {
-                        RightPaneView::Preview => RightPaneView::Graph,
-                        RightPaneView::Graph => RightPaneView::Preview,
-                    };
-                    self.status_message = Some(format!(
-                        "View: {}",
-                        match self.right_pane_view {
-                            RightPaneView::Preview => "Preview",
-                            RightPaneView::Graph => "Graph",
-                        }
-                    ));
-                }
+                self.right_pane_view = RightPaneView::Preview;
+                self.status_message = Some("View: Preview".to_string());
             }
 
             KeyAction::Char('b') => {
                 self.middle_view = match self.middle_view {
-                    MiddleView::Memories => MiddleView::BridgeBlocks,
-                    MiddleView::BridgeBlocks => MiddleView::Facts,
-                    MiddleView::Facts => MiddleView::AgentEvents,
+                    MiddleView::Memories => MiddleView::AgentEvents,
                     MiddleView::AgentEvents => MiddleView::Memories,
                 };
                 self.left_selection.index = 0;
@@ -1078,8 +793,6 @@ impl App {
                 self.refresh_current_view().await?;
                 self.status_message = Some(match self.middle_view {
                     MiddleView::Memories => "View: Memories".to_string(),
-                    MiddleView::BridgeBlocks => "View: Bridge Blocks".to_string(),
-                    MiddleView::Facts => "View: Facts".to_string(),
                     MiddleView::AgentEvents => "View: Agent Events".to_string(),
                 });
             }
@@ -1098,11 +811,7 @@ impl App {
                     } else {
                         let current_idx = self.current_store_index();
                         let mut selected = std::collections::BTreeSet::new();
-                        if let Some(scope) = &self.search_scope_override {
-                            for source in scope {
-                                selected.insert(source.id());
-                            }
-                        } else if self.viewing_all_stores {
+                        if self.viewing_all_stores {
                             selected.insert(ALL_LOCAL_STORES_ID.to_string());
                         } else {
                             selected.insert(self.current_store.clone());
@@ -1199,70 +908,24 @@ impl App {
         }
         let limit = self.config.search.default_limit as i64;
         let mode = self.current_search_mode();
-        let sources = if let Some(scope) = self.search_scope_override.as_ref() {
-            scope.clone()
-        } else if self.viewing_all_stores {
-            list_all_sources(&self.config)?
-        } else {
-            vec![StoreSource::Local {
-                store: self.current_store.clone(),
-            }]
-        };
 
-        let results = if sources.len() == 1
-            && matches!(&sources[0], StoreSource::Local { store } if store == &self.current_store)
-        {
-            let results = self
-                .search_service
-                .search_with_options(query, None, limit, Some(mode), None, false)
-                .await?;
-            results
-                .into_iter()
-                .map(|memory| MemoryWithStore {
-                    memory,
-                    store: self.current_store.clone(),
-                })
-                .collect::<Vec<_>>()
-        } else {
-            search_federated(FederatedSearchOptions {
-                config: &self.config,
-                sources,
-                query,
-                category: None,
-                limit,
-                mode,
-                rerank: false,
-                include_expired: false,
-                embeddings: Arc::clone(&self.embeddings),
-                sparse_embeddings: Arc::clone(&self.sparse_embeddings),
-                reranker: Arc::clone(&self.reranker),
-            })
+        let results = self
+            .search_service
+            .search_with_options(query, None, limit, Some(mode), None, false)
             .await?
-        };
-
-        let mut guard = GuardrailsAccumulator::new(&self.config.guardrails);
-        let results = guard.filter_memories_with_store(results);
-        let guardrails = guard.summary();
+            .into_iter()
+            .map(|memory| MemoryWithStore {
+                memory,
+                store: self.current_store.clone(),
+            })
+            .collect::<Vec<_>>();
 
         if results.is_empty() {
-            if guardrails.blocked_memories > 0 {
-                self.status_message = Some(format!(
-                    "No memories found for \"{query}\" (guardrails filtered {})",
-                    guardrails.blocked_memories
-                ));
-            } else {
-                self.status_message = Some(format!("No memories found for \"{query}\""));
-            }
+            self.status_message = Some(format!("No memories found for \"{query}\""));
         } else {
             self.memories = results;
             self.middle_selection.reset();
-            let mut message = format!("Showing {} result(s) for \"{query}\"", self.memories.len());
-            if guardrails.blocked_memories > 0 {
-                message.push_str(&format!(
-                    " (guardrails filtered {})",
-                    guardrails.blocked_memories
-                ));
-            }
+            let message = format!("Showing {} result(s) for \"{query}\"", self.memories.len());
             self.status_message = Some(message);
         }
 
@@ -1653,51 +1316,13 @@ impl App {
             Ok(edited) => {
                 match editor::parse_edited_memory(&edited, None) {
                     Ok(mut new_memory) => {
-                        let analyzer = if self.config.analyzer.enabled {
-                            Some(build_analyzer(&self.config))
-                        } else {
-                            None
-                        };
                         if new_memory.source_attribution.is_none() {
                             new_memory.source_attribution = Some(SourceAttribution::default_user());
                             new_memory.recompute_trust_metrics();
                         }
-                        if let Some(analyzer) = analyzer.as_ref() {
-                            if new_memory.expires_at.is_none() {
-                                if let Ok(Some(inferred)) =
-                                    analyzer.infer_expiration(&new_memory.content).await
-                                {
-                                    new_memory.expires_at = Some(inferred);
-                                }
-                            }
-                        }
 
                         let new_id = new_memory.id;
                         operations::insert_memory(self.db.pool(), &new_memory).await?;
-
-                        // HMLR enrichment (if enabled)
-                        let mut hmlr_info = String::new();
-                        if self.config.hmlr.enabled {
-                            let analyzer = analyzer.unwrap_or_else(|| build_analyzer(&self.config));
-                            let pipeline = HmlrPipeline::new(self.config.hmlr.clone(), analyzer);
-                            if let Ok(human_id) =
-                                get_or_create_human_agent(self.db.pool(), &self.config).await
-                            {
-                                let context = HmlrContext::for_human(human_id);
-                                if let Ok(result) = pipeline
-                                    .enrich_memory(self.db.pool(), &new_memory, context)
-                                    .await
-                                {
-                                    if !result.facts.is_empty() {
-                                        hmlr_info
-                                            .push_str(&format!(" | {} facts", result.facts.len()));
-                                    }
-                                    if result.bridge_block.is_some() {
-                                        hmlr_info.push_str(" | block assigned");
-                                    }
-                                }
-                            }
-                        }
 
                         self.refresh_current_view().await?;
 
@@ -1713,9 +1338,8 @@ impl App {
                         }
 
                         self.status_message = Some(format!(
-                            "Created memory {}{}",
-                            new_id.to_string().chars().take(8).collect::<String>(),
-                            hmlr_info
+                            "Created memory {}",
+                            new_id.to_string().chars().take(8).collect::<String>()
                         ));
                         self.needs_redraw = true;
                     }
@@ -1995,38 +1619,17 @@ impl App {
                 }
 
                 if selected.len() == 1 && selected.contains(ALL_LOCAL_STORES_ID) {
-                    self.search_scope_override = None;
                     self.switch_to_all_stores().await?;
                     return Ok(true);
                 }
 
                 if selected.len() == 1 {
                     let only = selected.iter().next().expect("len=1");
-                    if let Some(store) = only.strip_prefix("remote:") {
-                        self.search_scope_override = Some(vec![StoreSource::Remote {
-                            remote: store.to_string(),
-                        }]);
-                        self.status_message = Some(format!("Search scope set to: {only}"));
-                        return Ok(true);
-                    }
-
-                    self.search_scope_override = None;
                     self.switch_store(only).await?;
                     return Ok(true);
                 }
 
-                let mut scope = Vec::new();
-                for id in selected {
-                    if let Some(remote) = id.strip_prefix("remote:") {
-                        scope.push(StoreSource::Remote {
-                            remote: remote.to_string(),
-                        });
-                    } else {
-                        scope.push(StoreSource::Local { store: id });
-                    }
-                }
-                self.search_scope_override = Some(scope);
-                self.status_message = Some("Search scope updated".to_string());
+                self.status_message = Some("Select a single store".to_string());
                 return Ok(true);
             }
             KeyAction::Backspace => {
@@ -2419,8 +2022,6 @@ mod tests {
             sort_menu_index: 0,
             search_backup: None,
             memories: Vec::new(),
-            bridge_blocks: Vec::new(),
-            facts: Vec::new(),
             agent_events: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
@@ -2436,15 +2037,8 @@ mod tests {
             g_prefix: false,
             status_message: None,
             needs_redraw: false,
-            selected_memory_entities: Vec::new(),
-            cached_entity_memory_id: None,
-            selected_memory_facts: Vec::new(),
-            selected_memory_bridge_block: None,
-            selected_memory_creator_agent: None,
-            cached_hmlr_memory_id: None,
             current_store: "test".to_string(),
             viewing_all_stores: false,
-            search_scope_override: None,
             available_stores,
             embeddings,
             sparse_embeddings,
