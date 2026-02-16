@@ -111,6 +111,7 @@ mmry-tui
 
 [media]
 # icon = "assets/icon.svg"
+logo = "logo/mmry_logo_white.svg"
 screenshot = "banner.png"
 
 # ============================================================================
