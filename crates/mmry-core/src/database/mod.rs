@@ -546,12 +546,17 @@ impl Database {
 
         if let Some(sql) = existing_sql {
             if !sql.contains(&format!("float[{dimension}]")) {
-                return Err(crate::Error::Config(format!(
-                    "memory_embeddings virtual table dimension mismatch (expected {dimension}). \
-                     Drop the database or re-run `mmry init` after removing the existing table."
-                )));
+                warn!(
+                    "memory_embeddings dimension mismatch (expected {dimension}), \
+                     recreating virtual table. Existing embeddings will be re-backfilled."
+                );
+                sqlx::query("DROP TABLE memory_embeddings")
+                    .execute(pool)
+                    .await?;
+                // Fall through to create with correct dimension
+            } else {
+                return Ok(());
             }
-            return Ok(());
         }
 
         let create_sql = format!(

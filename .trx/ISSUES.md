@@ -20,6 +20,8 @@
 
 ### [mmry-xrbv] Learnings & Context System - distill agent sessions into actionable rules with confidence tracking, inspired by cass-memory (P1, epic)
 
+### [mmry-rzzd] agntz memory add fails with memory_embeddings dimension mismatch (P2, bug)
+
 ### [mmry-8rhe] Research RLM/DSPy.RLM memory systems vs OM (LongMemEval) and assess fit for mmry/observational-memory (P2, task)
 
 ### [mmry-a1e9] Remove unused crate dependencies from Cargo.toml files after HMLR removal (rig-core, ort NER models, etc) (P2, chore)
