@@ -26,8 +26,6 @@
 
 ### [mmry-a1e9] Remove unused crate dependencies from Cargo.toml files after HMLR removal (rig-core, ort NER models, etc) (P2, chore)
 
-### [mmry-kgen] Clean up agents.rs and operations.rs: remove BridgeBlock, FactRecord, UserProfileEntry types and their DB operations (dead code after HMLR removal) (P2, task)
-
 ### [mmry-yay2.6] Trust weighting by agent kind - human-added memories/learnings get higher initial trust than agent-extracted ones. Configurable per agent-kind. (P2, feature)
 
 ### [mmry-yay2.5] Agent filtering in search and context - --agent flag to filter memories/learnings by source agent, --agent-kind to filter by type (human/coding_agent/review_agent) (P2, feature)
@@ -64,3 +62,4 @@
 - [mmry-yay2.3] Extend AgentRecord with repo, workspace, session_id fields in agent_meta JSON. Support structured metadata beyond just name/kind. (closed 2026-02-08)
 - [mmry-yay2.2] Add agent/agent_kind/agent_meta fields to MCP MemoryAddArgs and gRPC SearchRequest/AddRequest so MCP clients can identify themselves (closed 2026-02-08)
 - [mmry-yay2.1] Add --agent, --agent-kind, --agent-meta flags to 'mmry add' CLI with 'human' as default. Agent record is get-or-created automatically. (closed 2026-02-08)
+- [mmry-kgen] Clean up agents.rs and operations.rs: remove BridgeBlock, FactRecord, UserProfileEntry types and their DB operations (dead code after HMLR removal) (closed )
