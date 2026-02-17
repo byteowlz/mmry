@@ -1,9 +1,6 @@
-pub mod graph_ops;
 pub mod operations;
 pub mod schema;
 
-use crate::agents::fact_fingerprint;
-use crate::agents::FactCategory;
 use sqlite_vec::sqlite3_vec_init;
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
@@ -212,39 +209,6 @@ impl Database {
                 merged_count,
                 legacy_count as u64 - merged_count
             );
-
-            // Also merge entities if they exist
-            let _ = sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO entities (id, name, type, metadata)
-                SELECT id, name, type, metadata FROM legacy.entities
-                WHERE id NOT IN (SELECT id FROM entities)
-                "#,
-            )
-            .execute(&mut *conn)
-            .await;
-
-            // Merge memory_entities relationships
-            let _ = sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO memory_entities (memory_id, entity_id)
-                SELECT memory_id, entity_id FROM legacy.memory_entities
-                WHERE (memory_id, entity_id) NOT IN (SELECT memory_id, entity_id FROM memory_entities)
-                "#,
-            )
-            .execute(&mut *conn)
-            .await;
-
-            // Merge relationships
-            let _ = sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO relationships (id, from_entity, to_entity, relation_type, strength)
-                SELECT id, from_entity, to_entity, relation_type, strength FROM legacy.relationships
-                WHERE id NOT IN (SELECT id FROM relationships)
-                "#,
-            )
-            .execute(&mut *conn)
-            .await;
         }
 
         // Detach the legacy database
@@ -336,7 +300,6 @@ impl Database {
                 .execute(pool)
                 .await?;
 
-            // Drop old index and create new one
             sqlx::query("DROP INDEX IF EXISTS idx_memories_namespace")
                 .execute(pool)
                 .await?;
@@ -384,7 +347,6 @@ impl Database {
                 .execute(pool)
                 .await?;
 
-            // Add indices for chunking
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_id)")
                 .execute(pool)
                 .await?;
@@ -444,7 +406,7 @@ impl Database {
             .execute(pool)
             .await?;
 
-        // Ensure agent and provenance tables exist
+        // Ensure agent tables exist
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS agents (
@@ -483,219 +445,87 @@ impl Database {
             .execute(pool)
             .await?;
 
-        // Ensure bridge block ledger exists
+        // Learnings table
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS bridge_blocks (
-                block_id TEXT PRIMARY KEY,
-                span_id TEXT,
-                topic_label TEXT,
-                keywords JSON DEFAULT '[]',
-                status TEXT,
-                exit_reason TEXT,
-                content_json JSON,
-                agent_id TEXT REFERENCES agents(id),
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_bridge_blocks_span ON bridge_blocks(span_id)")
-            .execute(pool)
-            .await?;
-
-        // Ensure fact and profile tables exist
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS facts (
+            CREATE TABLE IF NOT EXISTS learnings (
                 id TEXT PRIMARY KEY,
-                fact_key TEXT NOT NULL,
-                fact_value TEXT NOT NULL,
-                category TEXT DEFAULT 'General',
-                evidence_snippet TEXT,
-                source_span TEXT,
-                turn_id TEXT,
-                source_chunk_id TEXT,
-                source_paragraph_id TEXT,
-                observed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                recency_score REAL DEFAULT 1.0,
-                metadata JSON DEFAULT '{}',
+                content TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'guiding',
+                category TEXT NOT NULL DEFAULT 'general',
+                scope TEXT NOT NULL DEFAULT 'global',
+                scope_key TEXT,
+                maturity TEXT NOT NULL DEFAULT 'candidate',
+                pinned BOOLEAN NOT NULL DEFAULT 0,
+                helpful_count INTEGER NOT NULL DEFAULT 0,
+                harmful_count INTEGER NOT NULL DEFAULT 0,
+                effective_score REAL NOT NULL DEFAULT 0.0,
                 agent_id TEXT REFERENCES agents(id),
-                fact_fingerprint TEXT
+                source_sessions JSON DEFAULT '[]',
+                reasoning TEXT,
+                tags JSON DEFAULT '[]',
+                metadata JSON DEFAULT '{}',
+                embedding BLOB,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             "#,
         )
         .execute(pool)
         .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_key ON facts(fact_key)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings(category)")
             .execute(pool)
             .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_observed ON facts(observed_at DESC)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_kind ON learnings(kind)")
             .execute(pool)
             .await?;
-
-        // Add fact category and provenance columns if missing (from migration 20251212000000)
-        let facts_has_category: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('facts') WHERE name='category'",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if !facts_has_category {
-            tracing::info!("Adding category and provenance columns to facts table...");
-            sqlx::query("ALTER TABLE facts ADD COLUMN category TEXT DEFAULT 'General'")
-                .execute(pool)
-                .await?;
-            sqlx::query("ALTER TABLE facts ADD COLUMN evidence_snippet TEXT")
-                .execute(pool)
-                .await?;
-            sqlx::query("ALTER TABLE facts ADD COLUMN source_chunk_id TEXT")
-                .execute(pool)
-                .await?;
-            sqlx::query("ALTER TABLE facts ADD COLUMN source_paragraph_id TEXT")
-                .execute(pool)
-                .await?;
-            sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category)")
-                .execute(pool)
-                .await?;
-            sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_chunk ON facts(source_chunk_id)")
-                .execute(pool)
-                .await?;
-            tracing::info!("Fact category and provenance columns added");
-        }
-
-        // Add fingerprint column if missing (from migration 20251222000000)
-        let facts_has_fingerprint: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('facts') WHERE name='fact_fingerprint'",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if !facts_has_fingerprint {
-            tracing::info!("Adding fact_fingerprint column to facts table...");
-            sqlx::query("ALTER TABLE facts ADD COLUMN fact_fingerprint TEXT")
-                .execute(pool)
-                .await?;
-            tracing::info!("fact_fingerprint column added");
-        }
-
-        // Backfill fingerprints and merge duplicates before enforcing uniqueness.
-        let needs_fingerprint_backfill: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM facts WHERE fact_fingerprint IS NULL OR fact_fingerprint = ''",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if needs_fingerprint_backfill {
-            tracing::info!("Backfilling fact_fingerprint for existing facts...");
-
-            let mut tx = pool.begin().await?;
-            let rows = sqlx::query(
-                r#"
-                SELECT id, fact_key, fact_value, category, agent_id
-                FROM facts
-                "#,
-            )
-            .fetch_all(&mut *tx)
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_maturity ON learnings(maturity)")
+            .execute(pool)
             .await?;
-
-            for row in rows {
-                let id: String = row.try_get("id")?;
-                let fact_key: String = row.try_get("fact_key")?;
-                let fact_value: String = row.try_get("fact_value")?;
-                let category_raw: String = row
-                    .try_get("category")
-                    .unwrap_or_else(|_| "General".to_string());
-                let agent_id_raw: Option<String> = row.try_get("agent_id").ok().flatten();
-
-                let agent_id = agent_id_raw.and_then(|s| Uuid::parse_str(&s).ok());
-                let category = FactCategory::parse(&category_raw);
-                let fingerprint = fact_fingerprint(category, &fact_key, &fact_value, agent_id);
-
-                sqlx::query("UPDATE facts SET fact_fingerprint = ? WHERE id = ?")
-                    .bind(fingerprint)
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-
-            // Merge duplicate fingerprints (keep most recent observed_at)
-            let dup_rows = sqlx::query(
-                r#"
-                SELECT fact_fingerprint
-                FROM facts
-                WHERE fact_fingerprint IS NOT NULL AND fact_fingerprint <> ''
-                GROUP BY fact_fingerprint
-                HAVING COUNT(*) > 1
-                "#,
-            )
-            .fetch_all(&mut *tx)
-            .await?;
-
-            for row in dup_rows {
-                let fingerprint: String = row.try_get("fact_fingerprint")?;
-                let keep_id: Option<String> = sqlx::query_scalar(
-                    r#"
-                    SELECT id
-                    FROM facts
-                    WHERE fact_fingerprint = ?
-                    ORDER BY observed_at DESC
-                    LIMIT 1
-                    "#,
-                )
-                .bind(&fingerprint)
-                .fetch_optional(&mut *tx)
-                .await?;
-
-                if let Some(keep_id) = keep_id {
-                    sqlx::query("DELETE FROM facts WHERE fact_fingerprint = ? AND id <> ?")
-                        .bind(&fingerprint)
-                        .bind(keep_id)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-            }
-
-            tx.commit().await?;
-            tracing::info!("fact_fingerprint backfill complete");
-        }
-
         sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_fingerprint ON facts(fact_fingerprint)",
+            "CREATE INDEX IF NOT EXISTS idx_learnings_score ON learnings(effective_score DESC)",
         )
         .execute(pool)
         .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id)")
             .execute(pool)
             .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_chunk ON facts(source_chunk_id)")
-            .execute(pool)
-            .await?;
-
-        // Add bridge block metadata columns if missing (from migration 20251212100000)
-        let bridge_has_open_loops: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('bridge_blocks') WHERE name='open_loops'",
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_learnings_scope ON learnings(scope, scope_key)",
         )
-        .fetch_one(pool)
+        .execute(pool)
         .await?;
 
-        if !bridge_has_open_loops {
-            tracing::info!(
-                "Adding open_loops and decisions_made columns to bridge_blocks table..."
-            );
-            sqlx::query("ALTER TABLE bridge_blocks ADD COLUMN open_loops JSON DEFAULT '[]'")
-                .execute(pool)
-                .await?;
-            sqlx::query("ALTER TABLE bridge_blocks ADD COLUMN decisions_made JSON DEFAULT '[]'")
-                .execute(pool)
-                .await?;
-            tracing::info!("Bridge block metadata columns added");
-        }
+        // Learning feedback events
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS learning_feedback (
+                id TEXT PRIMARY KEY,
+                learning_id TEXT NOT NULL REFERENCES learnings(id) ON DELETE CASCADE,
+                feedback_type TEXT NOT NULL CHECK(feedback_type IN ('helpful', 'harmful')),
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                session_path TEXT,
+                reason TEXT,
+                agent_id TEXT REFERENCES agents(id)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
 
-        // Add bridge_block_id FK to memories table if missing (from migration 20260117000000)
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_learning_feedback_learning ON learning_feedback(learning_id)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_learning_feedback_timestamp ON learning_feedback(timestamp)",
+        )
+        .execute(pool)
+        .await?;
+
+        // Check if bridge_block_id column exists, add if not (for HMLR feature)
         let bridge_block_id_exists: bool = sqlx::query_scalar(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='bridge_block_id'",
         )
@@ -704,60 +534,14 @@ impl Database {
 
         if !bridge_block_id_exists {
             tracing::info!("Adding bridge_block_id column to memories table...");
-            sqlx::query(
-                "ALTER TABLE memories ADD COLUMN bridge_block_id TEXT REFERENCES bridge_blocks(block_id)",
-            )
-            .execute(pool)
-            .await?;
-            sqlx::query(
-                "CREATE INDEX IF NOT EXISTS idx_memories_bridge_block ON memories(bridge_block_id)",
-            )
-            .execute(pool)
-            .await?;
-            sqlx::query(
-                "CREATE INDEX IF NOT EXISTS idx_memories_bridge_block_created ON memories(bridge_block_id, created_at DESC)",
-            )
-            .execute(pool)
-            .await?;
-            tracing::info!("bridge_block_id column and indices added");
-        }
-
-        // Add embedding column to bridge_blocks for semantic routing (from migration 20260117100000)
-        let bridge_has_embedding: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('bridge_blocks') WHERE name='embedding'",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if !bridge_has_embedding {
-            tracing::info!("Adding embedding column to bridge_blocks table...");
-            sqlx::query("ALTER TABLE bridge_blocks ADD COLUMN embedding BLOB")
+            sqlx::query("ALTER TABLE memories ADD COLUMN bridge_block_id TEXT")
                 .execute(pool)
                 .await?;
-            sqlx::query(
-                "CREATE INDEX IF NOT EXISTS idx_bridge_blocks_has_embedding ON bridge_blocks(block_id) WHERE embedding IS NOT NULL",
-            )
-            .execute(pool)
-            .await?;
-            sqlx::query(
-                "CREATE INDEX IF NOT EXISTS idx_bridge_blocks_agent_status ON bridge_blocks(agent_id, status)",
-            )
-            .execute(pool)
-            .await?;
-            tracing::info!("Bridge block embedding column and indices added");
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_bridge_block ON memories(bridge_block_id)")
+                .execute(pool)
+                .await?;
+            tracing::info!("bridge_block_id column added");
         }
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS user_profiles (
-                id TEXT PRIMARY KEY,
-                profile JSON NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
 
         Ok(())
     }
@@ -780,12 +564,17 @@ impl Database {
 
         if let Some(sql) = existing_sql {
             if !sql.contains(&format!("float[{dimension}]")) {
-                return Err(crate::Error::Config(format!(
-                    "memory_embeddings virtual table dimension mismatch (expected {dimension}). \
-                     Drop the database or re-run `mmry init` after removing the existing table."
-                )));
+                warn!(
+                    "memory_embeddings dimension mismatch (expected {dimension}), \
+                     recreating virtual table. Existing embeddings will be re-backfilled."
+                );
+                sqlx::query("DROP TABLE memory_embeddings")
+                    .execute(pool)
+                    .await?;
+                // Fall through to create with correct dimension
+            } else {
+                return Ok(());
             }
-            return Ok(());
         }
 
         let create_sql = format!(
@@ -965,8 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_memory_fields_preserves_relations_and_optionally_clears_embeddings(
-    ) -> crate::Result<()> {
+    async fn update_memory_fields_and_optionally_clears_embeddings() -> crate::Result<()> {
         let temp = tempdir().expect("create temp dir");
         let db_path = temp.path().join("memories.db");
 
@@ -978,21 +766,6 @@ mod tests {
             "default".to_string(),
         );
         operations::insert_memory(db.pool(), &memory).await?;
-
-        // Add an entity relation that should survive updates.
-        let entity_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO entities (id, name, type, metadata) VALUES (?, ?, ?, ?)")
-            .bind(entity_id.to_string())
-            .bind("entity")
-            .bind("test")
-            .bind("{}")
-            .execute(db.pool())
-            .await?;
-        sqlx::query("INSERT INTO memory_entities (memory_id, entity_id) VALUES (?, ?)")
-            .bind(memory.id.to_string())
-            .bind(entity_id.to_string())
-            .execute(db.pool())
-            .await?;
 
         // Seed an embedding and ensure the vector table is populated.
         let embedding = vec![0.3, 0.2, 0.1];
@@ -1007,10 +780,6 @@ mod tests {
         memory.updated_at = Utc::now();
         operations::update_memory_fields(db.pool(), &memory, false).await?;
 
-        let rel_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_entities")
-            .fetch_one(db.pool())
-            .await?;
-        assert_eq!(rel_count, 1);
         let emb_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_embeddings")
             .fetch_one(db.pool())
             .await?;
@@ -1171,12 +940,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_provenance_and_bridge_blocks_roundtrip() -> crate::Result<()> {
+    async fn agent_and_events_roundtrip() -> crate::Result<()> {
         use crate::agents::AgentEvent;
         use crate::agents::AgentRecord;
-        use crate::agents::BridgeBlock;
-        use crate::agents::FactRecord;
-        use crate::agents::UserProfileEntry;
 
         let temp = tempdir().expect("create temp dir");
         let db_path = temp.path().join("agent.db");
@@ -1187,156 +953,13 @@ mod tests {
         agent.description = Some("integration test agent".to_string());
         operations::upsert_agent(db.pool(), &agent).await?;
 
-        let mut block = BridgeBlock::new();
-        block.span_id = Some("span-1".to_string());
-        block.topic_label = Some("topic".to_string());
-        block.keywords = vec!["k1".to_string(), "k2".to_string()];
-        block.agent_id = Some(agent.id);
-        operations::upsert_bridge_block(db.pool(), &block).await?;
-
-        let blocks = operations::list_bridge_blocks_by_span(db.pool(), Some("span-1"), 10).await?;
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].span_id.as_deref(), Some("span-1"));
-        assert_eq!(blocks[0].agent_id, Some(agent.id));
-
-        let mut fact = FactRecord::new("key", "value");
-        fact.agent_id = Some(agent.id);
-        operations::upsert_fact(db.pool(), &fact).await?;
-
-        let facts = operations::list_facts_by_key(db.pool(), "key", 10).await?;
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].fact_value, "value");
-        assert_eq!(facts[0].agent_id, Some(agent.id));
-
-        let recent_facts = operations::list_recent_facts(db.pool(), 5).await?;
-        assert!(!recent_facts.is_empty());
-
         let mut event = AgentEvent::new(agent.id, "route");
         event.payload = json!({ "query": "hello" });
         operations::record_agent_event(db.pool(), &event).await?;
 
-        let profile = UserProfileEntry::new(json!({"name": "tester"}));
-        operations::set_user_profile(db.pool(), &profile).await?;
-        let loaded = operations::get_user_profile(db.pool(), profile.id).await?;
-        assert!(loaded.is_some());
-
         let listed_events = operations::list_agent_events(db.pool(), 5).await?;
         assert_eq!(listed_events.len(), 1);
         assert_eq!(listed_events[0].agent_id, agent.id);
-
-        db.close().await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn upsert_fact_dedupes_by_fingerprint() -> crate::Result<()> {
-        use crate::agents::AgentRecord;
-        use crate::agents::FactRecord;
-
-        let temp = tempdir().expect("create temp dir");
-        let db_path = temp.path().join("facts-dedupe.db");
-
-        let db = Database::init(&db_path, TEST_DIM).await?;
-
-        let agent = AgentRecord::new("tester", "sidecar");
-        operations::upsert_agent(db.pool(), &agent).await?;
-
-        let mut f1 = FactRecord::new("deadline", "Friday");
-        f1.category = FactCategory::Definition;
-        f1.agent_id = Some(agent.id);
-        operations::upsert_fact(db.pool(), &f1).await?;
-
-        let mut f2 = FactRecord::new("Deadline", "friday.");
-        f2.category = FactCategory::Definition;
-        f2.agent_id = Some(agent.id);
-        operations::upsert_fact(db.pool(), &f2).await?;
-
-        let count = operations::count_facts(db.pool()).await?;
-        assert_eq!(count, 1);
-
-        db.close().await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn migrates_legacy_facts_and_merges_duplicates() -> crate::Result<()> {
-        let temp = tempdir().expect("create temp dir");
-        let db_path = temp.path().join("legacy-facts.db");
-        let url = format!("sqlite://{}?mode=rwc", db_path.display());
-
-        // Create an older schema facts table (no category/provenance/fingerprint).
-        let pool = SqlitePool::connect(&url).await?;
-        sqlx::query(
-            r#"
-            CREATE TABLE facts (
-                id TEXT PRIMARY KEY,
-                fact_key TEXT NOT NULL,
-                fact_value TEXT NOT NULL,
-                source_span TEXT,
-                turn_id TEXT,
-                observed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                recency_score REAL DEFAULT 1.0,
-                metadata JSON DEFAULT '{}',
-                agent_id TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await?;
-
-        let id1 = Uuid::new_v4().to_string();
-        let id2 = Uuid::new_v4().to_string();
-        sqlx::query(
-            r#"
-            INSERT INTO facts (id, fact_key, fact_value, observed_at, recency_score, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&id1)
-        .bind("deadline")
-        .bind("Friday")
-        .bind("2025-01-01T00:00:00Z")
-        .bind(1.0_f32)
-        .bind("{}")
-        .execute(&pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO facts (id, fact_key, fact_value, observed_at, recency_score, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&id2)
-        .bind("Deadline")
-        .bind("friday.")
-        .bind("2025-02-01T00:00:00Z")
-        .bind(1.0_f32)
-        .bind("{}")
-        .execute(&pool)
-        .await?;
-
-        drop(pool);
-
-        // Init should migrate and merge duplicates.
-        let db = Database::init(&db_path, TEST_DIM).await?;
-
-        let count = operations::count_facts(db.pool()).await?;
-        assert_eq!(count, 1);
-
-        let has_fingerprint: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('facts') WHERE name='fact_fingerprint'",
-        )
-        .fetch_one(db.pool())
-        .await?;
-        assert!(has_fingerprint);
-
-        let idx_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='idx_facts_fingerprint'",
-        )
-        .fetch_one(db.pool())
-        .await?;
-        assert!(idx_exists);
 
         db.close().await;
         Ok(())
@@ -1399,20 +1022,13 @@ mod tests {
         assert!(has_sparse);
         assert!(has_chunk_index);
 
-        // Verify agent/fact tables exist
-        let bridge_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='bridge_blocks'",
+        // Verify learnings table exists
+        let learnings_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='learnings'",
         )
         .fetch_one(db.pool())
         .await?;
-        let facts_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='facts'",
-        )
-        .fetch_one(db.pool())
-        .await?;
-
-        assert!(bridge_exists);
-        assert!(facts_exists);
+        assert!(learnings_exists);
 
         // Second init should be idempotent
         let _ = Database::init(&db_path, TEST_DIM).await?;

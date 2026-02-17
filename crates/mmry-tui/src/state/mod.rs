@@ -16,8 +16,6 @@ pub enum Pane {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MiddleView {
     Memories,
-    BridgeBlocks,
-    Facts,
     AgentEvents,
 }
 
@@ -27,8 +25,6 @@ pub enum RightPaneView {
     /// Show memory details/preview
     #[default]
     Preview,
-    /// Show entity graph for the selected memory
-    Graph,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

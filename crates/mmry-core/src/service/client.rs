@@ -60,8 +60,6 @@ pub struct EnrichMemoryResponse {
     pub importance: i32,
     /// Facts extracted (if HMLR enabled)
     pub facts_extracted: usize,
-    /// Bridge block ID (if HMLR enabled and routing active)
-    pub bridge_block_id: Option<String>,
     /// Whether this started a new topic
     pub is_new_topic: bool,
     /// Created timestamp
@@ -91,10 +89,6 @@ pub struct EnrichExistingMemoryResponse {
     pub memory_id: String,
     /// Facts extracted
     pub facts_extracted: usize,
-    /// Extracted facts details
-    pub facts: Vec<crate::agents::FactRecord>,
-    /// Bridge block ID (if routing active)
-    pub bridge_block_id: Option<String>,
     /// Whether this started a new topic
     pub is_new_topic: bool,
 }

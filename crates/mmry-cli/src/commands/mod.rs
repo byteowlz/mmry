@@ -2,17 +2,13 @@ pub mod add;
 #[cfg(feature = "bench")]
 pub mod bench;
 pub mod export;
-pub mod guard;
-pub mod hmlr;
 pub mod import;
 pub mod ingest;
 pub mod init;
 pub mod ls;
 pub mod models;
-pub mod profile;
 pub mod prune;
 pub mod reembed;
-pub mod reextract;
 pub mod rerankers;
 pub mod rm;
 pub mod search;

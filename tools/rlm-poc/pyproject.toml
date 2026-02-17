@@ -1,0 +1,14 @@
+[project]
+name = "rlm-poc"
+version = "0.1.0"
+description = "RLM proof of concept for session analysis and learning extraction"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "httpx>=0.28.1",
+    "openai>=2.17.0",
+]
+
+[project.scripts]
+rlm-analyze = "main:main"
+rlm-interactive = "interactive:main"

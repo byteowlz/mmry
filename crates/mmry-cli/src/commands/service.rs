@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::Subcommand;
-use mmry_core::analysis::check_analyzer_health;
 use mmry_core::config::Config;
 use mmry_core::service::manager::ServiceManager;
 use mmry_core::service::manager::ServiceStatus;
@@ -34,17 +33,22 @@ enum ServiceCommands {
 
     /// Reload the service after config changes (stop then start)
     Reload,
+
+    /// Restart the service (stop then start)
+    Restart,
 }
 
 pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()> {
     if cmd.check_llm {
         let config = Config::load_with_path(config_path.clone())?;
-        match check_analyzer_health(&config).await {
-            Ok(()) => println!("✓ Analyzer endpoint reachable"),
-            Err(e) => {
-                println!("✗ Analyzer health check failed: {e}");
-                return Err(e.into());
+        if config.analyzer.enabled {
+            if let Some(ref endpoint) = config.analyzer.endpoint {
+                println!("Analyzer configured: endpoint={endpoint}");
+            } else {
+                println!("Analyzer enabled but no endpoint configured");
             }
+        } else {
+            println!("Analyzer is not enabled in config");
         }
     }
 
@@ -91,14 +95,17 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
             }
         }
 
-        ServiceCommands::Reload => {
-            println!("Reloading mmry service...");
+        cmd @ (ServiceCommands::Reload | ServiceCommands::Restart) => {
+            let is_reload = matches!(cmd, ServiceCommands::Reload);
+            let label = if is_reload { "Reloading" } else { "Restarting" };
+            let past = if is_reload { "reloaded" } else { "restarted" };
+            println!("{label} mmry service...");
             match manager.stop() {
                 Ok(()) => {
-                    println!("✓ Service stopped");
+                    println!("  Service stopped");
                 }
                 Err(e) => {
-                    println!("✗ Failed to stop service: {e}");
+                    println!("Failed to stop service: {e}");
                     std::process::exit(1);
                 }
             }
@@ -110,19 +117,19 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     match manager.status() {
                         ServiceStatus::Running { pid } => {
-                            println!("✓ Service reloaded (PID: {pid})");
+                            println!("Service {past} (PID: {pid})");
                             if let Ok(port) = manager.read_port() {
                                 println!("  Listening on: 127.0.0.1:{port}");
                             }
                         }
                         _ => {
-                            println!("✗ Service did not come back up after reload");
+                            println!("Service did not come back up after {past}");
                             std::process::exit(1);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("✗ Failed to start service after reload: {e}");
+                    println!("Failed to start service after {past}: {e}");
                     std::process::exit(1);
                 }
             }

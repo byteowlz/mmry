@@ -9,28 +9,16 @@ use mcp_spec::protocol::ServerCapabilities;
 use mcp_spec::resource::Resource;
 use mcp_spec::tool::Tool;
 use mcp_spec::ResourceContents;
-use mmry_core::agents::FactCategory;
+use mmry_core::agents::AgentIdentity;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
-use mmry_core::context_pack::build_context_pack;
-use mmry_core::context_pack::ContextPackBudgets;
-use mmry_core::context_pack::ContextPackOptions;
-use mmry_core::conversation::persist_summary;
-use mmry_core::conversation::summarize_and_prune;
-use mmry_core::conversation::ConversationTurn;
-use mmry_core::conversation::SummarizePruneOptions;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
-use mmry_core::guardrails::GuardrailsAccumulator;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
 use mmry_core::memory::SourceEntry;
 use mmry_core::memory::SourceKind;
-use mmry_core::profile_blocks::ProfileBlockPatchOp;
-use mmry_core::profile_blocks::ProfileBlockScope;
-use mmry_core::profile_blocks::ProfileBlockWriteContext;
-use mmry_core::profile_blocks::ProfileBlocksService;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
@@ -55,7 +43,6 @@ struct MmryMcpInner {
     embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     reranker: Arc<RerankerService>,
-    profile_blocks: ProfileBlocksService,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +111,12 @@ struct MemoryAddArgs {
     sparse_embed: Option<bool>,
     #[serde(default)]
     store: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    agent_kind: Option<String>,
+    #[serde(default)]
+    agent_meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,122 +137,9 @@ struct MemoryUpdateArgs {
 }
 
 #[derive(Debug, Deserialize)]
-struct BridgeBlocksListArgs {
-    #[serde(default)]
-    span_id: Option<String>,
-    #[serde(default)]
-    limit: Option<i64>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct AgentEventsListArgs {
     #[serde(default)]
     limit: Option<i64>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FactsListRecentArgs {
-    #[serde(default)]
-    limit: Option<i64>,
-    #[serde(default)]
-    redact_secrets: Option<bool>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProfileBlocksListArgs {
-    user_id: String,
-    #[serde(default)]
-    store: Option<String>,
-    #[serde(default)]
-    scope: Option<ProfileBlockScope>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProfileBlocksGetArgs {
-    user_id: String,
-    block: String,
-    #[serde(default)]
-    scope: Option<ProfileBlockScope>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProfileBlocksSetArgs {
-    user_id: String,
-    block: String,
-    content: String,
-    #[serde(default)]
-    scope: Option<ProfileBlockScope>,
-    #[serde(default)]
-    actor_id: Option<String>,
-    #[serde(default)]
-    span_id: Option<String>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProfileBlocksPatchArgs {
-    user_id: String,
-    block: String,
-    ops: Vec<ProfileBlockPatchOp>,
-    #[serde(default)]
-    scope: Option<ProfileBlockScope>,
-    #[serde(default)]
-    actor_id: Option<String>,
-    #[serde(default)]
-    span_id: Option<String>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContextPackArgs {
-    query: String,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    limit: Option<i64>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    rerank: Option<bool>,
-    #[serde(default)]
-    owner_id: Option<String>,
-    #[serde(default)]
-    span_id: Option<String>,
-    #[serde(default)]
-    budgets: Option<ContextPackBudgets>,
-    #[serde(default)]
-    redact_secrets: Option<bool>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SummarizePruneArgs {
-    turns: Vec<ConversationTurn>,
-    #[serde(default)]
-    max_turns: Option<usize>,
-    #[serde(default)]
-    summary_max_words: Option<usize>,
-    #[serde(default)]
-    per_turn_max_words: Option<usize>,
-    #[serde(default)]
-    persist: Option<bool>,
-    #[serde(default)]
-    agent_id: Option<String>,
-    #[serde(default)]
-    span_id: Option<String>,
-    #[serde(default)]
-    category: Option<String>,
     #[serde(default)]
     store: Option<String>,
 }
@@ -273,7 +153,6 @@ impl MmryMcpRouter {
         let embeddings = Arc::new(Mutex::new(EmbeddingServiceWrapper::new(&config)?));
         let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
         let reranker = Arc::new(RerankerService::from_config(&config.search)?);
-        let profile_blocks = ProfileBlocksService::from_config(&config);
 
         Ok(Self {
             inner: Arc::new(MmryMcpInner {
@@ -283,7 +162,6 @@ impl MmryMcpRouter {
                 embeddings,
                 sparse_embeddings,
                 reranker,
-                profile_blocks,
             }),
         })
     }
@@ -397,21 +275,18 @@ impl MmryMcpRouter {
 
     fn classify_memory(content: &str) -> MemoryType {
         let content_lower = content.to_lowercase();
-
         if content_lower.contains("step")
             || content_lower.contains("using:")
             || content_lower.contains("how to")
         {
             return MemoryType::Procedural;
         }
-
         if content_lower.contains(" is ")
             || content_lower.contains(" are ")
             || content_lower.starts_with("i ")
         {
             return MemoryType::Semantic;
         }
-
         MemoryType::Episodic
     }
 
@@ -424,7 +299,6 @@ impl MmryMcpRouter {
     async fn tool_search(&self, args: SearchArgs) -> Result<Vec<Content>, ToolError> {
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
         let mode = Self::parse_search_mode(args.mode.as_deref())?;
-
         let limit = args
             .limit
             .unwrap_or(self.inner.config.search.default_limit as i64)
@@ -455,21 +329,13 @@ impl MmryMcpRouter {
             memory.sparse_embedding = None;
         }
 
-        let mut guard = GuardrailsAccumulator::new(&self.inner.config.guardrails);
-        let results = guard.filter_memories(results);
-        let guardrails = guard.summary();
-
         if let Some(db) = db_guard {
             db.close().await;
         }
 
         self.json_content(
             "mmry://tools/search",
-            json!({
-                "store": store,
-                "memories": results,
-                "guardrails": guardrails,
-            }),
+            json!({ "store": store, "memories": results }),
         )
     }
 
@@ -487,10 +353,7 @@ impl MmryMcpRouter {
 
         self.json_content(
             "mmry://tools/memory/get",
-            json!({
-                "store": store,
-                "memory": Self::strip_embeddings(memory),
-            }),
+            json!({ "store": store, "memory": Self::strip_embeddings(memory) }),
         )
     }
 
@@ -529,6 +392,17 @@ impl MmryMcpRouter {
         }
 
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
+
+        let agent_identity = AgentIdentity {
+            name: args.agent,
+            kind: args.agent_kind,
+            meta: args.agent_meta,
+        };
+        let agent = agent_identity
+            .resolve(&pool)
+            .await
+            .map_err(|e| ToolError::ExecutionError(format!("agent resolution failed: {e}")))?;
+
         let category = args
             .category
             .unwrap_or_else(|| self.inner.config.memory.default_category.clone());
@@ -580,6 +454,7 @@ impl MmryMcpRouter {
             json!({
                 "store": store,
                 "memory": Self::strip_embeddings(memory),
+                "agent": { "name": agent.name, "kind": agent.kind, "meta": agent.metadata },
             }),
         )
     }
@@ -660,11 +535,7 @@ impl MmryMcpRouter {
 
         self.json_content(
             "mmry://tools/memory/update",
-            json!({
-                "store": store,
-                "memory": Self::strip_embeddings(updated),
-                "clear_embeddings": clear_embeddings,
-            }),
+            json!({ "store": store, "memory": Self::strip_embeddings(updated), "clear_embeddings": clear_embeddings }),
         )
     }
 
@@ -681,30 +552,13 @@ impl MmryMcpRouter {
 
         self.json_content(
             "mmry://tools/memory/delete",
-            json!({
-                "store": store,
-                "deleted": deleted,
-            }),
+            json!({ "store": store, "deleted": deleted }),
         )
     }
 
     async fn tool_stores_list(&self) -> Result<Vec<Content>, ToolError> {
         let stores = mmry_core::stores::list_stores(&self.inner.config)
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-        let remotes = self
-            .inner
-            .config
-            .federation
-            .remotes
-            .iter()
-            .map(|r| {
-                json!({
-                    "name": r.name,
-                    "base_url": r.base_url,
-                    "store": r.store,
-                })
-            })
-            .collect::<Vec<_>>();
 
         self.json_content(
             "mmry://tools/stores/list",
@@ -714,30 +568,6 @@ impl MmryMcpRouter {
                     "is_default": s.is_default,
                     "size_bytes": s.size_bytes,
                 })).collect::<Vec<_>>(),
-                "remotes": remotes,
-            }),
-        )
-    }
-
-    async fn tool_bridge_blocks_list(
-        &self,
-        args: BridgeBlocksListArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let limit = args.limit.unwrap_or(25).max(1);
-        let blocks = operations::list_bridge_blocks_by_span(&pool, args.span_id.as_deref(), limit)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/hmlr/bridge_blocks/list",
-            json!({
-                "store": store,
-                "bridge_blocks": blocks,
             }),
         )
     }
@@ -757,321 +587,8 @@ impl MmryMcpRouter {
         }
 
         self.json_content(
-            "mmry://tools/hmlr/agent_events/list",
-            json!({
-                "store": store,
-                "agent_events": events,
-            }),
-        )
-    }
-
-    async fn tool_facts_list_recent(
-        &self,
-        args: FactsListRecentArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let limit = args.limit.unwrap_or(50).max(1);
-        let mut facts = operations::list_recent_facts(&pool, limit)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if args.redact_secrets.unwrap_or(false) {
-            facts.retain(|f| f.category != FactCategory::Secret);
-        }
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/hmlr/facts/list_recent",
-            json!({
-                "store": store,
-                "facts": facts,
-            }),
-        )
-    }
-
-    async fn tool_profile_blocks_list(
-        &self,
-        args: ProfileBlocksListArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let user_id = Self::parse_uuid("user_id", &args.user_id)?;
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let mut blocks = self
-            .inner
-            .profile_blocks
-            .list_blocks(&pool, user_id)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(scope) = args.scope {
-            blocks.retain(|b| b.scope == scope);
-        }
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/profile/blocks/list",
-            json!({
-                "store": store,
-                "blocks": blocks,
-            }),
-        )
-    }
-
-    async fn tool_profile_blocks_get(
-        &self,
-        args: ProfileBlocksGetArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let user_id = Self::parse_uuid("user_id", &args.user_id)?;
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let scope = args.scope.unwrap_or(ProfileBlockScope::Project);
-        let block = self
-            .inner
-            .profile_blocks
-            .get_block(&pool, user_id, &args.block, scope)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/profile/blocks/get",
-            json!({
-                "store": store,
-                "block": block,
-            }),
-        )
-    }
-
-    async fn tool_profile_blocks_set(
-        &self,
-        args: ProfileBlocksSetArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let user_id = Self::parse_uuid("user_id", &args.user_id)?;
-        let actor_id = args
-            .actor_id
-            .as_deref()
-            .map(|raw| Self::parse_uuid("actor_id", raw))
-            .transpose()?
-            .unwrap_or(user_id);
-
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let scope = args.scope.unwrap_or(ProfileBlockScope::Project);
-        let block = self
-            .inner
-            .profile_blocks
-            .set_block(
-                &pool,
-                user_id,
-                &args.block,
-                args.content,
-                ProfileBlockWriteContext {
-                    scope,
-                    actor_id,
-                    span_id: args.span_id,
-                },
-            )
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/profile/blocks/set",
-            json!({
-                "store": store,
-                "block": block,
-            }),
-        )
-    }
-
-    async fn tool_profile_blocks_patch(
-        &self,
-        args: ProfileBlocksPatchArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let user_id = Self::parse_uuid("user_id", &args.user_id)?;
-        let actor_id = args
-            .actor_id
-            .as_deref()
-            .map(|raw| Self::parse_uuid("actor_id", raw))
-            .transpose()?
-            .unwrap_or(user_id);
-
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let scope = args.scope.unwrap_or(ProfileBlockScope::Project);
-        let block = self
-            .inner
-            .profile_blocks
-            .patch_block(
-                &pool,
-                user_id,
-                &args.block,
-                args.ops,
-                ProfileBlockWriteContext {
-                    scope,
-                    actor_id,
-                    span_id: args.span_id,
-                },
-            )
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/profile/blocks/patch",
-            json!({
-                "store": store,
-                "block": block,
-            }),
-        )
-    }
-
-    async fn tool_context_pack(&self, args: ContextPackArgs) -> Result<Vec<Content>, ToolError> {
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-
-        let limit = args
-            .limit
-            .unwrap_or(self.inner.config.search.default_limit as i64)
-            .max(1);
-        let mode = Self::parse_search_mode(args.mode.as_deref())?.unwrap_or(SearchMode::Hybrid);
-        let rerank = args
-            .rerank
-            .unwrap_or(self.inner.config.search.rerank_enabled);
-        let owner_id = args
-            .owner_id
-            .as_deref()
-            .map(|raw| Self::parse_uuid("owner_id", raw))
-            .transpose()?;
-
-        let search = SearchService::new(
-            pool.clone(),
-            self.inner.config.search.clone(),
-            Arc::clone(&self.inner.embeddings),
-            Arc::clone(&self.inner.sparse_embeddings),
-            Arc::clone(&self.inner.reranker),
-        );
-
-        let pack = build_context_pack(
-            &pool,
-            &self.inner.profile_blocks,
-            &search,
-            ContextPackOptions {
-                query: &args.query,
-                category: args.category.as_deref(),
-                limit,
-                mode,
-                rerank,
-                store: Some(&store),
-                owner_id,
-                span_id: args.span_id.as_deref(),
-                budgets: args.budgets.unwrap_or_default(),
-                redact_secrets: args.redact_secrets.unwrap_or(false),
-                guardrails: self.inner.config.guardrails.clone(),
-            },
-        )
-        .await
-        .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/context_pack/build",
-            json!({
-                "store": store,
-                "pack": pack,
-            }),
-        )
-    }
-
-    async fn tool_conversation_summarize_prune(
-        &self,
-        args: SummarizePruneArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let mut opts = SummarizePruneOptions::default();
-        if let Some(max_turns) = args.max_turns {
-            opts.max_turns = max_turns.max(1);
-        }
-        if let Some(summary_max_words) = args.summary_max_words {
-            opts.summary_max_words = summary_max_words;
-        }
-        if let Some(per_turn_max_words) = args.per_turn_max_words {
-            opts.per_turn_max_words = per_turn_max_words;
-        }
-
-        let result = summarize_and_prune(args.turns, opts.clone());
-        let store_label = args
-            .store
-            .as_deref()
-            .unwrap_or(&self.inner.default_store)
-            .to_string();
-
-        let persist = args.persist.unwrap_or(false);
-        let mut persisted_memory_id = None;
-        let mut persisted_event_id = None;
-
-        if persist {
-            if result.summary.trim().is_empty() {
-                return Err(ToolError::InvalidParameters(
-                    "Nothing to persist: summary is empty (no pruning occurred)".into(),
-                ));
-            }
-
-            let agent_id = args.agent_id.as_deref().ok_or_else(|| {
-                ToolError::InvalidParameters("agent_id is required when persist=true".into())
-            })?;
-            let agent_id = Self::parse_uuid("agent_id", agent_id)?;
-            let category = args
-                .category
-                .unwrap_or_else(|| "conversation_summary".to_string());
-
-            let (pool, db_guard, _) = self.pool_for_store(args.store.as_deref()).await?;
-            let persisted = persist_summary(
-                &pool,
-                agent_id,
-                args.span_id,
-                result.summary.clone(),
-                category,
-                json!({
-                    "pruned_count": result.pruned_count,
-                    "retained_count": result.retained.len(),
-                    "summary_max_words": opts.summary_max_words,
-                    "per_turn_max_words": opts.per_turn_max_words,
-                }),
-            )
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-            persisted_memory_id = Some(persisted.memory.id.to_string());
-            persisted_event_id = Some(persisted.event.id.to_string());
-
-            if let Some(db) = db_guard {
-                db.close().await;
-            }
-        }
-
-        self.json_content(
-            "mmry://tools/conversation/summarize_prune",
-            json!({
-                "store": store_label,
-                "summary": result.summary,
-                "retained": result.retained,
-                "pruned_count": result.pruned_count,
-                "persisted_memory_id": persisted_memory_id,
-                "persisted_event_id": persisted_event_id,
-            }),
+            "mmry://tools/agent_events/list",
+            json!({ "store": store, "agent_events": events }),
         )
     }
 }
@@ -1082,7 +599,8 @@ impl mcp_server::Router for MmryMcpRouter {
     }
 
     fn instructions(&self) -> String {
-        "Use mmry tools to store and retrieve memories. Prefer mmry.context_pack.build for building prompt context, and mmry.profile.blocks.* for persona/human blocks. Tool outputs are JSON resources.".to_string()
+        "Use mmry tools to store and retrieve memories. Tool outputs are JSON resources."
+            .to_string()
     }
 
     fn capabilities(&self) -> ServerCapabilities {
@@ -1110,12 +628,10 @@ impl mcp_server::Router for MmryMcpRouter {
             ),
             Tool::new(
                 "mmry.stores.list",
-                "List local stores and configured federation remotes.",
+                "List local stores.",
                 json!({
                     "type": "object",
-                    "properties": {
-                        "store": { "type": ["string", "null"], "description": "Ignored; present for schema symmetry." }
-                    },
+                    "properties": {},
                     "additionalProperties": false
                 }),
             ),
@@ -1153,12 +669,15 @@ impl mcp_server::Router for MmryMcpRouter {
                     "properties": {
                         "content": { "type": "string" },
                         "category": { "type": ["string", "null"] },
-                        "memory_type": { "type": ["string", "null"], "description": "episodic|semantic|procedural (defaults to auto-classify)" },
+                        "memory_type": { "type": ["string", "null"], "description": "episodic|semantic|procedural" },
                         "tags": { "type": ["array", "null"], "items": { "type": "string" } },
                         "importance": { "type": ["integer", "null"], "minimum": 1, "maximum": 10 },
                         "embed": { "type": ["boolean", "null"], "default": true },
                         "sparse_embed": { "type": ["boolean", "null"], "default": true },
-                        "store": { "type": ["string", "null"] }
+                        "store": { "type": ["string", "null"] },
+                        "agent": { "type": ["string", "null"] },
+                        "agent_kind": { "type": ["string", "null"] },
+                        "agent_meta": { "type": ["object", "null"] }
                     },
                     "required": ["content"],
                     "additionalProperties": false
@@ -1200,7 +719,7 @@ impl mcp_server::Router for MmryMcpRouter {
                         "category": { "type": ["string", "null"] },
                         "tags": { "type": ["array", "null"], "items": { "type": "string" } },
                         "importance": { "type": ["integer", "null"], "minimum": 1, "maximum": 10 },
-                        "clear_embeddings": { "type": ["boolean", "null"], "description": "If omitted, clears embeddings when content changes." },
+                        "clear_embeddings": { "type": ["boolean", "null"] },
                         "store": { "type": ["string", "null"] }
                     },
                     "required": ["id"],
@@ -1221,20 +740,7 @@ impl mcp_server::Router for MmryMcpRouter {
                 }),
             ),
             Tool::new(
-                "mmry.hmlr.bridge_blocks.list",
-                "List bridge blocks, optionally filtered by span_id.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "span_id": { "type": ["string", "null"] },
-                        "limit": { "type": ["integer", "null"], "minimum": 1 },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.hmlr.agent_events.list",
+                "mmry.agent_events.list",
                 "List recent agent events.",
                 json!({
                     "type": "object",
@@ -1242,121 +748,6 @@ impl mcp_server::Router for MmryMcpRouter {
                         "limit": { "type": ["integer", "null"], "minimum": 1 },
                         "store": { "type": ["string", "null"] }
                     },
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.hmlr.facts.list_recent",
-                "List recent facts.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "limit": { "type": ["integer", "null"], "minimum": 1 },
-                        "redact_secrets": { "type": ["boolean", "null"], "default": false },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.profile.blocks.list",
-                "List profile blocks for a user.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "user_id": { "type": "string" },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["user_id"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.profile.blocks.get",
-                "Get a profile block by name.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "user_id": { "type": "string" },
-                        "block": { "type": "string" },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["user_id", "block"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.profile.blocks.set",
-                "Set a profile block (audited via agent_events).",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "user_id": { "type": "string" },
-                        "block": { "type": "string" },
-                        "content": { "type": "string" },
-                        "actor_id": { "type": ["string", "null"] },
-                        "span_id": { "type": ["string", "null"] },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["user_id", "block", "content"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.profile.blocks.patch",
-                "Patch a profile block with safe line-based ops (audited via agent_events).",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "user_id": { "type": "string" },
-                        "block": { "type": "string" },
-                        "ops": { "type": "array" },
-                        "actor_id": { "type": ["string", "null"] },
-                        "span_id": { "type": ["string", "null"] },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["user_id", "block", "ops"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.context_pack.build",
-                "Build a deterministic context pack for a query.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string" },
-                        "category": { "type": ["string", "null"] },
-                        "limit": { "type": ["integer", "null"], "minimum": 1 },
-                        "mode": { "type": ["string", "null"], "description": "hybrid|keyword|fuzzy|semantic|bm25|sparse" },
-                        "rerank": { "type": ["boolean", "null"] },
-                        "owner_id": { "type": ["string", "null"] },
-                        "span_id": { "type": ["string", "null"] },
-                        "budgets": { "type": ["object", "null"] },
-                        "redact_secrets": { "type": ["boolean", "null"], "default": false },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["query"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.conversation.summarize_prune",
-                "Summarize older turns into a compact summary and keep the last N turns. Optionally persist the summary as a memory + agent_event.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "turns": { "type": "array" },
-                        "max_turns": { "type": ["integer", "null"], "minimum": 1 },
-                        "summary_max_words": { "type": ["integer", "null"], "minimum": 0 },
-                        "per_turn_max_words": { "type": ["integer", "null"], "minimum": 0 },
-                        "persist": { "type": ["boolean", "null"], "default": false },
-                        "agent_id": { "type": ["string", "null"], "description": "Required when persist=true" },
-                        "span_id": { "type": ["string", "null"] },
-                        "category": { "type": ["string", "null"] },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["turns"],
                     "additionalProperties": false
                 }),
             ),
@@ -1379,10 +770,7 @@ impl mcp_server::Router for MmryMcpRouter {
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_search(args).await
                 }
-                "mmry.stores.list" => {
-                    let _ = arguments;
-                    router.tool_stores_list().await
-                }
+                "mmry.stores.list" => router.tool_stores_list().await,
                 "mmry.memory.get" => {
                     let args: MemoryIdArgs = serde_json::from_value(arguments)
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
@@ -1413,50 +801,10 @@ impl mcp_server::Router for MmryMcpRouter {
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_memory_delete(args).await
                 }
-                "mmry.hmlr.bridge_blocks.list" => {
-                    let args: BridgeBlocksListArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_bridge_blocks_list(args).await
-                }
-                "mmry.hmlr.agent_events.list" => {
+                "mmry.agent_events.list" => {
                     let args: AgentEventsListArgs = serde_json::from_value(arguments)
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_agent_events_list(args).await
-                }
-                "mmry.hmlr.facts.list_recent" => {
-                    let args: FactsListRecentArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_facts_list_recent(args).await
-                }
-                "mmry.profile.blocks.list" => {
-                    let args: ProfileBlocksListArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_profile_blocks_list(args).await
-                }
-                "mmry.profile.blocks.get" => {
-                    let args: ProfileBlocksGetArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_profile_blocks_get(args).await
-                }
-                "mmry.profile.blocks.set" => {
-                    let args: ProfileBlocksSetArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_profile_blocks_set(args).await
-                }
-                "mmry.profile.blocks.patch" => {
-                    let args: ProfileBlocksPatchArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_profile_blocks_patch(args).await
-                }
-                "mmry.context_pack.build" => {
-                    let args: ContextPackArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_context_pack(args).await
-                }
-                "mmry.conversation.summarize_prune" => {
-                    let args: SummarizePruneArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_conversation_summarize_prune(args).await
                 }
                 _ => Err(ToolError::NotFound(tool_name)),
             }
@@ -1574,6 +922,9 @@ mod tests {
                 embed: Some(false),
                 sparse_embed: Some(false),
                 store: None,
+                agent: None,
+                agent_kind: None,
+                agent_meta: None,
             })
             .await?;
         let add_json = extract_json(add);
@@ -1595,95 +946,6 @@ mod tests {
             search_json["memories"][0]["id"].as_str().unwrap(),
             id.as_str()
         );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn mcp_router_profile_blocks_roundtrip() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let mut config = Config::default();
-        config.stores.directory = temp.path().join("stores");
-        config.stores.default = "test".to_string();
-        config.database.path = temp.path().join("legacy.db");
-        config.embeddings.enabled = false;
-        config.sparse_embeddings.enabled = false;
-
-        let router = MmryMcpRouter::new(config).await?;
-        let user_id = Uuid::new_v4();
-
-        let set = router
-            .tool_profile_blocks_set(ProfileBlocksSetArgs {
-                user_id: user_id.to_string(),
-                block: "persona".to_string(),
-                content: "line1\nline2".to_string(),
-                scope: Some(ProfileBlockScope::Global),
-                actor_id: None,
-                span_id: None,
-                store: None,
-            })
-            .await?;
-        let set_json = extract_json(set);
-        assert_eq!(set_json["block"]["name"].as_str(), Some("persona"));
-        assert_eq!(set_json["block"]["scope"].as_str(), Some("global"));
-
-        let patch = router
-            .tool_profile_blocks_patch(ProfileBlocksPatchArgs {
-                user_id: user_id.to_string(),
-                block: "persona".to_string(),
-                ops: vec![ProfileBlockPatchOp::Insert {
-                    before_line: 2,
-                    text: "inserted".to_string(),
-                }],
-                scope: Some(ProfileBlockScope::Global),
-                actor_id: None,
-                span_id: None,
-                store: None,
-            })
-            .await?;
-        let patch_json = extract_json(patch);
-        assert_eq!(
-            patch_json["block"]["content"].as_str(),
-            Some("line1\ninserted\nline2")
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn mcp_router_summarize_prune_roundtrip() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let mut config = Config::default();
-        config.stores.directory = temp.path().join("stores");
-        config.stores.default = "test".to_string();
-        config.database.path = temp.path().join("legacy.db");
-        config.embeddings.enabled = false;
-        config.sparse_embeddings.enabled = false;
-
-        let router = MmryMcpRouter::new(config).await?;
-        let turns = (0..6)
-            .map(|idx| ConversationTurn {
-                role: Some(if idx % 2 == 0 { "user" } else { "assistant" }.to_string()),
-                content: format!("turn {idx} has a bunch of words for summarization"),
-            })
-            .collect::<Vec<_>>();
-
-        let resp = router
-            .tool_conversation_summarize_prune(SummarizePruneArgs {
-                turns,
-                max_turns: Some(2),
-                summary_max_words: Some(20),
-                per_turn_max_words: Some(5),
-                persist: Some(false),
-                agent_id: None,
-                span_id: None,
-                category: None,
-                store: None,
-            })
-            .await?;
-
-        let json = extract_json(resp);
-        assert_eq!(json["pruned_count"].as_u64(), Some(4));
-        assert_eq!(json["retained"].as_array().unwrap().len(), 2);
-        assert!(!json["summary"].as_str().unwrap_or_default().is_empty());
         Ok(())
     }
 }
