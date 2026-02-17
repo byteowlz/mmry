@@ -387,6 +387,38 @@ pub async fn export_store_to_json(
     })
 }
 
+/// Export memories from all stores to JSON
+pub async fn export_all_stores_to_json(config: &Config) -> crate::Result<ExportResult> {
+    let stores = list_stores(config)?;
+    let mut all_memories: Vec<ExportedMemory> = Vec::new();
+
+    for store_info in stores {
+        let db = Database::init_store(config, Some(&store_info.name)).await?;
+        let pool = db.pool();
+
+        let memories = crate::database::operations::list_memories(pool, None, i64::MAX).await?;
+
+        for memory in memories {
+            let mut exported = ExportedMemory::from(&memory);
+            exported.store = Some(store_info.name.clone());
+            all_memories.push(exported);
+        }
+
+        db.close().await;
+    }
+
+    // Sort by created_at descending
+    all_memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    Ok(ExportResult {
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        store: "all".to_string(),
+        version: 1,
+        memory_count: all_memories.len(),
+        memories: all_memories,
+    })
+}
+
 /// Write export result to a file
 pub fn write_export_to_file(export: &ExportResult, path: &std::path::Path) -> crate::Result<()> {
     let json = serde_json::to_string_pretty(export)?;

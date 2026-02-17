@@ -52,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         AppMode::StoreSelect(state) => draw_store_select(f, app, state),
         AppMode::StoreCreate(ref input) => draw_store_create(f, input),
         AppMode::MoveToStore(_, idx) => draw_move_to_store(f, app, *idx),
-        AppMode::Export(_) => draw_export_dialog(f, app),
+        AppMode::Export(all) => draw_export_dialog(f, app, *all),
         _ => {}
     }
 }
@@ -462,7 +462,7 @@ fn draw_move_to_store(f: &mut Frame, app: &App, selected_idx: usize) {
 }
 
 
-fn draw_export_dialog(f: &mut Frame, app: &App) {
+fn draw_export_dialog(f: &mut Frame, app: &App, export_all: bool) {
     use ratatui::style::Color;
     use ratatui::style::Modifier;
     use ratatui::style::Style;
@@ -473,9 +473,25 @@ fn draw_export_dialog(f: &mut Frame, app: &App) {
     use ratatui::widgets::Clear;
     use ratatui::widgets::Paragraph;
 
-    let area = centered_rect(50, 20, f.area());
+    let area = centered_rect(50, 30, f.area());
 
     f.render_widget(Clear, area);
+
+    let current_style = if !export_all {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let all_style = if export_all {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
 
     let content = vec![
         Line::from(""),
@@ -484,10 +500,22 @@ fn draw_export_dialog(f: &mut Frame, app: &App) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
-        Line::from(vec![Span::styled(
-            format!("  Store: {}", app.current_store_display()),
-            Style::default().fg(Color::Cyan),
-        )]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(if !export_all { "> " } else { "  " }, current_style),
+            Span::styled("[c]", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" Current store ({})", app.current_store_display()),
+                current_style,
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(if export_all { "> " } else { "  " }, all_style),
+            Span::styled("[a]", Style::default().fg(Color::Yellow)),
+            Span::styled(" All stores", all_style),
+        ]),
+        Line::from(""),
         Line::from(vec![Span::styled(
             format!("  Memories to export: {}", app.memories.len()),
             Style::default().fg(Color::DarkGray),

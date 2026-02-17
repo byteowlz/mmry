@@ -2,6 +2,8 @@
 
 ## Open
 
+### [mmry-s6v9] Embedding service down: error sending request for url http://localhost:8081/v1/embeddings (P1, bug)
+
 ### [mmry-sfxf] Configurable LLM models for extraction/consolidation - support local models (Ollama, LM Studio) and API providers. Configure via config.toml [analyzer] section. (P1, feature)
 
 ### [mmry-kj8d] Service hstry integration - watch for new hstry sessions, auto-trigger learning extraction in background. (P1, feature)
