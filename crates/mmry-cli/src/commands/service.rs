@@ -33,6 +33,9 @@ enum ServiceCommands {
 
     /// Reload the service after config changes (stop then start)
     Reload,
+
+    /// Restart the service (stop then start)
+    Restart,
 }
 
 pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()> {
@@ -92,14 +95,17 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
             }
         }
 
-        ServiceCommands::Reload => {
-            println!("Reloading mmry service...");
+        cmd @ (ServiceCommands::Reload | ServiceCommands::Restart) => {
+            let is_reload = matches!(cmd, ServiceCommands::Reload);
+            let label = if is_reload { "Reloading" } else { "Restarting" };
+            let past = if is_reload { "reloaded" } else { "restarted" };
+            println!("{label} mmry service...");
             match manager.stop() {
                 Ok(()) => {
-                    println!("✓ Service stopped");
+                    println!("  Service stopped");
                 }
                 Err(e) => {
-                    println!("✗ Failed to stop service: {e}");
+                    println!("Failed to stop service: {e}");
                     std::process::exit(1);
                 }
             }
@@ -111,19 +117,19 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     match manager.status() {
                         ServiceStatus::Running { pid } => {
-                            println!("✓ Service reloaded (PID: {pid})");
+                            println!("Service {past} (PID: {pid})");
                             if let Ok(port) = manager.read_port() {
                                 println!("  Listening on: 127.0.0.1:{port}");
                             }
                         }
                         _ => {
-                            println!("✗ Service did not come back up after reload");
+                            println!("Service did not come back up after {past}");
                             std::process::exit(1);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("✗ Failed to start service after reload: {e}");
+                    println!("Failed to start service after {past}: {e}");
                     std::process::exit(1);
                 }
             }
