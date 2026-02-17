@@ -149,10 +149,12 @@ async fn async_main() -> anyhow::Result<()> {
         other => other,
     };
 
-    // Validate store name if provided
+    // Validate store name if provided ("all" is a special keyword, not a real store)
     let store_name = cli.store.as_deref();
     if let Some(name) = store_name {
-        mmry_core::stores::validate_store_name(name)?;
+        if name != "all" {
+            mmry_core::stores::validate_store_name(name)?;
+        }
     }
 
     // Try service-backed search before starting local services
@@ -166,8 +168,10 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Initialize database for the specified store
-    tracing::debug!("Initializing database for store: {:?}", store_name);
-    let db = Database::init_store(&config, store_name).await?;
+    // When store is "all", use the default store for initial DB; commands handle multi-store iteration
+    let db_store = if store_name == Some("all") { None } else { store_name };
+    tracing::debug!("Initializing database for store: {:?}", db_store);
+    let db = Database::init_store(&config, db_store).await?;
     tracing::debug!("Database initialized");
 
     // Prepare shared services - use wrapper that can leverage daemon if enabled
@@ -212,6 +216,7 @@ async fn async_main() -> anyhow::Result<()> {
                 cmd,
                 &config,
                 &db,
+                store_name,
                 Arc::clone(&embeddings),
                 Arc::clone(&sparse_embeddings),
             )

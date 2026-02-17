@@ -5,7 +5,9 @@ use mmry_core::config::Config;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::memory::Memory;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
+use mmry_core::stores;
 
 #[derive(Parser)]
 pub struct ReembedCmd {
@@ -27,8 +29,9 @@ pub struct ReembedCmd {
 
 pub async fn handle(
     cmd: ReembedCmd,
-    _config: &Config,
+    config: &Config,
     db: &Database,
+    store_name: Option<&str>,
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
 ) -> anyhow::Result<()> {
@@ -49,12 +52,62 @@ pub async fn handle(
         eprintln!("Warning: Sparse embeddings are disabled in config, skipping sparse embeddings");
     }
 
+    // Handle -s all: iterate over every store
+    if store_name == Some("all") {
+        let store_list = stores::list_stores(config)?;
+        if store_list.is_empty() {
+            println!("No stores found.");
+            return Ok(());
+        }
+        println!("Re-embedding all stores ({} stores)...\n", store_list.len());
+        for store_info in &store_list {
+            println!("--- Store: {} ---", store_info.name);
+            let store_db = Database::init_store(config, Some(&store_info.name)).await?;
+            reembed_store(
+                &cmd,
+                &store_db,
+                regenerate_dense,
+                regenerate_sparse,
+                embeddings_enabled,
+                &embeddings,
+                &sparse_embeddings,
+            )
+            .await?;
+            store_db.close().await;
+            println!();
+        }
+        println!("Done re-embedding all stores.");
+        return Ok(());
+    }
+
+    // Single store
+    reembed_store(
+        &cmd,
+        db,
+        regenerate_dense,
+        regenerate_sparse,
+        embeddings_enabled,
+        &embeddings,
+        &sparse_embeddings,
+    )
+    .await
+}
+
+async fn reembed_store(
+    cmd: &ReembedCmd,
+    db: &Database,
+    regenerate_dense: bool,
+    regenerate_sparse: bool,
+    embeddings_enabled: bool,
+    embeddings: &Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
+    sparse_embeddings: &Arc<SparseEmbeddingService>,
+) -> anyhow::Result<()> {
     // Fetch all memories
     println!("Fetching memories...");
-    let memories = operations::list_memories(
+    let memories: Vec<Memory> = operations::list_memories(
         db.pool(),
         cmd.category.as_deref(),
-        i64::MAX, // Get all memories
+        i64::MAX,
     )
     .await?;
 
@@ -70,11 +123,9 @@ pub async fn handle(
     let mut sparse_update_count = 0;
 
     for memory in &memories {
-        // Skip parent memories - they don't get embeddings (only their chunks do)
         if memory.is_parent() && memory.parent_id.is_none() {
             continue;
         }
-
         if regenerate_dense && embeddings_enabled && (cmd.force || memory.embedding.is_none()) {
             dense_update_count += 1;
         }
@@ -113,13 +164,10 @@ pub async fn handle(
     for (idx, mut memory) in memories.into_iter().enumerate() {
         let mut updated = false;
 
-        // Skip parent memories - they don't get embeddings (only their chunks do)
         if memory.is_parent() && memory.parent_id.is_none() {
-            // This is a parent memory, skip embedding generation
             continue;
         }
 
-        // Generate dense embedding if needed
         if regenerate_dense && embeddings_enabled && (cmd.force || memory.embedding.is_none()) {
             let mut emb = embeddings.lock().await;
             if let Some(embedding) = emb.embed(&memory.content).await? {
@@ -128,7 +176,6 @@ pub async fn handle(
             }
         }
 
-        // Generate sparse embedding if needed
         if regenerate_sparse
             && sparse_embeddings.is_enabled()
             && (cmd.force || memory.sparse_embedding.is_none())
@@ -152,19 +199,18 @@ pub async fn handle(
                     updated_count += 1;
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to update memory {}: {}", memory.id, e);
-                    // Continue processing other memories
+                    eprintln!("Warning: Failed to update memory {}: {e}", memory.id);
                 }
             }
 
             if (idx + 1) % 10 == 0 || idx + 1 == total {
-                println!("  Progress: {}/{} memories processed", idx + 1, total);
+                println!("  Progress: {}/{total} memories processed", idx + 1);
             }
         }
     }
 
     println!();
-    println!("✓ Successfully updated {updated_count} memories");
+    println!("Successfully updated {updated_count} memories");
 
     Ok(())
 }
