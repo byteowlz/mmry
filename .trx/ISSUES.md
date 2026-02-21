@@ -38,6 +38,11 @@
 
 ### [mmry-xrbv.5] Feedback events & outcome recording - record helpful/harmful feedback on learnings, record session outcomes with rule attribution, auto-apply to update scores (P2, feature)
 
+### [mmry-1ka8] vctr: standalone embedding/reranking server (P3, feature)
+
+### [mmry-5avw] ServiceClient should discover actual HTTP port from runtime state, not static config (P3, bug)
+When mmry service is started with MMRY__EXTERNAL_API__PORT env override (e.g. 48000), the actual listening port differs from config.toml (8081). ServiceClient.get_api_url() reads from config, so clients like agntz fail to connect. The service should write the actual HTTP port to a state file (like it does for gRPC) or clients should read the env var.
+
 ## Closed
 
 - [mmry-rbqc] Clean up mmry-tui/app.rs: remove HMLR/graph/guardrails UI and re-enable in workspace (closed 2026-02-10)

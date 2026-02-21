@@ -171,6 +171,32 @@ struct MemoryDeleteQuery {
     store: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct MemoryCreateRequest {
+    content: String,
+    #[serde(default = "default_category")]
+    category: String,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default = "default_importance")]
+    importance: Option<i32>,
+    #[serde(default)]
+    store: Option<String>,
+}
+
+fn default_category() -> String {
+    "default".to_string()
+}
+
+fn default_importance() -> Option<i32> {
+    Some(5)
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryCreateResponse {
+    memory: Memory,
+}
+
 #[derive(Debug, Serialize)]
 struct MemoryDeleteResponse {
     deleted: bool,
@@ -713,6 +739,75 @@ async fn memory_list_handler(
     }))
 }
 
+async fn memory_create_handler(
+    AxumState(app_state): AxumState<ExternalApiState>,
+    Query(query): Query<MemoryGetQuery>,
+    Json(payload): Json<MemoryCreateRequest>,
+) -> Result<Json<MemoryCreateResponse>, ApiError> {
+    app_state.state.record_activity().await;
+
+    validate_text_len(&payload.content, &app_state.api_config, "content")?;
+
+    // Store can come from query param or request body (query takes precedence)
+    let store = query.store.as_deref().or(payload.store.as_deref());
+    let (pool, db_guard) = pool_for_store(&app_state, store).await?;
+
+    let now = chrono::Utc::now();
+    let mut memory = Memory {
+        id: Uuid::new_v4(),
+        memory_type: mmry_core::memory::types::MemoryType::Semantic,
+        content: payload.content,
+        embedding: None,
+        sparse_embedding: None,
+        metadata: serde_json::json!({}),
+        importance: payload.importance.unwrap_or(5),
+        expires_at: None,
+        expired_at: None,
+        source_attribution: None,
+        trust_level: 1.0,
+        source_reinforcement_score: 0.0,
+        created_at: now,
+        updated_at: now,
+        category: payload.category,
+        tags: payload.tags.unwrap_or_default(),
+        parent_id: None,
+        chunk_index: None,
+        total_chunks: None,
+        chunk_method: None,
+        bridge_block_id: None,
+    };
+
+    // Generate embedding if embeddings service available
+    {
+        let svc_arc = app_state.state.get_embedding_service().await;
+        let mut guard = svc_arc.lock().await;
+        if let Some(embed_svc) = guard.as_mut() {
+            match embed_svc.embed(&memory.content).await {
+                Ok(Some(embedding)) => {
+                    memory.embedding = Some(embedding);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to generate embedding for new memory: {e}");
+                }
+            }
+        }
+    }
+
+    operations::insert_memory(&pool, &memory)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to insert memory: {e}")))?;
+
+    memory.embedding = None;
+    memory.sparse_embedding = None;
+
+    if let Some(db) = db_guard {
+        db.close().await;
+    }
+
+    Ok(Json(MemoryCreateResponse { memory }))
+}
+
 async fn memory_get_handler(
     AxumState(app_state): AxumState<ExternalApiState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -916,7 +1011,7 @@ async fn run_http_api(state: Arc<ServiceState>, api_config: ExternalApiConfig) -
         .route("/v1/models", get(models_handler))
         .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/rerank", post(rerank_handler))
-        .route("/v1/memories", get(memory_list_handler))
+        .route("/v1/memories", get(memory_list_handler).post(memory_create_handler))
         .route("/v1/memories/:id", get(memory_get_handler))
         .route("/v1/memories/:id", put(memory_update_handler))
         .route("/v1/memories/:id", delete(memory_delete_handler))
