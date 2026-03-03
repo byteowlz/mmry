@@ -103,17 +103,18 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
             let label = if is_reload { "Reloading" } else { "Restarting" };
             let past = if is_reload { "reloaded" } else { "restarted" };
             println!("{label} mmry service...");
-            match manager.stop() {
-                Ok(()) => {
-                    println!("  Service stopped");
+            if manager.is_running() {
+                match manager.stop() {
+                    Ok(()) => {
+                        println!("  Service stopped");
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to stop service: {e}");
+                        std::process::exit(1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Failed to stop service: {e}");
-                    std::process::exit(1);
-                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             }
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
             match manager.start(false) {
                 Ok(()) => {

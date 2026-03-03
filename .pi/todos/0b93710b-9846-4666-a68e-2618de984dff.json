@@ -2,13 +2,13 @@
   "todos": [
     {
       "id": "1",
-      "content": "Regenerate config.schema.json from current Config struct",
+      "content": "Regenerate config.schema.json",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
-      "content": "Update examples/config.toml with all current fields",
+      "content": "Update examples/config.toml",
       "status": "completed",
       "priority": "high"
     },
@@ -20,28 +20,34 @@
     },
     {
       "id": "4",
-      "content": "Check and update copy_config_schema.sh script",
+      "content": "Update README.md (remove HMLR, add service enable/disable)",
       "status": "completed",
-      "priority": "medium"
+      "priority": "high"
     },
     {
       "id": "5",
-      "content": "Update README.md: remove stale HMLR/NER sections, add service enable/disable, update config example",
+      "content": "Upgrade fastembed 5.2 -> 5.11",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "6",
-      "content": "Clean up temporary gen_schema.rs example",
+      "content": "Update model lists with new models",
       "status": "completed",
-      "priority": "low"
+      "priority": "high"
     },
     {
       "id": "7",
-      "content": "Run remote-build check and commit",
+      "content": "Update ort to rc.11",
       "status": "completed",
       "priority": "high"
+    },
+    {
+      "id": "8",
+      "content": "Fix clippy warnings from API changes",
+      "status": "completed",
+      "priority": "medium"
     }
   ],
-  "updated_at": "2026-03-03T11:19:34.122Z"
+  "updated_at": "2026-03-03T11:59:15.346Z"
 }
