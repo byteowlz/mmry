@@ -2,40 +2,34 @@
   "todos": [
     {
       "id": "1",
-      "content": "Understand store architecture and database structure",
+      "content": "Run full test suite locally",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
-      "content": "Design copy/move store API in mmry-core",
+      "content": "Run clippy",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
-      "content": "Implement copy/move in mmry-core stores module",
-      "status": "completed",
+      "content": "Bump version",
+      "status": "in_progress",
       "priority": "high"
     },
     {
       "id": "4",
-      "content": "Add CLI commands: mmry store copy/move",
-      "status": "completed",
+      "content": "Tag and push",
+      "status": "pending",
       "priority": "high"
     },
     {
       "id": "5",
-      "content": "Add gRPC/service API for copy/move",
-      "status": "cancelled",
-      "priority": "medium"
-    },
-    {
-      "id": "6",
-      "content": "Test, clippy, fmt, commit",
-      "status": "in_progress",
+      "content": "Build release and install",
+      "status": "pending",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-03T13:39:35.755Z"
+  "updated_at": "2026-03-03T13:46:33.237Z"
 }

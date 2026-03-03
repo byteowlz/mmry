@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.10.2
+
+### Added
+
+- `mmry stores copy <from> <to>` - copy all content between stores (alias: `cp`)
+- `mmry stores move <from> <to>` - move all content between stores (alias: `mv`)
+- Conflict resolution via `--on-conflict skip|overwrite|fail` (default: skip)
+- Auto-creates destination store if it doesn't exist
+- JSON output with `--json` flag
+
+### Fixed
+
+- INIT_SQL learnings table schema now matches current structure (was using stale column names)
+
 ## 0.10.1
 
 ### Fixed
