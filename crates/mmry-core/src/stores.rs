@@ -11,6 +11,7 @@ use crate::sparse_embeddings::SparseEmbeddingService;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::warn;
 
 /// Options for searching across all stores
 pub struct SearchAllStoresOptions<'a> {
@@ -424,6 +425,208 @@ pub fn write_export_to_file(export: &ExportResult, path: &std::path::Path) -> cr
     Ok(())
 }
 
+/// How to handle conflicts when a memory or learning with the same ID
+/// already exists in the destination store.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum ConflictStrategy {
+    /// Skip items that already exist in the destination (default).
+    #[default]
+    Skip,
+    /// Overwrite existing items in the destination.
+    Overwrite,
+    /// Abort the entire transfer on the first conflict.
+    Fail,
+}
+
+/// Result of a copy or move operation between stores.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TransferResult {
+    /// Number of memories copied/moved.
+    pub memories_transferred: usize,
+    /// Number of memories skipped (already existed in destination).
+    pub memories_skipped: usize,
+    /// Number of learnings copied/moved.
+    pub learnings_transferred: usize,
+    /// Number of learnings skipped.
+    pub learnings_skipped: usize,
+}
+
+impl std::fmt::Display for TransferResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} memories transferred, {} skipped; {} learnings transferred, {} skipped",
+            self.memories_transferred,
+            self.memories_skipped,
+            self.learnings_transferred,
+            self.learnings_skipped
+        )
+    }
+}
+
+/// Copy all content from one store to another.
+///
+/// Both stores must exist. The source store is not modified.
+pub async fn copy_store(
+    config: &Config,
+    from: &str,
+    to: &str,
+    strategy: ConflictStrategy,
+) -> crate::Result<TransferResult> {
+    if from == to {
+        return Err(crate::Error::Config(
+            "Source and destination stores must be different".to_string(),
+        ));
+    }
+
+    if !store_exists(config, from) {
+        return Err(crate::Error::Config(format!(
+            "Source store '{from}' does not exist"
+        )));
+    }
+
+    let from_db = Database::init_store(config, Some(from)).await?;
+    let to_db = Database::init_store(config, Some(to)).await?;
+
+    let result = transfer_contents(from_db.pool(), to_db.pool(), strategy).await?;
+
+    from_db.close().await;
+    to_db.close().await;
+
+    Ok(result)
+}
+
+/// Move all content from one store to another.
+///
+/// Copies everything to the destination, then deletes all content from
+/// the source. The source store (database file) is kept but will be empty.
+pub async fn move_store(
+    config: &Config,
+    from: &str,
+    to: &str,
+    strategy: ConflictStrategy,
+) -> crate::Result<TransferResult> {
+    if from == to {
+        return Err(crate::Error::Config(
+            "Source and destination stores must be different".to_string(),
+        ));
+    }
+
+    if !store_exists(config, from) {
+        return Err(crate::Error::Config(format!(
+            "Source store '{from}' does not exist"
+        )));
+    }
+
+    let from_db = Database::init_store(config, Some(from)).await?;
+    let to_db = Database::init_store(config, Some(to)).await?;
+
+    let result = transfer_contents(from_db.pool(), to_db.pool(), strategy).await?;
+
+    // Clear the source store
+    clear_store_contents(from_db.pool()).await?;
+
+    from_db.close().await;
+    to_db.close().await;
+
+    Ok(result)
+}
+
+/// Transfer all memories and learnings from one pool to another.
+async fn transfer_contents(
+    from: &sqlx::SqlitePool,
+    to: &sqlx::SqlitePool,
+    strategy: ConflictStrategy,
+) -> crate::Result<TransferResult> {
+    let mut result = TransferResult::default();
+
+    // Transfer memories
+    let memories = crate::database::operations::list_memories(from, None, i64::MAX).await?;
+
+    for memory in &memories {
+        let exists = crate::database::operations::get_memory(to, memory.id)
+            .await?
+            .is_some();
+
+        if exists {
+            match strategy {
+                ConflictStrategy::Skip => {
+                    result.memories_skipped += 1;
+                    continue;
+                }
+                ConflictStrategy::Overwrite => {
+                    crate::database::operations::delete_memory(to, memory.id).await?;
+                }
+                ConflictStrategy::Fail => {
+                    return Err(crate::Error::Config(format!(
+                        "Memory {} already exists in destination store",
+                        memory.id
+                    )));
+                }
+            }
+        }
+
+        if let Err(e) = crate::database::operations::insert_memory(to, memory).await {
+            warn!("Failed to transfer memory {}: {e}", memory.id);
+            continue;
+        }
+        result.memories_transferred += 1;
+    }
+
+    // Transfer learnings
+    let learnings = crate::database::operations::list_learnings(from, None, None, i64::MAX).await?;
+
+    for learning in &learnings {
+        let exists = crate::database::operations::get_learning(to, learning.id)
+            .await?
+            .is_some();
+
+        if exists {
+            match strategy {
+                ConflictStrategy::Skip => {
+                    result.learnings_skipped += 1;
+                    continue;
+                }
+                ConflictStrategy::Overwrite => {
+                    // upsert_learning handles ON CONFLICT, so we can just proceed
+                }
+                ConflictStrategy::Fail => {
+                    return Err(crate::Error::Config(format!(
+                        "Learning {} already exists in destination store",
+                        learning.id
+                    )));
+                }
+            }
+        }
+
+        if let Err(e) = crate::database::operations::upsert_learning(to, learning).await {
+            warn!("Failed to transfer learning {}: {e}", learning.id);
+            continue;
+        }
+        result.learnings_transferred += 1;
+    }
+
+    Ok(result)
+}
+
+/// Delete all content from a store (memories, embeddings, learnings, feedback).
+async fn clear_store_contents(pool: &sqlx::SqlitePool) -> crate::Result<()> {
+    // Order matters: delete from dependent tables first
+    sqlx::query("DELETE FROM memory_embeddings")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM learning_feedback")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM agent_events")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM learnings").execute(pool).await?;
+    sqlx::query("DELETE FROM agents").execute(pool).await?;
+    sqlx::query("DELETE FROM memories").execute(pool).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +657,142 @@ mod tests {
         assert_eq!(format_size(1536), "1.50 KB");
         assert_eq!(format_size(1048576), "1.00 MB");
         assert_eq!(format_size(1073741824), "1.00 GB");
+    }
+
+    use crate::database::operations;
+    use crate::database::schema;
+    use crate::memory::MemoryType;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        crate::database::ensure_sqlite_vec_loaded().unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(schema::INIT_SQL).execute(&pool).await.unwrap();
+        Database::ensure_vector_table(&pool, 3).await.unwrap();
+        pool
+    }
+
+    fn make_memory(content: &str) -> Memory {
+        Memory::new(
+            MemoryType::Episodic,
+            content.to_string(),
+            "default".to_string(),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transfer_copies_memories() -> crate::Result<()> {
+        let src = test_pool().await;
+        let dst = test_pool().await;
+
+        let m1 = make_memory("first memory");
+        let m2 = make_memory("second memory");
+        operations::insert_memory(&src, &m1).await?;
+        operations::insert_memory(&src, &m2).await?;
+
+        let result = transfer_contents(&src, &dst, ConflictStrategy::Skip).await?;
+
+        assert_eq!(result.memories_transferred, 2);
+        assert_eq!(result.memories_skipped, 0);
+
+        let dst_memories = operations::list_memories(&dst, None, 100).await?;
+        assert_eq!(dst_memories.len(), 2);
+
+        // Source untouched
+        let src_memories = operations::list_memories(&src, None, 100).await?;
+        assert_eq!(src_memories.len(), 2);
+
+        src.close().await;
+        dst.close().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transfer_skip_duplicates() -> crate::Result<()> {
+        let src = test_pool().await;
+        let dst = test_pool().await;
+
+        let m = make_memory("shared memory");
+        operations::insert_memory(&src, &m).await?;
+        operations::insert_memory(&dst, &m).await?;
+
+        let result = transfer_contents(&src, &dst, ConflictStrategy::Skip).await?;
+
+        assert_eq!(result.memories_transferred, 0);
+        assert_eq!(result.memories_skipped, 1);
+
+        src.close().await;
+        dst.close().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transfer_overwrite_replaces() -> crate::Result<()> {
+        let src = test_pool().await;
+        let dst = test_pool().await;
+
+        let mut m = make_memory("original");
+        operations::insert_memory(&dst, &m).await?;
+
+        m.content = "updated content".to_string();
+        operations::insert_memory(&src, &m).await?;
+
+        let result = transfer_contents(&src, &dst, ConflictStrategy::Overwrite).await?;
+
+        assert_eq!(result.memories_transferred, 1);
+        assert_eq!(result.memories_skipped, 0);
+
+        let fetched = operations::get_memory(&dst, m.id).await?.unwrap();
+        assert_eq!(fetched.content, "updated content");
+
+        src.close().await;
+        dst.close().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transfer_fail_on_conflict() -> crate::Result<()> {
+        let src = test_pool().await;
+        let dst = test_pool().await;
+
+        let m = make_memory("conflict");
+        operations::insert_memory(&src, &m).await?;
+        operations::insert_memory(&dst, &m).await?;
+
+        let err = transfer_contents(&src, &dst, ConflictStrategy::Fail).await;
+        assert!(err.is_err());
+
+        src.close().await;
+        dst.close().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn move_clears_source() -> crate::Result<()> {
+        let src = test_pool().await;
+        let dst = test_pool().await;
+
+        let m = make_memory("to be moved");
+        operations::insert_memory(&src, &m).await?;
+
+        let result = transfer_contents(&src, &dst, ConflictStrategy::Skip).await?;
+        assert_eq!(result.memories_transferred, 1);
+
+        clear_store_contents(&src).await?;
+
+        let remaining = operations::list_memories(&src, None, 100).await?;
+        assert_eq!(remaining.len(), 0);
+
+        let moved = operations::list_memories(&dst, None, 100).await?;
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].id, m.id);
+
+        src.close().await;
+        dst.close().await;
+        Ok(())
     }
 }

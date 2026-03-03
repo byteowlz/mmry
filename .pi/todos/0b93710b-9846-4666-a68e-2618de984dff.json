@@ -2,52 +2,40 @@
   "todos": [
     {
       "id": "1",
-      "content": "Regenerate config.schema.json",
+      "content": "Understand store architecture and database structure",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
-      "content": "Update examples/config.toml",
+      "content": "Design copy/move store API in mmry-core",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
-      "content": "Copy schema to ../schemas/mmry/ and push",
+      "content": "Implement copy/move in mmry-core stores module",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "4",
-      "content": "Update README.md (remove HMLR, add service enable/disable)",
+      "content": "Add CLI commands: mmry store copy/move",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "5",
-      "content": "Upgrade fastembed 5.2 -> 5.11",
-      "status": "completed",
-      "priority": "high"
+      "content": "Add gRPC/service API for copy/move",
+      "status": "cancelled",
+      "priority": "medium"
     },
     {
       "id": "6",
-      "content": "Update model lists with new models",
-      "status": "completed",
+      "content": "Test, clippy, fmt, commit",
+      "status": "in_progress",
       "priority": "high"
-    },
-    {
-      "id": "7",
-      "content": "Update ort to rc.11",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "8",
-      "content": "Fix clippy warnings from API changes",
-      "status": "completed",
-      "priority": "medium"
     }
   ],
-  "updated_at": "2026-03-03T11:59:15.346Z"
+  "updated_at": "2026-03-03T13:39:35.755Z"
 }
