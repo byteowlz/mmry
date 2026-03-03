@@ -2,52 +2,46 @@
   "todos": [
     {
       "id": "1",
-      "content": "Analyze octo integration points (service status output, service run, systemd units)",
+      "content": "Regenerate config.schema.json from current Config struct",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
-      "content": "Implement enable/disable with actual systemd/launchd management in ServiceManager",
+      "content": "Update examples/config.toml with all current fields",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
-      "content": "Update CLI service.rs to use new enable/disable from ServiceManager",
+      "content": "Copy schema to ../schemas/mmry/",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "4",
-      "content": "Fix mmry-ypv4: rename enable -> enabled, console_enable -> console_enabled",
+      "content": "Check and update copy_config_schema.sh script",
       "status": "completed",
-      "priority": "high"
+      "priority": "medium"
     },
     {
       "id": "5",
-      "content": "Document breaking change in CHANGELOG",
-      "status": "completed",
+      "content": "Update README.md: remove stale HMLR/NER sections, add service enable/disable, update config example",
+      "status": "in_progress",
       "priority": "high"
     },
     {
       "id": "6",
-      "content": "File trx issue in octo (oqto-00ay) to update mmry config references",
-      "status": "completed",
-      "priority": "high"
+      "content": "Clean up temporary gen_schema.rs example",
+      "status": "pending",
+      "priority": "low"
     },
     {
       "id": "7",
-      "content": "Run fmt + remote-build check + clippy",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "8",
-      "content": "Commit and push",
-      "status": "completed",
+      "content": "Run remote-build check and commit",
+      "status": "pending",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-03T09:57:22.118Z"
+  "updated_at": "2026-03-03T11:18:25.931Z"
 }

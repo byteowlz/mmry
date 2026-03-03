@@ -89,14 +89,20 @@ mmry includes an optional background service that keeps the embedding model load
 # Start the service
 mmry service start
 
-# Reload after changing config
-mmry service reload
-
 # Check status
 mmry service status
 
 # Stop the service
 mmry service stop
+
+# Restart after config changes
+mmry service restart
+
+# Enable auto-start on boot (systemd user unit on Linux, launchd plist on macOS)
+mmry service enable
+
+# Disable auto-start and remove service unit
+mmry service disable
 
 # Run in foreground (for debugging)
 mmry service run
@@ -158,84 +164,6 @@ model = "gpt-4o-mini"  # or your local model name
 For OpenAI, set the `OPENAI_API_KEY` environment variable. For local servers, no API key is needed.
 
 If the analyzer is disabled or no endpoint is configured, mmry falls back to heuristic-based extraction.
-
-## HMLR: Hierarchical Memory Ledger with Routing
-
-mmry includes optional HMLR features for AI agent workflows. When enabled, memories are enriched with extracted facts, organized into bridge blocks, and tracked with agent attribution.
-
-### Quick Start
-
-Enable HMLR in `~/.config/mmry/config.toml`:
-
-```toml
-[hmlr]
-enabled = true
-extract_facts = true      # Extract key-value facts from content
-bridge_routing = true     # Group related memories into bridge blocks
-audit_trail = true        # Log agent events for debugging
-track_human_agent = true  # Track human as an agent
-human_agent_name = "human"
-```
-
-### What HMLR Adds
-
-**Facts**: Key-value pairs extracted from memory content
-
-```bash
-# Search now includes facts
-mmry search "api key" --hmlr --search-facts
-
-# View facts in TUI (press 'b' to switch to Facts view)
-```
-
-**Bridge Blocks**: Logical groupings of related memories
-
-- Memories within a conversation or task share the same bridge block
-- Blocks track topic, keywords, and status (open/closed)
-- Search can filter or group by blocks
-
-**Agent Attribution**: Track who created each memory
-
-- Distinguishes human vs AI agent entries
-- Logs agent events for debugging and auditing
-
-### HMLR Search
-
-```bash
-# Include HMLR enrichments in search results
-mmry search "project" --hmlr
-
-# Also search facts (not just memories)
-mmry search "deadline" --hmlr --search-facts
-
-# Group results by bridge blocks
-mmry search "api" --hmlr --group-by-blocks
-
-# Exclude closed/inactive blocks
-mmry search "task" --hmlr --inactive-blocks exclude
-```
-
-### TUI Integration
-
-The TUI shows HMLR enrichments when viewing a memory:
-
-- Creator agent name and type
-- Associated bridge block (topic, keywords, status)
-- Extracted facts
-
-Press `b` to cycle through views: Memories, Bridge Blocks, Facts, Agent Events.
-
-### Architecture
-
-HMLR runs as a post-ingestion pipeline:
-
-1. **Governor**: Orchestrates enrichment in parallel
-2. **FactScrubber**: Extracts key-value facts from content
-3. **Scribe**: Async updates to user profile (preferences, constraints)
-4. **LatticeCrawler**: Finds candidate bridge blocks for routing
-5. **ContextHydrator**: Assembles context from multiple sources
-
-All components are opt-in via config. HMLR adds no overhead when disabled.
 
 ## How It Works
 
@@ -310,8 +238,9 @@ Binary releases coming soon.
 Config lives at `~/.config/mmry/config.toml` (creates itself on first run).
 
 ```toml
-[database]
-path = "~/.local/share/mmry/memories.db"  # Paths support ~ and $HOME
+[stores]
+directory = "~/.local/share/mmry/stores"
+default = "default"
 
 [search]
 mode = "hybrid"
@@ -319,9 +248,25 @@ similarity_threshold = 0.7
 
 [embeddings]
 model = "Xenova/all-MiniLM-L6-v2"  # Fast and local
+
+[service]
+enabled = false         # Background service for fast embeddings
+auto_start = true
+
+[external_api]
+enabled = false         # HTTP API for embeddings/reranking
+host = "127.0.0.1"
+port = 8081
+
+[analyzer]
+enabled = false         # LLM-based fact extraction
+# endpoint = "http://127.0.0.1:1234/v1"
+# model = "gpt-4o-mini"
 ```
 
 See `examples/config.toml` for all options. Path expansion works (`~`, `$HOME`, `$XDG_DATA_HOME`).
+
+Precedence: CLI flags > environment variables (`MMRY__SECTION__KEY`) > local `mmry.config.toml` > global config.
 
 ## More Examples
 
@@ -435,7 +380,6 @@ Built with Rust using sqlx, fastembed, and tokio. Check `AGENTS.md` if you're an
 Inspiration and prior art:
 
 - Cloudflare Discord Agent: https://github.com/cloudflare/awesome-agents/tree/main/agents/discord-agent
-- HMLR Agentic AI Memory System: https://github.com/Sean-V-Dev/HMLR-Agentic-AI-Memory-System
 - Cass memory system: https://github.com/Dicklesworthstone/cass_memory_system
 - Letta: https://github.com/letta-ai/letta-code
 

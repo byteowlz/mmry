@@ -52,7 +52,7 @@
       "default": {
         "backup_on_startup": true,
         "backup_retention_days": 30,
-        "path": "/Users/tommyfalkowski/.local/share/mmry/memories.db"
+        "path": "/home/wismut/.local/share/mmry/memories.db"
       },
       "allOf": [
         {
@@ -66,7 +66,8 @@
         "batch_size": 32,
         "dimension": 384,
         "enabled": true,
-        "model": "Xenova/all-MiniLM-L6-v2"
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "remote": null
       },
       "allOf": [
         {
@@ -95,7 +96,9 @@
     "external_api": {
       "default": {
         "api_key": null,
-        "enable": false,
+        "console_enabled": false,
+        "console_redact_secrets": true,
+        "enabled": false,
         "host": "127.0.0.1",
         "max_batch_size": 64,
         "max_input_chars": 16000,
@@ -109,19 +112,16 @@
         }
       ]
     },
-    "hmlr": {
+    "ingest": {
       "default": {
-        "audit_trail": true,
-        "bridge_routing": true,
-        "enabled": false,
-        "extract_facts": true,
-        "human_agent_name": "human",
-        "synthesis_interval_seconds": 0,
-        "track_human_agent": true
+        "ingestr_bin": "ingestr",
+        "ingestr_enabled": false,
+        "ingestr_output_dir": null,
+        "ingestr_timeout_seconds": 300
       },
       "allOf": [
         {
-          "$ref": "#/definitions/HmlrConfig"
+          "$ref": "#/definitions/IngestConfig"
         }
       ]
     },
@@ -155,25 +155,6 @@
         }
       ]
     },
-    "ner": {
-      "default": {
-        "confidence_threshold": 0.5,
-        "enabled": true,
-        "labels": [
-          "person",
-          "organization",
-          "location",
-          "technology",
-          "project"
-        ],
-        "model": "urchade/gliner_multi-v2.1"
-      },
-      "allOf": [
-        {
-          "$ref": "#/definitions/NerConfig"
-        }
-      ]
-    },
     "search": {
       "default": {
         "bm25_b": 0.75,
@@ -186,6 +167,7 @@
         "keyword_weight": 0.4000000059604645,
         "mode": "hybrid",
         "recency_weight": 0.30000001192092896,
+        "remote_rerank": null,
         "rerank_enabled": true,
         "rerank_model": "BAAI/bge-reranker-base",
         "rerank_top_k": 20,
@@ -226,7 +208,7 @@
     "stores": {
       "default": {
         "default": "default",
-        "directory": "/Users/tommyfalkowski/.local/share/mmry/stores"
+        "directory": "/home/wismut/.local/share/mmry/stores"
       },
       "allOf": [
         {
@@ -365,7 +347,7 @@
           "minimum": 0.0
         },
         "path": {
-          "default": "/Users/tommyfalkowski/.local/share/mmry/memories.db",
+          "default": "/home/wismut/.local/share/mmry/memories.db",
           "type": "string"
         }
       }
@@ -396,6 +378,17 @@
         "model": {
           "default": "Xenova/all-MiniLM-L6-v2",
           "type": "string"
+        },
+        "remote": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemoteBackendConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -436,7 +429,17 @@
             "null"
           ]
         },
-        "enable": {
+        "console_enabled": {
+          "description": "Enable the local-only agent console UI endpoints (/console)",
+          "default": false,
+          "type": "boolean"
+        },
+        "console_redact_secrets": {
+          "description": "Redact secrets by default in the console UI",
+          "default": true,
+          "type": "boolean"
+        },
+        "enabled": {
           "description": "Expose HTTP API for embeddings and reranking",
           "default": false,
           "type": "boolean"
@@ -481,43 +484,30 @@
         }
       }
     },
-    "HmlrConfig": {
-      "description": "Configuration for HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline",
+    "IngestConfig": {
       "type": "object",
       "properties": {
-        "audit_trail": {
-          "description": "Log all ingestion events for auditability",
-          "default": true,
-          "type": "boolean"
+        "ingestr_bin": {
+          "description": "Path to `ingestr` binary (or just `ingestr` if on PATH)",
+          "default": "ingestr",
+          "type": "string"
         },
-        "bridge_routing": {
-          "description": "Assign memories to conversational bridge blocks",
-          "default": true,
-          "type": "boolean"
-        },
-        "enabled": {
-          "description": "Enable HMLR enrichment pipeline (opt-in, disabled by default)",
+        "ingestr_enabled": {
+          "description": "Optional: use `ingestr` to convert non-text files to Markdown for directory ingestion",
           "default": false,
           "type": "boolean"
         },
-        "extract_facts": {
-          "description": "Extract structured facts from memory content",
-          "default": true,
-          "type": "boolean"
+        "ingestr_output_dir": {
+          "description": "Optional directory to store converted Markdown outputs (if unset, uses a temp directory)",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "human_agent_name": {
-          "description": "Name for the human operator agent (used when track_human_agent=true)",
-          "default": "human",
-          "type": "string"
-        },
-        "track_human_agent": {
-          "description": "Auto-create agent record for human operators",
-          "default": true,
-          "type": "boolean"
-        },
-        "synthesis_interval_seconds": {
-          "description": "Interval in seconds for background synthesis (0 disables)",
-          "default": 0,
+        "ingestr_timeout_seconds": {
+          "description": "Timeout for ingestr conversion (seconds)",
+          "default": 300,
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
@@ -602,40 +592,40 @@
         }
       }
     },
-    "NerConfig": {
+    "RemoteBackendConfig": {
       "type": "object",
-      "required": [
-        "confidence_threshold",
-        "enabled",
-        "model"
-      ],
       "properties": {
-        "confidence_threshold": {
-          "description": "Minimum confidence threshold for accepting entities (0.0 - 1.0)",
-          "type": "number",
-          "format": "float"
+        "api_key": {
+          "description": "Optional API key for `Authorization: Bearer ...`",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "enabled": {
-          "description": "Enable NER-based entity extraction",
-          "type": "boolean"
-        },
-        "labels": {
-          "description": "Entity labels to extract (GLiNER is zero-shot, so you can specify any labels) Examples: [\"person\", \"company\", \"technology\", \"project\", \"location\"]",
-          "default": [
-            "person",
-            "organization",
-            "location",
-            "technology",
-            "project"
-          ],
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "model": {
-          "description": "GLiNER model to use (HuggingFace repo name) Recommended: \"urchade/gliner_multi-v2.1\" for multilingual",
+        "base_url": {
+          "description": "Base URL for mmry-service external API (e.g. \"http://127.0.0.1:8080\")",
+          "default": "",
           "type": "string"
+        },
+        "max_batch_size": {
+          "description": "Hard limit for batch sizes sent to the remote backend",
+          "default": 64,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "request_timeout_seconds": {
+          "description": "Request timeout (seconds)",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "required": {
+          "description": "If true, fail hard on remote errors; if false, allow local fallback",
+          "default": false,
+          "type": "boolean"
         }
       }
     },
@@ -694,6 +684,17 @@
           "default": 0.30000001192092896,
           "type": "number",
           "format": "float"
+        },
+        "remote_rerank": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemoteBackendConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "rerank_enabled": {
           "default": true,

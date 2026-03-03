@@ -44,6 +44,16 @@ dimension = 384
 # Batch size for embedding generation
 batch_size = 32
 
+# Optional: delegate embedding to a remote mmry-service HTTP API
+# This avoids loading the model locally. Useful when a central mmry-service
+# is running (e.g., via oqto multi-user setup).
+# [embeddings.remote]
+# base_url = "http://127.0.0.1:8081"
+# api_key = ""
+# request_timeout_seconds = 30
+# max_batch_size = 64
+# required = false  # if true, fail hard on remote errors; if false, fall back to local
+
 [sparse_embeddings]
 # Enable sparse embeddings (SPLADE++) for neural sparse retrieval
 enabled = false
@@ -54,7 +64,7 @@ model = "Qdrant/Splade_PP_en_v1"
 # Default number of results to return
 default_limit = 10
 # Minimum similarity score for vector search (0.0-1.0)
-similarity_threshold = 0.65
+similarity_threshold = 0.7
 # Search mode: hybrid, keyword, fuzzy, semantic, bm25, or sparse
 # - hybrid: combines multiple search strategies (default)
 # - keyword: exact and partial keyword matching
@@ -89,6 +99,14 @@ importance_weight = 0.05      # Memory importance boost
 bm25_k1 = 1.2 # Term frequency saturation (1.2-2.0 typical)
 bm25_b = 0.75 # Length normalization (0.0-1.0, 0.75 typical)
 
+# Optional: delegate reranking to a remote mmry-service HTTP API
+# [search.remote_rerank]
+# base_url = "http://127.0.0.1:8081"
+# api_key = ""
+# request_timeout_seconds = 30
+# max_batch_size = 64
+# required = false
+
 [memory]
 # Default category for memories
 default_category = "default"
@@ -122,6 +140,16 @@ dedupe_chunks = false
 # Similarity threshold for chunk deduplication (0.0-1.0)
 dedupe_chunk_threshold = 0.98
 
+[ingest]
+# Use ingestr to convert non-text files (PDF, DOCX, etc.) to Markdown
+ingestr_enabled = false
+# Path to ingestr binary (or just "ingestr" if on PATH)
+ingestr_bin = "ingestr"
+# Optional directory for converted Markdown output (uses temp dir if unset)
+# ingestr_output_dir = "~/.local/share/mmry/ingest"
+# Timeout for ingestr conversion in seconds
+ingestr_timeout_seconds = 300
+
 [entities]
 # Extract entities from memories
 extract_enabled = true
@@ -129,20 +157,6 @@ extract_enabled = true
 auto_link = true
 # Entity types to extract
 types = ["person", "place", "organization", "project", "technology"]
-
-[ner]
-# Enable ML-based Named Entity Recognition for entity extraction
-# Requires the 'ner' feature to be compiled in (enabled by default)
-# When enabled, NER extracts entities (PER, LOC, ORG, MISC) and builds a knowledge graph
-# Set to false to disable entity extraction
-enabled = true
-# NER model to use (HuggingFace repo name)
-# Available models:
-#   - "onnx-community/distilbert-NER-ONNX" (recommended, 66M params, F1: 0.92)
-#   - "onnx-community/TinyBERT-finetuned-NER-ONNX" (faster, 14M params, F1: 0.86)
-model = "onnx-community/distilbert-NER-ONNX"
-# Minimum confidence threshold for accepting entities (0.0-1.0)
-confidence_threshold = 0.7
 
 [cleanup]
 # Automatically prune old/low-importance memories
@@ -183,13 +197,17 @@ preload_models = true
 [external_api]
 # Expose HTTP endpoints for embeddings (/v1/embeddings) and reranking (/v1/rerank)
 enabled = false
+# Enable the local-only agent console UI endpoints (/console)
+console_enabled = false
+# Redact secrets by default in the console UI
+console_redact_secrets = true
 # Enforce API key (Authorization: Bearer <key>); set to false to allow unauthenticated access
 require_api_key = false
 # Bind address for the external API
 host = "127.0.0.1"
 port = 8081
 # Optional API key for requests (Authorization: Bearer <key>); leave empty to disable auth
-api_key = ""
+# api_key = ""
 # Maximum characters allowed per input or query
 max_input_chars = 16000
 # Maximum number of items allowed per batch request
@@ -207,33 +225,7 @@ enabled = false
 # For local LLM (LM Studio, Ollama, vLLM): "http://127.0.0.1:1234/v1"
 # For OpenAI: "https://api.openai.com/v1" (set OPENAI_API_KEY env var)
 # endpoint = "http://127.0.0.1:1234/v1"
-
-[hmlr]
-# Enable HMLR (Hierarchical Memory Ledger with Routing) enrichment pipeline
-# When enabled, memories are automatically enriched with:
-# - Structured facts (extracted from content)
-# - Bridge block assignment (conversational spans)
-# - Audit trail (who created what and when)
-enabled = false
-
-# Extract structured key-value facts from memory content
-# Facts are stored in the facts table for deterministic retrieval
-# Example: "Met with Sarah" -> {person: Sarah, event: meeting}
-extract_facts = true
-
-# Assign memories to conversational bridge blocks
-# Groups related memories into spans for better context retrieval
-# HMLR-style: retrieves 5-10 turn blocks instead of fragments
-bridge_routing = true
-
-# Log all memory operations for auditability
-# Records who created each memory and when
-audit_trail = true
-
-# Track human operators as agents
-# Creates an agent record for manual CLI/TUI operations
-# This allows unified tracking of human and AI-created memories
-track_human_agent = true
-
-# Name for the human operator agent (used when track_human_agent=true)
-human_agent_name = "human"
+# Number of retries for transient failures
+retry_count = 3
+# Base backoff in milliseconds between retries
+retry_backoff_ms = 1000
