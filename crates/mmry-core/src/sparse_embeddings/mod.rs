@@ -17,11 +17,18 @@ pub struct SparseModelInfo {
 }
 
 pub fn list_sparse_models() -> Vec<SparseModelInfo> {
-    vec![SparseModelInfo {
-        code: "Qdrant/Splade_PP_en_v1",
-        variant: "SPLADEPPV1",
-        description: "SPLADE++ sparse vector model for commercial use (default)",
-    }]
+    vec![
+        SparseModelInfo {
+            code: "Qdrant/Splade_PP_en_v1",
+            variant: "SPLADEPPV1",
+            description: "SPLADE++ sparse vector model for commercial use (default)",
+        },
+        SparseModelInfo {
+            code: "BAAI/bge-m3",
+            variant: "BGEM3",
+            description: "BGE-M3 multilingual sparse embeddings",
+        },
+    ]
 }
 
 type SharedModel = Arc<Mutex<SparseTextEmbedding>>;

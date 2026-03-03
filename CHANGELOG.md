@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **fastembed 5.11 with new embedding models:**
+  - BGE-M3 multilingual (100+ languages, dense + sparse)
+  - BGE Chinese models (small/large zh v1.5)
+  - Snowflake Arctic Embed family (XS/S/M/M-Long/L)
+  - Gemma 300M embedding model
+  - CLIP ViT-B/32 text encoder
+  - Jina v2 base English
+  - all-mpnet-base-v2
+  - Paraphrase multilingual mpnet-base-v2
+  - BGE-M3 sparse embeddings (new sparse model alongside SPLADE++)
+  - Updated ort to 2.0.0-rc.11
+
 - **Service enable/disable (mmry service enable|disable):**
   - `mmry service enable` installs and enables auto-start (systemd user unit on Linux, launchd plist on macOS)
   - `mmry service disable` stops, disables, and removes the service unit

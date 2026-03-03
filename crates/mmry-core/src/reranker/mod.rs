@@ -172,7 +172,7 @@ impl RerankerService {
             let mut guard = model.lock().await;
 
             guard
-                .rerank(query.to_owned(), documents.to_owned(), false, None)
+                .rerank(query.to_owned(), documents, false, None)
                 .map_err(|e| Error::Embedding(format!("Reranking failed: {e}")))?
         };
 
