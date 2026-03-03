@@ -45,6 +45,7 @@ When mmry service is started with MMRY__EXTERNAL_API__PORT env override (e.g. 48
 
 ## Closed
 
+- [mmry-ypv4] ExternalApiConfig uses enable/console_enable instead of enabled/console_enabled - inconsistent with all other config structs (closed 2026-03-03)
 - [mmry-rbqc] Clean up mmry-tui/app.rs: remove HMLR/graph/guardrails UI and re-enable in workspace (closed 2026-02-10)
 - [mmry-ssfb] Clean up mmry-service/server.rs: remove HMLR endpoints and re-enable in workspace (closed 2026-02-10)
 - [mmry-gh9f] Clean up mmry-mcp: remove HMLR tools (bridge_blocks, facts, profile_blocks, context_pack, conversation) and re-enable in workspace (closed 2026-02-10)
