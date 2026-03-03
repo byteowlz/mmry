@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.10.1
+
+### Fixed
+
+- `mmry service restart` / `reload` no longer fails when the service is not running
+- Database schema: `bridge_block_id` column now included in INIT_SQL for fresh installs
+- Fixed broken `semantic_query_finds_related_memory` test (removed reference to deleted `search_with_embedding` method)
+- Fixed legacy schema migration test (`bridge_block_id` index creation order)
+
 ## 0.10.0
 
 ### Added

@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS memories (
     parent_id TEXT,
     chunk_index INTEGER,
     total_chunks INTEGER,
-    chunk_method TEXT
+    chunk_method TEXT,
+    bridge_block_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agents (

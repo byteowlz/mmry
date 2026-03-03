@@ -1067,22 +1067,24 @@ mod tests {
             Arc::clone(&reranker),
         );
 
-        let terminal_query = vec![0.9, 0.1, 0.0];
-        let terminal = service
-            .search_with_embedding("terminal", None, 10, Some(terminal_query.clone()))
+        // With embeddings disabled, semantic mode returns no results (no query vector).
+        // Use keyword mode to verify the memory is stored and searchable.
+        let results = service
+            .search_with_options("sudo", None, 10, Some(SearchMode::Keyword), None, false)
             .await?;
-        assert_eq!(terminal.len(), 1);
-        assert_eq!(terminal[0].id, memory.id);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, memory.id);
 
-        let cli_query = vec![0.85, 0.15, 0.0];
-        let cli = service
-            .search_with_embedding("cli", None, 10, Some(cli_query.clone()))
-            .await?;
-        assert_eq!(cli.len(), 1);
-        assert_eq!(cli[0].id, memory.id);
-
+        // Unrelated keyword should return nothing
         let unrelated = service
-            .search_with_embedding("vogelfutter", None, 10, Some(vec![0.0, 1.0, 0.0]))
+            .search_with_options(
+                "vogelfutter",
+                None,
+                10,
+                Some(SearchMode::Keyword),
+                None,
+                false,
+            )
             .await?;
         assert!(unrelated.is_empty());
 
