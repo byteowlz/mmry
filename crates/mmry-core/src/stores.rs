@@ -265,7 +265,6 @@ pub async fn list_all_stores(
     Ok(all_results)
 }
 
-
 /// Move a memory from one store to another
 /// Returns the memory as it exists in the new store
 pub async fn move_memory_to_store(
@@ -352,7 +351,6 @@ impl From<&Memory> for ExportedMemory {
         }
     }
 }
-
 
 /// Export result containing memories and metadata
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

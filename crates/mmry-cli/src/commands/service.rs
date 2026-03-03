@@ -28,8 +28,11 @@ enum ServiceCommands {
     /// Show service status
     Status,
 
-    /// Enable auto-start on system boot
+    /// Enable auto-start on system boot (installs systemd user unit / launchd plist)
     Enable,
+
+    /// Disable auto-start and remove the service unit
+    Disable,
 
     /// Reload the service after config changes (stop then start)
     Reload,
@@ -64,13 +67,13 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
 
             match manager.status() {
                 ServiceStatus::Running { pid } => {
-                    println!("✓ Service started successfully (PID: {pid})");
+                    println!("Service started successfully (PID: {pid})");
                     if let Ok(port) = manager.read_port() {
                         println!("  Listening on: 127.0.0.1:{port}");
                     }
                 }
                 _ => {
-                    println!("✗ Service failed to start");
+                    println!("Service failed to start");
                     std::process::exit(1);
                 }
             }
@@ -86,10 +89,10 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
             println!("Stopping mmry service...");
             match manager.stop() {
                 Ok(()) => {
-                    println!("✓ Service stopped");
+                    println!("Service stopped");
                 }
                 Err(e) => {
-                    println!("✗ {e}");
+                    eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -105,7 +108,7 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
                     println!("  Service stopped");
                 }
                 Err(e) => {
-                    println!("Failed to stop service: {e}");
+                    eprintln!("Failed to stop service: {e}");
                     std::process::exit(1);
                 }
             }
@@ -123,19 +126,21 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
                             }
                         }
                         _ => {
-                            println!("Service did not come back up after {past}");
+                            eprintln!("Service did not come back up after {past}");
                             std::process::exit(1);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("Failed to start service after {past}: {e}");
+                    eprintln!("Failed to start service after {past}: {e}");
                     std::process::exit(1);
                 }
             }
         }
 
         ServiceCommands::Status => {
+            let enabled = manager.is_enabled();
+
             match manager.status() {
                 ServiceStatus::Running { pid } => {
                     println!("Service is running");
@@ -146,7 +151,7 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
 
                     // Show HTTP API port from config if enabled
                     if let Ok(config) = Config::load_with_path(config_path.clone()) {
-                        if config.external_api.enable {
+                        if config.external_api.enabled {
                             println!(
                                 "  HTTP port: {} ({}:{})",
                                 config.external_api.port,
@@ -162,102 +167,62 @@ pub async fn handle(cmd: ServiceCmd, config_path: Option<PathBuf>) -> Result<()>
                             println!("  Status: Healthy");
                         }
                     }
+
+                    println!(
+                        "  Auto-start: {}",
+                        if enabled { "enabled" } else { "disabled" }
+                    );
                 }
                 ServiceStatus::Stopped => {
                     println!("Service is not running");
+                    println!(
+                        "  Auto-start: {}",
+                        if enabled { "enabled" } else { "disabled" }
+                    );
                 }
                 ServiceStatus::Dead => {
                     println!("Service appears to be dead (stale PID file)");
                     println!("Try running 'mmry service stop' to cleanup");
+                    println!(
+                        "  Auto-start: {}",
+                        if enabled { "enabled" } else { "disabled" }
+                    );
                 }
             }
         }
 
         ServiceCommands::Enable => {
-            println!("Auto-start configuration:");
-            println!();
-            println!("To enable auto-start, add this to your config:");
-            println!();
-            println!("  ~/.config/mmry/config.toml:");
-            println!("  [service]");
-            println!("  enabled = true");
-            println!("  auto_start = true");
-            println!();
+            match manager.enable() {
+                Ok(result) => {
+                    if result.wrote_unit {
+                        println!("Created service unit: {}", result.unit_path);
+                    } else {
+                        println!("Using existing service unit: {}", result.unit_path);
+                    }
+                    println!("Auto-start enabled");
 
-            #[cfg(target_os = "linux")]
-            {
-                println!("For systemd (Linux):");
-                println!();
-                println!("1. Create ~/.config/systemd/user/mmry-service.service:");
-                println!("   [Unit]");
-                println!("   Description=mmry embedding service");
-                println!("   After=network.target");
-                println!();
-                println!("   [Service]");
-                println!("   Type=simple");
-                println!(
-                    "   ExecStart={}/mmry-service --foreground",
-                    std::env::current_exe()?.parent().unwrap().display()
-                );
-                println!("   Restart=on-failure");
-                println!();
-                println!("   [Install]");
-                println!("   WantedBy=default.target");
-                println!();
-                println!("2. Enable and start:");
-                println!("   systemctl --user enable mmry-service");
-                println!("   systemctl --user start mmry-service");
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                println!("For launchd (macOS):");
-                println!();
-                println!("1. Create ~/Library/LaunchAgents/com.mmry.service.plist:");
-                println!("   <?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-                println!("   <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"");
-                println!("     \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">");
-                println!("   <plist version=\"1.0\">");
-                println!("   <dict>");
-                println!("     <key>Label</key>");
-                println!("     <string>com.mmry.service</string>");
-                println!("     <key>ProgramArguments</key>");
-                println!("     <array>");
-                println!(
-                    "       <string>{}/mmry-service</string>",
-                    std::env::current_exe()?.parent().unwrap().display()
-                );
-                println!("       <string>--foreground</string>");
-                println!("     </array>");
-                println!("     <key>RunAtLoad</key>");
-                println!("     <true/>");
-                println!("     <key>KeepAlive</key>");
-                println!("     <true/>");
-                println!("   </dict>");
-                println!("   </plist>");
-                println!();
-                println!("2. Load and start:");
-                println!("   launchctl load ~/Library/LaunchAgents/com.mmry.service.plist");
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                println!("For Windows:");
-                println!();
-                println!("1. Add to startup via Task Scheduler:");
-                println!("   - Open Task Scheduler");
-                println!("   - Create Basic Task");
-                println!("   - Trigger: At log on");
-                println!("   - Action: Start a program");
-                println!(
-                    "   - Program: {}\\mmry-service.exe",
-                    std::env::current_exe()?.parent().unwrap().display()
-                );
-                println!("   - Arguments: --foreground");
-                println!();
-                println!("Or use the Windows Service wrapper (advanced).");
+                    // If not currently running, offer to start
+                    if !manager.is_running() {
+                        println!("Start the service with: mmry service start");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to enable service: {e}");
+                    std::process::exit(1);
+                }
             }
         }
+
+        ServiceCommands::Disable => match manager.disable() {
+            Ok(result) => {
+                println!("Removed service unit: {}", result.unit_path);
+                println!("Auto-start disabled");
+            }
+            Err(e) => {
+                eprintln!("Failed to disable service: {e}");
+                std::process::exit(1);
+            }
+        },
     }
 
     Ok(())

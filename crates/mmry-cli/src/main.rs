@@ -169,7 +169,11 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Initialize database for the specified store
     // When store is "all", use the default store for initial DB; commands handle multi-store iteration
-    let db_store = if store_name == Some("all") { None } else { store_name };
+    let db_store = if store_name == Some("all") {
+        None
+    } else {
+        store_name
+    };
     tracing::debug!("Initializing database for store: {:?}", db_store);
     let db = Database::init_store(&config, db_store).await?;
     tracing::debug!("Database initialized");

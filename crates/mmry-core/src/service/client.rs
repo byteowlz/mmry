@@ -163,7 +163,7 @@ impl DaemonClient {
             .as_ref()
             .ok_or_else(|| crate::Error::Service("External API not configured".into()))?;
 
-        if !config.enable {
+        if !config.enabled {
             return Err(crate::Error::Service("External API not enabled".into()));
         }
 

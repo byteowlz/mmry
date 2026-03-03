@@ -6,7 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **Agent Identity (mmry-yay2.1–yay2.3, yay2.7, yay2.8):**
+- **Service enable/disable (mmry service enable|disable):**
+  - `mmry service enable` installs and enables auto-start (systemd user unit on Linux, launchd plist on macOS)
+  - `mmry service disable` stops, disables, and removes the service unit
+  - `mmry service status` now shows `Auto-start: enabled/disabled`
+  - `enable` respects existing unit files (will not overwrite units created by external tools like oqto setup)
+
+### Changed (BREAKING)
+
+- **ExternalApiConfig field rename (mmry-ypv4):**
+  - `[external_api] enable` renamed to `enabled`
+  - `[external_api] console_enable` renamed to `console_enabled`
+  - This aligns with every other config section (`service.enabled`, `embeddings.enabled`, `analyzer.enabled`, etc.)
+  - **Action required:** update `config.toml` files and any code that sets these fields (e.g., oqto setup scripts, deploy configs)
+
+### Added**
   - `--agent`, `--agent-kind`, `--agent-meta` flags on `mmry add` CLI with `human` as default
   - `MMRY_AGENT`, `MMRY_AGENT_KIND`, `MMRY_AGENT_META` environment variables for agent identity
   - `agent`, `agent_kind`, `agent_meta` fields on MCP `mmry.memory.add` tool

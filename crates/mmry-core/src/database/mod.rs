@@ -537,9 +537,11 @@ impl Database {
             sqlx::query("ALTER TABLE memories ADD COLUMN bridge_block_id TEXT")
                 .execute(pool)
                 .await?;
-            sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_bridge_block ON memories(bridge_block_id)")
-                .execute(pool)
-                .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_memories_bridge_block ON memories(bridge_block_id)",
+            )
+            .execute(pool)
+            .await?;
             tracing::info!("bridge_block_id column added");
         }
 

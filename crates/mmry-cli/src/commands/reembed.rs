@@ -104,12 +104,8 @@ async fn reembed_store(
 ) -> anyhow::Result<()> {
     // Fetch all memories
     println!("Fetching memories...");
-    let memories: Vec<Memory> = operations::list_memories(
-        db.pool(),
-        cmd.category.as_deref(),
-        i64::MAX,
-    )
-    .await?;
+    let memories: Vec<Memory> =
+        operations::list_memories(db.pool(), cmd.category.as_deref(), i64::MAX).await?;
 
     if memories.is_empty() {
         println!("No memories found.");

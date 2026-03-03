@@ -461,7 +461,6 @@ fn draw_move_to_store(f: &mut Frame, app: &App, selected_idx: usize) {
     f.render_widget(list, area);
 }
 
-
 fn draw_export_dialog(f: &mut Frame, app: &App, export_all: bool) {
     use ratatui::style::Color;
     use ratatui::style::Modifier;

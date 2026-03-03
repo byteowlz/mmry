@@ -43,7 +43,11 @@ pub async fn handle(
     write_export_to_file(&result, &output_path)?;
 
     println!();
-    println!("Exported {} memories to {}", result.memory_count, output_path.display());
+    println!(
+        "Exported {} memories to {}",
+        result.memory_count,
+        output_path.display()
+    );
 
     Ok(())
 }

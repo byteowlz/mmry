@@ -428,9 +428,9 @@ pub struct ServiceConfig {
 #[serde(default)]
 pub struct ExternalApiConfig {
     /// Expose HTTP API for embeddings and reranking
-    pub enable: bool,
+    pub enabled: bool,
     /// Enable the local-only agent console UI endpoints (/console)
-    pub console_enable: bool,
+    pub console_enabled: bool,
     /// Redact secrets by default in the console UI
     pub console_redact_secrets: bool,
     /// Require Authorization: Bearer ... header (if false and api_key is set, key is still enforced)
@@ -490,8 +490,8 @@ impl Default for ServiceConfig {
 impl Default for ExternalApiConfig {
     fn default() -> Self {
         Self {
-            enable: false,
-            console_enable: false,
+            enabled: false,
+            console_enabled: false,
             console_redact_secrets: true,
             require_api_key: false,
             host: "127.0.0.1".to_string(),

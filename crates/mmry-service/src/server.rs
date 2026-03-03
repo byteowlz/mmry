@@ -1011,7 +1011,10 @@ async fn run_http_api(state: Arc<ServiceState>, api_config: ExternalApiConfig) -
         .route("/v1/models", get(models_handler))
         .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/rerank", post(rerank_handler))
-        .route("/v1/memories", get(memory_list_handler).post(memory_create_handler))
+        .route(
+            "/v1/memories",
+            get(memory_list_handler).post(memory_create_handler),
+        )
         .route("/v1/memories/:id", get(memory_get_handler))
         .route("/v1/memories/:id", put(memory_update_handler))
         .route("/v1/memories/:id", delete(memory_delete_handler))
@@ -1095,7 +1098,7 @@ pub async fn run_server(config: Config, port_file: PathBuf, _foreground: bool) -
         .add_service(svc)
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown_signal());
 
-    if config.external_api.enable {
+    if config.external_api.enabled {
         let http_state = Arc::clone(&state);
         let http_config = config.external_api.clone();
 

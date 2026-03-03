@@ -182,7 +182,7 @@ preload_models = true
 
 [external_api]
 # Expose HTTP endpoints for embeddings (/v1/embeddings) and reranking (/v1/rerank)
-enable = false
+enabled = false
 # Enforce API key (Authorization: Bearer <key>); set to false to allow unauthenticated access
 require_api_key = false
 # Bind address for the external API

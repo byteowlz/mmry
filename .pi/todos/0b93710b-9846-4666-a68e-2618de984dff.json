@@ -1,0 +1,35 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "Fix mmry-ypv4: rename enable -> enabled, console_enable -> console_enabled in ExternalApiConfig",
+      "status": "in_progress",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "Update all references to the renamed fields across the codebase",
+      "status": "pending",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "content": "Document as breaking change in CHANGELOG",
+      "status": "pending",
+      "priority": "high"
+    },
+    {
+      "id": "4",
+      "content": "File trx issue in octo to update mmry config files in setup scripts",
+      "status": "pending",
+      "priority": "high"
+    },
+    {
+      "id": "5",
+      "content": "Run fmt + remote-build check + clippy",
+      "status": "pending",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-03-03T09:54:22.890Z"
+}
