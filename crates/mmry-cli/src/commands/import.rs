@@ -142,7 +142,7 @@ pub async fn handle(
 
 fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow::Result<Memory> {
     let id = Uuid::parse_str(&exported.id)?;
-    let memory_type = match exported.memory_type.as_str() {
+    let memory_type = match exported.memory_type.to_lowercase().as_str() {
         "episodic" => MemoryType::Episodic,
         "semantic" => MemoryType::Semantic,
         "procedural" => MemoryType::Procedural,

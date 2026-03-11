@@ -372,7 +372,7 @@ fn search_mode_to_proto(mode: crate::config::SearchMode) -> SearchMode {
 }
 
 fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
-    let memory_type = match mem.memory_type.as_str() {
+    let memory_type = match mem.memory_type.to_lowercase().as_str() {
         "episodic" => MemoryType::Episodic,
         "semantic" => MemoryType::Semantic,
         "procedural" => MemoryType::Procedural,
