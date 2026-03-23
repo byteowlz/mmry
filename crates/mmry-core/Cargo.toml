@@ -34,7 +34,7 @@ tokenizers = { workspace = true }
 schemars = { workspace = true }
 walkdir = "2.5"
 reqwest = { workspace = true, optional = true }
-rig-core = { version = "0.26.0", default-features = false, features = ["reqwest-tls"], optional = true }
+rig-core = { version = "0.26.0", default-features = false, features = ["reqwest-rustls"], optional = true }
 
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }

@@ -31,12 +31,12 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             features: ""
-          # Linux ARM64 (disabled: needs Cross.toml with OpenSSL config)
-          # - target: aarch64-unknown-linux-gnu
-          #   os: ubuntu-latest
-          #   archive: tar.gz
-          #   cross: true
-          #   features: ""
+          # Linux ARM64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+            features: ""
           # macOS Intel (cross-compiled from ARM64 runner)
           - target: x86_64-apple-darwin
             os: macos-14
@@ -196,7 +196,8 @@ jobs:
           # Download checksums
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/checksums.txt" -o checksums.txt
           
-          SHA256=$(grep "x86_64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
+          SHA256_X86=$(grep "x86_64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
+          SHA256_ARM=$(grep "aarch64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
           
           cat > PKGBUILD << 'EOF'
           # Maintainer: byteowlz
@@ -204,14 +205,16 @@ jobs:
           pkgver=VERSION_PLACEHOLDER
           pkgrel=1
           pkgdesc="A lean, local-first memory management system for humans and AI agents"
-          arch=('x86_64')
+          arch=('x86_64' 'aarch64')
           url="https://github.com/byteowlz/mmry"
           license=('MIT')
           depends=('gcc-libs')
           conflicts=('mmry-cuda')
           provides=('mmry')
-          source=("$pkgname-$pkgver.tar.gz::https://github.com/byteowlz/mmry/releases/download/v$pkgver/mmry-v$pkgver-x86_64-unknown-linux-gnu.tar.gz")
-          sha256sums=('SHA256_PLACEHOLDER')
+          source_x86_64=("$pkgname-$pkgver-x86_64.tar.gz::https://github.com/byteowlz/mmry/releases/download/v$pkgver/mmry-v$pkgver-x86_64-unknown-linux-gnu.tar.gz")
+          source_aarch64=("$pkgname-$pkgver-aarch64.tar.gz::https://github.com/byteowlz/mmry/releases/download/v$pkgver/mmry-v$pkgver-aarch64-unknown-linux-gnu.tar.gz")
+          sha256sums_x86_64=('SHA256_X86_PLACEHOLDER')
+          sha256sums_aarch64=('SHA256_ARM_PLACEHOLDER')
           
           package() {
               install -Dm755 mmry "$pkgdir/usr/bin/mmry"
@@ -222,7 +225,8 @@ jobs:
           EOF
           
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
-          sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
+          sed -i "s/SHA256_X86_PLACEHOLDER/${SHA256_X86}/g" PKGBUILD
+          sed -i "s/SHA256_ARM_PLACEHOLDER/${SHA256_ARM}/g" PKGBUILD
 
       - name: Generate PKGBUILD (CUDA)
         if: matrix.pkgname == 'mmry-cuda'

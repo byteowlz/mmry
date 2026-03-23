@@ -39,7 +39,7 @@ toml = "0.8"
 dirs = "5.0"
 
 # Embeddings (disabled for Phase 1, will enable in Phase 2)
-fastembed = "5.11"
+fastembed = { version = "5.11", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls", "image-models"] }
 
 # Fuzzy matching
 strsim = "0.11.1"

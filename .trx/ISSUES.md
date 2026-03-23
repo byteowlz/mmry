@@ -22,6 +22,8 @@
 
 ### [mmry-xrbv] Learnings & Context System - distill agent sessions into actionable rules with confidence tracking, inspired by cass-memory (P1, epic)
 
+### [mmry-h8jz] Add aarch64-unknown-linux-gnu to release CI (Cross.toml + OpenSSL or remove openssl dep) (P2, task)
+
 ### [mmry-rzzd] agntz memory add fails with memory_embeddings dimension mismatch (P2, bug)
 
 ### [mmry-8rhe] Research RLM/DSPy.RLM memory systems vs OM (LongMemEval) and assess fit for mmry/observational-memory (P2, task)
