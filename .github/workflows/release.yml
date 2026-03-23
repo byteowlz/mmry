@@ -33,9 +33,8 @@ jobs:
             features: ""
           # Linux ARM64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             archive: tar.gz
-            cross: true
             features: ""
           # macOS Intel (cross-compiled from ARM64 runner)
           - target: x86_64-apple-darwin
