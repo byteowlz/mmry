@@ -22,8 +22,6 @@
 
 ### [mmry-xrbv] Learnings & Context System - distill agent sessions into actionable rules with confidence tracking, inspired by cass-memory (P1, epic)
 
-### [mmry-h8jz] Add aarch64-unknown-linux-gnu to release CI (Cross.toml + OpenSSL or remove openssl dep) (P2, task)
-
 ### [mmry-rzzd] agntz memory add fails with memory_embeddings dimension mismatch (P2, bug)
 
 ### [mmry-8rhe] Research RLM/DSPy.RLM memory systems vs OM (LongMemEval) and assess fit for mmry/observational-memory (P2, task)
@@ -47,6 +45,7 @@ When mmry service is started with MMRY__EXTERNAL_API__PORT env override (e.g. 48
 
 ## Closed
 
+- [mmry-h8jz] Add aarch64-unknown-linux-gnu to release CI (Cross.toml + OpenSSL or remove openssl dep) (closed 2026-03-23)
 - [mmry-ypv4] ExternalApiConfig uses enable/console_enable instead of enabled/console_enabled - inconsistent with all other config structs (closed 2026-03-03)
 - [mmry-rbqc] Clean up mmry-tui/app.rs: remove HMLR/graph/guardrails UI and re-enable in workspace (closed 2026-02-10)
 - [mmry-ssfb] Clean up mmry-service/server.rs: remove HMLR endpoints and re-enable in workspace (closed 2026-02-10)
