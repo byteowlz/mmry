@@ -699,7 +699,7 @@ pub(crate) async fn delete_vector_embedding(pool: &SqlitePool, id: &Uuid) -> cra
 pub(crate) fn ensure_sqlite_vec_loaded() -> crate::Result<()> {
     type ExtensionLoader = unsafe extern "C" fn(
         *mut libsqlite3_sys::sqlite3,
-        *mut *mut i8,
+        *mut *mut std::ffi::c_char,
         *const libsqlite3_sys::sqlite3_api_routines,
     ) -> i32;
 
