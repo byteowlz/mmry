@@ -36,11 +36,7 @@ jobs:
             os: ubuntu-24.04-arm
             archive: tar.gz
             features: ""
-          # macOS Intel (cross-compiled from ARM64 runner)
-          - target: x86_64-apple-darwin
-            os: macos-14
-            archive: tar.gz
-            features: ""
+          # macOS Intel: disabled (ort-sys has no prebuilt binaries for x86_64-apple-darwin)
           # macOS Apple Silicon (with CoreML acceleration)
           - target: aarch64-apple-darwin
             os: macos-14
