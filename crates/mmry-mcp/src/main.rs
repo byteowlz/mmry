@@ -20,6 +20,8 @@ use mmry_core::memory::MemoryType;
 use mmry_core::memory::SourceEntry;
 use mmry_core::memory::SourceKind;
 use mmry_core::reranker::RerankerService;
+use mmry_core::search::SearchFilters;
+use mmry_core::search::SearchQueryOptions;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 use serde::Deserialize;
@@ -58,6 +60,16 @@ struct SearchArgs {
     rerank: Option<bool>,
     #[serde(default)]
     store: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default, rename = "type")]
+    memory_type: Option<String>,
+    #[serde(default)]
+    min_importance: Option<i32>,
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
+    before: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +236,23 @@ impl MmryMcpRouter {
         Ok(Some(mode))
     }
 
+    fn parse_datetime(s: &str) -> Result<chrono::DateTime<chrono::Utc>, ToolError> {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return Ok(dt.with_timezone(&chrono::Utc));
+        }
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+            if let Some(dt) = date.and_hms_opt(0, 0, 0) {
+                return Ok(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                    dt,
+                    chrono::Utc,
+                ));
+            }
+        }
+        Err(ToolError::InvalidParameters(format!(
+            "Invalid date '{s}'. Use RFC 3339 or YYYY-MM-DD"
+        )))
+    }
+
     fn parse_memory_type(raw: Option<&str>, content: &str) -> MemoryType {
         let Some(raw) = raw else {
             return Self::classify_memory(content);
@@ -312,15 +341,36 @@ impl MmryMcpRouter {
             Arc::clone(&self.inner.reranker),
         );
 
+        let tags = args.tags.unwrap_or_default();
+        let memory_type = args
+            .memory_type
+            .and_then(|t| match t.to_lowercase().as_str() {
+                "episodic" => Some(MemoryType::Episodic),
+                "semantic" => Some(MemoryType::Semantic),
+                "procedural" => Some(MemoryType::Procedural),
+                _ => None,
+            });
+        let after = args.after.and_then(|s| Self::parse_datetime(&s).ok());
+        let before = args.before.and_then(|s| Self::parse_datetime(&s).ok());
+
+        let filters = SearchFilters {
+            tags: if tags.is_empty() { None } else { Some(&tags) },
+            memory_type,
+            min_importance: args.min_importance,
+            after,
+            before,
+        };
+
         let mut results = search
-            .search_with_options(
-                &args.query,
-                args.category.as_deref(),
+            .search_with_query_options(SearchQueryOptions {
+                query: &args.query,
+                category: args.category.as_deref(),
                 limit,
                 mode,
-                args.rerank,
-                false,
-            )
+                rerank: args.rerank,
+                include_expired: false,
+                filters,
+            })
             .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
 
@@ -611,7 +661,7 @@ impl mcp_server::Router for MmryMcpRouter {
         vec![
             Tool::new(
                 "mmry.search",
-                "Search memories in a store.",
+                "Search memories in a store with optional filters for tags, type, importance, and date range.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -620,7 +670,12 @@ impl mcp_server::Router for MmryMcpRouter {
                         "limit": { "type": ["integer", "null"], "minimum": 1 },
                         "mode": { "type": ["string", "null"], "description": "hybrid|keyword|fuzzy|semantic|bm25|sparse" },
                         "rerank": { "type": ["boolean", "null"] },
-                        "store": { "type": ["string", "null"] }
+                        "store": { "type": ["string", "null"] },
+                        "tags": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Filter: memory must contain at least one of these tags" },
+                        "type": { "type": ["string", "null"], "description": "Filter by memory type: episodic|semantic|procedural" },
+                        "min_importance": { "type": ["integer", "null"], "minimum": 1, "maximum": 10, "description": "Filter: minimum importance threshold" },
+                        "after": { "type": ["string", "null"], "description": "Filter: only memories created after (RFC 3339 or YYYY-MM-DD)" },
+                        "before": { "type": ["string", "null"], "description": "Filter: only memories created before (RFC 3339 or YYYY-MM-DD)" }
                     },
                     "required": ["query"],
                     "additionalProperties": false
@@ -938,6 +993,11 @@ mod tests {
                 mode: Some("keyword".to_string()),
                 rerank: Some(false),
                 store: None,
+                tags: None,
+                memory_type: None,
+                min_importance: None,
+                after: None,
+                before: None,
             })
             .await?;
         let search_json = extract_json(search);

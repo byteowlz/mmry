@@ -158,7 +158,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Try service-backed search before starting local services
-    if config.service.enabled {
+    if config.service.enabled && store_name != Some("all") {
         if let Commands::Search(cmd) = &command {
             match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
                 Ok(()) => return Ok(()),
@@ -209,6 +209,7 @@ async fn async_main() -> anyhow::Result<()> {
                 Arc::clone(&embeddings),
                 Arc::clone(&sparse_embeddings),
                 Arc::clone(&reranker),
+                store_name,
             )
             .await
         }

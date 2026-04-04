@@ -22,8 +22,12 @@ use mmry_core::config::SearchMode as CoreSearchMode;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::memory::Memory;
+use mmry_core::memory::MemoryType;
 use mmry_core::reranker::RerankScore;
+use mmry_core::search::SearchFilters;
+use mmry_core::search::SearchQueryOptions;
 use mmry_core::search::SearchService;
+use mmry_core::stores::list_stores;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
@@ -435,42 +439,132 @@ impl EmbeddingService for EmbeddingServiceImpl {
             Some(req.store)
         };
 
-        let (pool, db_guard) = if let Some(store_name) = store.as_deref() {
-            if store_name == self.state.config.stores.default {
-                (self.state.db.pool().clone(), None)
-            } else {
-                let db = Database::init_store(&self.state.config, Some(store_name))
-                    .await
-                    .map_err(|e| Status::internal(format!("Failed to open store: {e}")))?;
-                (db.pool().clone(), Some(db))
-            }
+        // Parse filter fields from proto
+        let tags: Vec<String> = req.tags;
+        let memory_type = if req.memory_type.trim().is_empty() {
+            None
         } else {
-            (self.state.db.pool().clone(), None)
+            match req.memory_type.to_lowercase().as_str() {
+                "episodic" => Some(MemoryType::Episodic),
+                "semantic" => Some(MemoryType::Semantic),
+                "procedural" => Some(MemoryType::Procedural),
+                _ => None,
+            }
+        };
+        let min_importance = if req.min_importance > 0 {
+            Some(req.min_importance)
+        } else {
+            None
+        };
+        let after = if req.after.trim().is_empty() {
+            None
+        } else {
+            chrono::DateTime::parse_from_rfc3339(&req.after)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        };
+        let before = if req.before.trim().is_empty() {
+            None
+        } else {
+            chrono::DateTime::parse_from_rfc3339(&req.before)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
         };
 
-        let search_service = SearchService::new(
-            pool,
-            self.state.search_config(),
-            Arc::clone(&self.state.embeddings_wrapper),
-            Arc::clone(&self.state.sparse_embeddings),
-            Arc::clone(&self.state.reranker),
-        );
+        let results = if store.as_deref() == Some("all") {
+            let mut merged = Vec::new();
+            let store_infos =
+                list_stores(&self.state.config).map_err(|e| Status::internal(e.to_string()))?;
 
-        let results = search_service
-            .search_with_options(
-                &req.query,
-                category.as_deref(),
-                limit,
-                Some(mode),
-                Some(req.rerank),
-                req.include_expired,
-            )
-            .await
-            .map_err(|e| Status::internal(format!("Search failed: {e}")))?;
+            for store_info in store_infos {
+                let db = Database::init_store(&self.state.config, Some(&store_info.name))
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to open store: {e}")))?;
+                let search_service = SearchService::new(
+                    db.pool().clone(),
+                    self.state.search_config(),
+                    Arc::clone(&self.state.embeddings_wrapper),
+                    Arc::clone(&self.state.sparse_embeddings),
+                    Arc::clone(&self.state.reranker),
+                );
 
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
+                let filters = SearchFilters {
+                    tags: if tags.is_empty() { None } else { Some(&tags) },
+                    memory_type: memory_type.clone(),
+                    min_importance,
+                    after,
+                    before,
+                };
+
+                let mut results = search_service
+                    .search_with_query_options(SearchQueryOptions {
+                        query: &req.query,
+                        category: category.as_deref(),
+                        limit,
+                        mode: Some(mode),
+                        rerank: Some(req.rerank),
+                        include_expired: req.include_expired,
+                        filters,
+                    })
+                    .await
+                    .map_err(|e| Status::internal(format!("Search failed: {e}")))?;
+
+                merged.append(&mut results);
+                db.close().await;
+            }
+
+            merged.sort_by_key(|memory| std::cmp::Reverse(memory.created_at));
+            merged.truncate(limit.max(1) as usize);
+            merged
+        } else {
+            let (pool, db_guard) = if let Some(store_name) = store.as_deref() {
+                if store_name == self.state.config.stores.default {
+                    (self.state.db.pool().clone(), None)
+                } else {
+                    let db = Database::init_store(&self.state.config, Some(store_name))
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to open store: {e}")))?;
+                    (db.pool().clone(), Some(db))
+                }
+            } else {
+                (self.state.db.pool().clone(), None)
+            };
+
+            let search_service = SearchService::new(
+                pool,
+                self.state.search_config(),
+                Arc::clone(&self.state.embeddings_wrapper),
+                Arc::clone(&self.state.sparse_embeddings),
+                Arc::clone(&self.state.reranker),
+            );
+
+            let filters = SearchFilters {
+                tags: if tags.is_empty() { None } else { Some(&tags) },
+                memory_type,
+                min_importance,
+                after,
+                before,
+            };
+
+            let results = search_service
+                .search_with_query_options(SearchQueryOptions {
+                    query: &req.query,
+                    category: category.as_deref(),
+                    limit,
+                    mode: Some(mode),
+                    rerank: Some(req.rerank),
+                    include_expired: req.include_expired,
+                    filters,
+                })
+                .await
+                .map_err(|e| Status::internal(format!("Search failed: {e}")))?;
+
+            if let Some(db) = db_guard {
+                db.close().await;
+            }
+
+            results
+        };
 
         let memories = results
             .into_iter()

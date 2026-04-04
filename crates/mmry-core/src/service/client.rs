@@ -109,6 +109,16 @@ pub struct DaemonSearchOptions<'a> {
     pub rerank: bool,
     pub include_expired: bool,
     pub store: Option<&'a str>,
+    /// Filter by tags (memory must contain at least one)
+    pub tags: Vec<String>,
+    /// Filter by memory type
+    pub memory_type: Option<String>,
+    /// Minimum importance threshold
+    pub min_importance: Option<i32>,
+    /// Only return memories created after this time (RFC 3339)
+    pub after: Option<String>,
+    /// Only return memories created before this time (RFC 3339)
+    pub before: Option<String>,
 }
 
 impl DaemonClient {
@@ -348,6 +358,11 @@ impl DaemonClient {
             rerank: opts.rerank,
             store: opts.store.unwrap_or_default().to_string(),
             include_expired: opts.include_expired,
+            tags: opts.tags,
+            memory_type: opts.memory_type.unwrap_or_default(),
+            min_importance: opts.min_importance.unwrap_or(0),
+            after: opts.after.unwrap_or_default(),
+            before: opts.before.unwrap_or_default(),
         };
 
         let response = client

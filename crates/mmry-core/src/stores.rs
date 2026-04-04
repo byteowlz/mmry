@@ -6,6 +6,8 @@ use crate::database::Database;
 use crate::embeddings::EmbeddingServiceWrapper;
 use crate::memory::Memory;
 use crate::reranker::RerankerService;
+use crate::search::SearchFilters;
+use crate::search::SearchQueryOptions;
 use crate::search::SearchService;
 use crate::sparse_embeddings::SparseEmbeddingService;
 use std::path::PathBuf;
@@ -22,6 +24,7 @@ pub struct SearchAllStoresOptions<'a> {
     pub mode: Option<SearchMode>,
     pub rerank: Option<bool>,
     pub include_expired: bool,
+    pub filters: SearchFilters<'a>,
     pub embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
     pub sparse_embeddings: Arc<SparseEmbeddingService>,
     pub reranker: Arc<RerankerService>,
@@ -199,14 +202,21 @@ pub async fn search_all_stores(
         );
 
         let results = search_service
-            .search_with_options(
-                opts.query,
-                opts.category,
-                opts.limit,
-                opts.mode,
-                opts.rerank,
-                opts.include_expired,
-            )
+            .search_with_query_options(SearchQueryOptions {
+                query: opts.query,
+                category: opts.category,
+                limit: opts.limit,
+                mode: opts.mode,
+                rerank: opts.rerank,
+                include_expired: opts.include_expired,
+                filters: SearchFilters {
+                    tags: opts.filters.tags,
+                    memory_type: opts.filters.memory_type.clone(),
+                    min_importance: opts.filters.min_importance,
+                    after: opts.filters.after,
+                    before: opts.filters.before,
+                },
+            })
             .await?;
 
         for memory in results {

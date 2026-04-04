@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 use sqlx::QueryBuilder;
@@ -17,6 +18,7 @@ use crate::config::SearchMode;
 use crate::database::operations;
 use crate::embeddings::EmbeddingServiceWrapper;
 use crate::memory::Memory;
+use crate::memory::MemoryType;
 use crate::memory::SourceAttribution;
 use crate::reranker::RerankerService;
 use crate::sparse_embeddings::SparseEmbeddingService;
@@ -49,6 +51,43 @@ pub struct ExecuteSearchOptions<'a> {
     pub mode_override: Option<SearchMode>,
     /// Override the default rerank setting
     pub rerank_override: Option<bool>,
+    /// Filter by tags (memory must contain at least one of these tags)
+    pub tags: Option<&'a [String]>,
+    /// Filter by memory type
+    pub memory_type: Option<MemoryType>,
+    /// Minimum importance threshold (inclusive)
+    pub min_importance: Option<i32>,
+    /// Only return memories created after this time
+    pub after: Option<DateTime<Utc>>,
+    /// Only return memories created before this time
+    pub before: Option<DateTime<Utc>>,
+}
+
+/// Filters that can be applied to search results
+#[derive(Debug, Clone, Default)]
+pub struct SearchFilters<'a> {
+    /// Filter by tags (memory must contain at least one of these tags)
+    pub tags: Option<&'a [String]>,
+    /// Filter by memory type
+    pub memory_type: Option<MemoryType>,
+    /// Minimum importance threshold (inclusive)
+    pub min_importance: Option<i32>,
+    /// Only return memories created after this time
+    pub after: Option<DateTime<Utc>>,
+    /// Only return memories created before this time
+    pub before: Option<DateTime<Utc>>,
+}
+
+/// Public search options with filters.
+#[derive(Debug, Clone)]
+pub struct SearchQueryOptions<'a> {
+    pub query: &'a str,
+    pub category: Option<&'a str>,
+    pub limit: i64,
+    pub mode: Option<SearchMode>,
+    pub rerank: Option<bool>,
+    pub include_expired: bool,
+    pub filters: SearchFilters<'a>,
 }
 
 /// Helper function to parse a Memory from a database row  
@@ -242,6 +281,26 @@ impl SearchService {
 
         if !opts.include_expired {
             memories.retain(|memory| memory.expired_at.is_none());
+        }
+
+        // Apply additional filters
+        if let Some(tags) = opts.tags {
+            if !tags.is_empty() {
+                memories
+                    .retain(|memory| tags.iter().any(|tag| memory.tags.iter().any(|t| t == tag)));
+            }
+        }
+        if let Some(ref memory_type) = opts.memory_type {
+            memories.retain(|memory| &memory.memory_type == memory_type);
+        }
+        if let Some(min_importance) = opts.min_importance {
+            memories.retain(|memory| memory.importance >= min_importance);
+        }
+        if let Some(after) = opts.after {
+            memories.retain(|memory| memory.created_at > after);
+        }
+        if let Some(before) = opts.before {
+            memories.retain(|memory| memory.created_at < before);
         }
 
         if memories.is_empty() {
@@ -547,6 +606,54 @@ impl SearchService {
             .await
     }
 
+    /// Extended search options for filtering.
+    pub async fn search_with_query_options(
+        &self,
+        opts: SearchQueryOptions<'_>,
+    ) -> Result<Vec<Memory>> {
+        let mode = opts.mode.unwrap_or(self.config.mode);
+        let use_vectors = matches!(mode, SearchMode::Semantic | SearchMode::Hybrid);
+        let use_sparse = matches!(mode, SearchMode::SparseEmbedding)
+            || (matches!(mode, SearchMode::Hybrid) && self.config.sparse_embedding_weight > 0.0);
+
+        let query_embedding = if use_vectors {
+            let mut emb = self.embeddings.lock().await;
+            if emb.is_enabled() {
+                emb.embed(opts.query).await?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let query_sparse_embedding = if use_sparse && self.sparse_embeddings.is_enabled() {
+            self.sparse_embeddings
+                .embed(opts.query)
+                .await?
+                .map(|e| e.into())
+        } else {
+            None
+        };
+
+        self.execute_search(ExecuteSearchOptions {
+            query: opts.query,
+            category: opts.category,
+            limit: opts.limit,
+            include_expired: opts.include_expired,
+            query_embedding,
+            query_sparse_embedding,
+            mode_override: Some(mode),
+            rerank_override: opts.rerank,
+            tags: opts.filters.tags,
+            memory_type: opts.filters.memory_type,
+            min_importance: opts.filters.min_importance,
+            after: opts.filters.after,
+            before: opts.filters.before,
+        })
+        .await
+    }
+
     pub async fn search_with_options(
         &self,
         query: &str,
@@ -556,37 +663,14 @@ impl SearchService {
         rerank: Option<bool>,
         include_expired: bool,
     ) -> Result<Vec<Memory>> {
-        let mode = mode.unwrap_or(self.config.mode);
-        let use_vectors = matches!(mode, SearchMode::Semantic | SearchMode::Hybrid);
-        let use_sparse = matches!(mode, SearchMode::SparseEmbedding)
-            || (matches!(mode, SearchMode::Hybrid) && self.config.sparse_embedding_weight > 0.0);
-
-        let query_embedding = if use_vectors {
-            let mut emb = self.embeddings.lock().await;
-            if emb.is_enabled() {
-                emb.embed(query).await?
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let query_sparse_embedding = if use_sparse && self.sparse_embeddings.is_enabled() {
-            self.sparse_embeddings.embed(query).await?.map(|e| e.into())
-        } else {
-            None
-        };
-
-        self.execute_search(ExecuteSearchOptions {
+        self.search_with_query_options(SearchQueryOptions {
             query,
             category,
             limit,
+            mode,
+            rerank,
             include_expired,
-            query_embedding,
-            query_sparse_embedding,
-            mode_override: Some(mode),
-            rerank_override: rerank,
+            filters: SearchFilters::default(),
         })
         .await
     }

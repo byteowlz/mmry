@@ -93,6 +93,12 @@ message SearchRequest {
   bool rerank = 5;
   string store = 6;
   bool include_expired = 7;
+  // Filter fields
+  repeated string tags = 8;
+  string memory_type = 9;
+  int32 min_importance = 10;
+  string after = 11;
+  string before = 12;
 }
 
 message SparseEmbeddingData {
