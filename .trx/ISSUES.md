@@ -22,6 +22,18 @@
 
 ### [mmry-xrbv] Learnings & Context System - distill agent sessions into actionable rules with confidence tracking, inspired by cass-memory (P1, epic)
 
+### [mmry-93vp] Standardize search JSON output for cross-tool integration (P2, feature)
+For unified search across hstry/mmry/trx, search results need a common envelope format: { source: 'mmry', source_store, id, title, content, snippet, score, created_at, tags, category, importance, metadata }. Ensure mmry search --json output matches this schema so agntz can merge results from all three tools.
+
+### [mmry-mgcj] Add cross-store search capability (P2, feature)
+Each mmry store is isolated. Cannot search across all repos/stores. Add a --all flag to search that queries across all configured stores and merges results. The daemon should support multi-store search natively. This is critical for unified search - a query about 'authentication' might have relevant memories across multiple project stores.
+
+### [mmry-6g12] Add tag filter to search (P2, feature)
+Tags exist in the schema (JSON array) and are stored per memory, but search cannot filter by them. Add optional tags parameter to search that filters memories containing any/all specified tags. Expose via CLI --tag flag. Tags are the cross-tool connector for unified search across hstry/mmry/trx.
+
+### [mmry-3gm3] Add date range filters (after/before) to search (P2, feature)
+Search has no date range filter. Cannot say 'memories from last week'. Add after/before parameters to SearchService::search_with_options() and ExecuteSearchOptions, apply as WHERE clause on created_at. Expose via CLI --after/--before flags and daemon search API.
+
 ### [mmry-rzzd] agntz memory add fails with memory_embeddings dimension mismatch (P2, bug)
 
 ### [mmry-8rhe] Research RLM/DSPy.RLM memory systems vs OM (LongMemEval) and assess fit for mmry/observational-memory (P2, task)
@@ -37,6 +49,12 @@
 ### [mmry-xrbv.8] Cross-store context search - 'mmry context <task> --all-stores' to search learnings across multiple stores with store attribution in results (P2, feature)
 
 ### [mmry-xrbv.5] Feedback events & outcome recording - record helpful/harmful feedback on learnings, record session outcomes with rule attribution, auto-apply to update scores (P2, feature)
+
+### [mmry-zr20] Add memory type filter to search (P3, feature)
+memory_type is indexed (idx_memories_type) but search cannot filter by it. Add optional type parameter to ExecuteSearchOptions. Expose via CLI --type flag (episodic/semantic/procedural etc).
+
+### [mmry-zntt] Add importance threshold filter to search (P3, feature)
+Importance currently only boosts scoring but cannot be used as a hard filter. Add optional min_importance parameter to search that excludes memories below the threshold. Useful for 'only show me high-importance memories' queries. Expose via CLI --importance or --min-importance flag.
 
 ### [mmry-1ka8] vctr: standalone embedding/reranking server (P3, feature)
 
