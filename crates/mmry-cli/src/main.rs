@@ -92,6 +92,9 @@ enum Commands {
 
     /// Remove duplicate memories (keeping the oldest)
     Prune(commands::prune::PruneCmd),
+
+    /// Show effective AGENT_CTX_* runtime metadata, active store, and config path
+    Context(commands::context::ContextCmd),
 }
 
 fn main() {
@@ -145,6 +148,15 @@ async fn async_main() -> anyhow::Result<()> {
         Commands::Stores(cmd) => return commands::stores::handle(cmd, &config).await,
         Commands::Export(cmd) => {
             return commands::export::handle(cmd, &config, cli.store.as_deref()).await
+        }
+        Commands::Context(cmd) => {
+            return commands::context::handle(
+                cmd,
+                &config,
+                cli.config.as_deref(),
+                cli.store.as_deref(),
+            )
+            .await
         }
         other => other,
     };
@@ -253,7 +265,8 @@ async fn async_main() -> anyhow::Result<()> {
         | Commands::Init(_)
         | Commands::Service(_)
         | Commands::Stores(_)
-        | Commands::Export(_) => {
+        | Commands::Export(_)
+        | Commands::Context(_) => {
             unreachable!()
         }
         #[cfg(feature = "bench")]

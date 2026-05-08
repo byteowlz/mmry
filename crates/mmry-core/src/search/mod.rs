@@ -61,6 +61,12 @@ pub struct ExecuteSearchOptions<'a> {
     pub after: Option<DateTime<Utc>>,
     /// Only return memories created before this time
     pub before: Option<DateTime<Utc>>,
+    /// AGENT_CTX workspace id filter (column-backed)
+    pub workspace_id: Option<&'a str>,
+    /// AGENT_CTX platform session id filter (column-backed)
+    pub platform_session_id: Option<&'a str>,
+    /// AGENT_CTX harness session id filter (column-backed)
+    pub harness_session_id: Option<&'a str>,
 }
 
 /// Filters that can be applied to search results
@@ -76,6 +82,12 @@ pub struct SearchFilters<'a> {
     pub after: Option<DateTime<Utc>>,
     /// Only return memories created before this time
     pub before: Option<DateTime<Utc>>,
+    /// AGENT_CTX workspace id filter (column-backed)
+    pub workspace_id: Option<&'a str>,
+    /// AGENT_CTX platform session id filter (column-backed)
+    pub platform_session_id: Option<&'a str>,
+    /// AGENT_CTX harness session id filter (column-backed)
+    pub harness_session_id: Option<&'a str>,
 }
 
 /// Public search options with filters.
@@ -301,6 +313,15 @@ impl SearchService {
         }
         if let Some(before) = opts.before {
             memories.retain(|memory| memory.created_at < before);
+        }
+        if let Some(workspace_id) = opts.workspace_id {
+            memories.retain(|memory| memory.workspace_id() == Some(workspace_id));
+        }
+        if let Some(platform_session_id) = opts.platform_session_id {
+            memories.retain(|memory| memory.platform_session_id() == Some(platform_session_id));
+        }
+        if let Some(harness_session_id) = opts.harness_session_id {
+            memories.retain(|memory| memory.harness_session_id() == Some(harness_session_id));
         }
 
         if memories.is_empty() {
@@ -650,6 +671,9 @@ impl SearchService {
             min_importance: opts.filters.min_importance,
             after: opts.filters.after,
             before: opts.filters.before,
+            workspace_id: opts.filters.workspace_id,
+            platform_session_id: opts.filters.platform_session_id,
+            harness_session_id: opts.filters.harness_session_id,
         })
         .await
     }

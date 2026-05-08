@@ -1,5 +1,6 @@
 use super::delete_vector_embedding;
 use super::upsert_vector_embedding;
+use crate::agent_ctx::CtxIndexKeys;
 use crate::agents::AgentEvent;
 use crate::agents::AgentRecord;
 use crate::learnings::FeedbackEvent;
@@ -182,15 +183,18 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
         .map(SourceAttribution::compute_metrics)
         .unwrap_or((memory.trust_level, memory.source_reinforcement_score));
 
+    let ctx_keys = CtxIndexKeys::from_metadata(&memory.metadata);
+
     sqlx::query(
         r#"
         INSERT INTO memories (
             id, type, content, embedding, sparse_embedding, metadata, importance,
             expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score,
             category, tags, created_at, updated_at,
-            parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id,
+            workspace_id, platform_session_id, harness_session_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(memory.id.to_string())
@@ -220,6 +224,9 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(memory.total_chunks)
     .bind(chunk_method_str)
     .bind(memory.bridge_block_id.map(|id| id.to_string()))
+    .bind(ctx_keys.workspace_id)
+    .bind(ctx_keys.platform_session_id)
+    .bind(ctx_keys.harness_session_id)
     .execute(pool)
     .await?;
 
@@ -649,13 +656,6 @@ pub async fn upsert_memory_for_import(pool: &SqlitePool, memory: &Memory) -> cra
         Ok(true)
     }
 }
-
-/// Upsert an entity by name (case-insensitive) for import
-/// Returns the entity ID (existing or new)
-
-/// Upsert a relationship by ID for import
-
-/// Upsert a memory-entity link for import
 
 /// Get memory IDs that need embeddings (have no embedding or sparse_embedding)
 pub async fn get_memories_needing_embeddings(pool: &SqlitePool) -> crate::Result<Vec<Uuid>> {

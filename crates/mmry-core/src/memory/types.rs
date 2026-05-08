@@ -122,6 +122,30 @@ impl Memory {
         self.total_chunks.is_some() && self.total_chunks.unwrap() > 1
     }
 
+    /// Workspace id captured from `AGENT_CTX_WORKSPACE_ID` at write time.
+    pub fn workspace_id(&self) -> Option<&str> {
+        self.metadata
+            .get("agent_ctx")
+            .and_then(|v| v.get("workspace_id"))
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// Platform session id from `AGENT_CTX_PLATFORM_SESSION_ID`.
+    pub fn platform_session_id(&self) -> Option<&str> {
+        self.metadata
+            .get("agent_ctx")
+            .and_then(|v| v.get("platform_session_id"))
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// Harness session id from `AGENT_CTX_HARNESS_SESSION_ID`.
+    pub fn harness_session_id(&self) -> Option<&str> {
+        self.metadata
+            .get("agent_ctx")
+            .and_then(|v| v.get("harness_session_id"))
+            .and_then(serde_json::Value::as_str)
+    }
+
     pub fn recompute_trust_metrics(&mut self) {
         let (trust_level, reinforcement) = self
             .source_attribution

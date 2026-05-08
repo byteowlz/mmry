@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS memories (
     chunk_index INTEGER,
     total_chunks INTEGER,
     chunk_method TEXT,
-    bridge_block_id TEXT
+    bridge_block_id TEXT,
+    workspace_id TEXT,
+    platform_session_id TEXT,
+    harness_session_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agents (

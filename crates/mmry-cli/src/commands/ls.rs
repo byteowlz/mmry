@@ -16,12 +16,31 @@ pub struct LsCmd {
 
     #[arg(long, help = "Include full embeddings in JSON output")]
     pub full: bool,
+
+    #[arg(long, help = "Filter by AGENT_CTX_WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    #[arg(long, help = "Filter by AGENT_CTX_PLATFORM_SESSION_ID")]
+    pub platform_session_id: Option<String>,
+
+    #[arg(long, help = "Filter by AGENT_CTX_HARNESS_SESSION_ID")]
+    pub harness_session_id: Option<String>,
 }
 
 pub async fn handle(cmd: LsCmd, config: &Config, db: &Database) -> anyhow::Result<()> {
     let limit = cmd.limit.unwrap_or(config.search.default_limit as i64);
 
-    let memories = operations::list_memories(db.pool(), cmd.category.as_deref(), limit).await?;
+    let mut memories = operations::list_memories(db.pool(), cmd.category.as_deref(), limit).await?;
+
+    if let Some(ws) = cmd.workspace_id.as_deref() {
+        memories.retain(|m| m.workspace_id() == Some(ws));
+    }
+    if let Some(ps) = cmd.platform_session_id.as_deref() {
+        memories.retain(|m| m.platform_session_id() == Some(ps));
+    }
+    if let Some(hs) = cmd.harness_session_id.as_deref() {
+        memories.retain(|m| m.harness_session_id() == Some(hs));
+    }
 
     if cmd.json {
         if cmd.full {

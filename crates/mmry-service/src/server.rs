@@ -16,6 +16,7 @@ use axum::routing::post;
 use axum::routing::put;
 use axum::Json;
 use axum::Router;
+use mmry_core::agent_ctx::AgentCtx;
 use mmry_core::config::Config;
 use mmry_core::config::ExternalApiConfig;
 use mmry_core::config::SearchMode as CoreSearchMode;
@@ -494,6 +495,9 @@ impl EmbeddingService for EmbeddingServiceImpl {
                     min_importance,
                     after,
                     before,
+                    workspace_id: None,
+                    platform_session_id: None,
+                    harness_session_id: None,
                 };
 
                 let mut results = search_service
@@ -544,6 +548,9 @@ impl EmbeddingService for EmbeddingServiceImpl {
                 min_importance,
                 after,
                 before,
+                workspace_id: None,
+                platform_session_id: None,
+                harness_session_id: None,
             };
 
             let results = search_service
@@ -870,6 +877,8 @@ async fn memory_create_handler(
         chunk_method: None,
         bridge_block_id: None,
     };
+
+    AgentCtx::from_env().merge_into_metadata(&mut memory.metadata);
 
     // Generate embedding if embeddings service available
     {

@@ -9,6 +9,7 @@ use mcp_spec::protocol::ServerCapabilities;
 use mcp_spec::resource::Resource;
 use mcp_spec::tool::Tool;
 use mcp_spec::ResourceContents;
+use mmry_core::agent_ctx::AgentCtx;
 use mmry_core::agents::AgentIdentity;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
@@ -45,6 +46,7 @@ struct MmryMcpInner {
     embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     reranker: Arc<RerankerService>,
+    agent_ctx: AgentCtx,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +72,12 @@ struct SearchArgs {
     after: Option<String>,
     #[serde(default)]
     before: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    platform_session_id: Option<String>,
+    #[serde(default)]
+    harness_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +182,7 @@ impl MmryMcpRouter {
                 embeddings,
                 sparse_embeddings,
                 reranker,
+                agent_ctx: AgentCtx::from_env(),
             }),
         })
     }
@@ -359,6 +368,9 @@ impl MmryMcpRouter {
             min_importance: args.min_importance,
             after,
             before,
+            workspace_id: args.workspace_id.as_deref(),
+            platform_session_id: args.platform_session_id.as_deref(),
+            harness_session_id: args.harness_session_id.as_deref(),
         };
 
         let mut results = search
@@ -443,10 +455,17 @@ impl MmryMcpRouter {
 
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
 
+        let ctx = &self.inner.agent_ctx;
+        let mut agent_meta = args.agent_meta.unwrap_or(Value::Null);
+        ctx.enrich_agent_meta(&mut agent_meta);
         let agent_identity = AgentIdentity {
-            name: args.agent,
-            kind: args.agent_kind,
-            meta: args.agent_meta,
+            name: args.agent.or_else(|| ctx.default_agent_name()),
+            kind: args.agent_kind.or_else(|| ctx.default_agent_kind()),
+            meta: if agent_meta.is_null() {
+                None
+            } else {
+                Some(agent_meta)
+            },
         };
         let agent = agent_identity
             .resolve(&pool)
@@ -459,6 +478,7 @@ impl MmryMcpRouter {
         let memory_type = Self::parse_memory_type(args.memory_type.as_deref(), &args.content);
 
         let mut memory = Memory::new(memory_type, args.content, category);
+        ctx.merge_into_metadata(&mut memory.metadata);
         if let Some(importance) = args.importance {
             memory.importance = importance.clamp(1, 10);
         }
@@ -998,6 +1018,9 @@ mod tests {
                 min_importance: None,
                 after: None,
                 before: None,
+                workspace_id: None,
+                platform_session_id: None,
+                harness_session_id: None,
             })
             .await?;
         let search_json = extract_json(search);

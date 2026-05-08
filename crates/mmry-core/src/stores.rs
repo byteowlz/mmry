@@ -215,6 +215,9 @@ pub async fn search_all_stores(
                     min_importance: opts.filters.min_importance,
                     after: opts.filters.after,
                     before: opts.filters.before,
+                    workspace_id: opts.filters.workspace_id,
+                    platform_session_id: opts.filters.platform_session_id,
+                    harness_session_id: opts.filters.harness_session_id,
                 },
             })
             .await?;

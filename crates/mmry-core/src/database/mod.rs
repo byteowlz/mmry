@@ -545,6 +545,32 @@ impl Database {
             tracing::info!("bridge_block_id column added");
         }
 
+        // AGENT_CTX columns: stable IDs denormalized from metadata.agent_ctx
+        // for index-backed filtering by workspace / session.
+        for (column, index) in [
+            ("workspace_id", "idx_memories_workspace"),
+            ("platform_session_id", "idx_memories_platform_session"),
+            ("harness_session_id", "idx_memories_harness_session"),
+        ] {
+            let exists: bool = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='{column}'"
+            ))
+            .fetch_one(pool)
+            .await?;
+            if !exists {
+                tracing::info!("Adding {column} column to memories table...");
+                sqlx::query(&format!("ALTER TABLE memories ADD COLUMN {column} TEXT"))
+                    .execute(pool)
+                    .await?;
+                tracing::info!("{column} column added");
+            }
+            sqlx::query(&format!(
+                "CREATE INDEX IF NOT EXISTS {index} ON memories({column})"
+            ))
+            .execute(pool)
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -1034,6 +1060,60 @@ mod tests {
 
         // Second init should be idempotent
         let _ = Database::init(&db_path, TEST_DIM).await?;
+
+        db.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_ctx_stamping_populates_columns_and_metadata() -> crate::Result<()> {
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("ctx.db");
+        let db = Database::init(&db_path, TEST_DIM).await?;
+
+        let ctx = crate::agent_ctx::from_pairs(&[
+            ("AGENT_CTX_VERSION", "1"),
+            ("AGENT_CTX_HARNESS", "pi"),
+            ("AGENT_CTX_PLATFORM_NAME", "claude-code"),
+            ("AGENT_CTX_WORKSPACE_ID", "ws-abc"),
+            ("AGENT_CTX_PLATFORM_SESSION_ID", "ps-123"),
+            ("AGENT_CTX_HARNESS_SESSION_ID", "hs-456"),
+        ]);
+
+        let mut memory = Memory::new(
+            MemoryType::Episodic,
+            "ctx-stamped".to_string(),
+            "default".to_string(),
+        );
+        ctx.merge_into_metadata(&mut memory.metadata);
+
+        operations::insert_memory(db.pool(), &memory).await?;
+
+        let (workspace_id, platform_session_id, harness_session_id): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT workspace_id, platform_session_id, harness_session_id FROM memories WHERE id = ?",
+        )
+        .bind(memory.id.to_string())
+        .fetch_one(db.pool())
+        .await?;
+
+        assert_eq!(workspace_id.as_deref(), Some("ws-abc"));
+        assert_eq!(platform_session_id.as_deref(), Some("ps-123"));
+        assert_eq!(harness_session_id.as_deref(), Some("hs-456"));
+
+        let stored = operations::get_memory(db.pool(), memory.id).await?.unwrap();
+        assert_eq!(stored.workspace_id(), Some("ws-abc"));
+        assert_eq!(stored.platform_session_id(), Some("ps-123"));
+        assert_eq!(stored.harness_session_id(), Some("hs-456"));
+        let agent_ctx = stored.metadata.get("agent_ctx").expect("agent_ctx stamped");
+        assert_eq!(
+            agent_ctx.get("harness").and_then(|v| v.as_str()),
+            Some("pi")
+        );
+        let _ = json!({}); // suppress unused-import lint in this test module
 
         db.close().await;
         Ok(())

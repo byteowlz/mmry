@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mmry_core::agent_ctx::AgentCtx;
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
 use mmry_core::database::operations;
@@ -246,11 +247,13 @@ async fn handle_file_ingest(
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
 ) -> anyhow::Result<()> {
+    let agent_ctx = AgentCtx::from_env();
     let ctx = IngestContext {
         config,
         db,
         embeddings: &embeddings,
         sparse_embeddings: &sparse_embeddings,
+        agent_ctx: &agent_ctx,
     };
 
     let extensions: Vec<String> = opts
@@ -370,11 +373,13 @@ async fn handle_watch(
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
 ) -> anyhow::Result<()> {
+    let agent_ctx = AgentCtx::from_env();
     let ctx = IngestContext {
         config,
         db,
         embeddings: &embeddings,
         sparse_embeddings: &sparse_embeddings,
+        agent_ctx: &agent_ctx,
     };
 
     let mut watch_root = opts.path.clone();
@@ -592,6 +597,7 @@ async fn handle_stdin(
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
 ) -> anyhow::Result<()> {
+    let agent_ctx = AgentCtx::from_env();
     let mut buffer = String::new();
     io::stdin().read_to_string(&mut buffer)?;
 
@@ -634,6 +640,7 @@ async fn handle_stdin(
 
         // Create parent memory
         let mut parent = Memory::new(memory_type.clone(), content.to_string(), category.clone());
+        agent_ctx.merge_into_metadata(&mut parent.metadata);
         parent.tags = tags.clone();
         parent.total_chunks = Some(total_chunks as i32);
 
@@ -705,6 +712,7 @@ async fn handle_stdin(
     } else {
         // Single memory, no chunking needed
         let mut memory = Memory::new(memory_type, content.to_string(), category);
+        agent_ctx.merge_into_metadata(&mut memory.metadata);
         memory.tags = tags;
 
         if let Some(ref source) = source_path {
@@ -765,6 +773,7 @@ struct IngestContext<'a> {
     db: &'a Database,
     embeddings: &'a Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: &'a Arc<SparseEmbeddingService>,
+    agent_ctx: &'a AgentCtx,
 }
 
 async fn ingest_file(
@@ -815,6 +824,7 @@ async fn ingest_file(
 
         // Create parent memory
         let mut parent = Memory::new(memory_type.clone(), body.to_string(), category.clone());
+        ctx.agent_ctx.merge_into_metadata(&mut parent.metadata);
         parent.tags = tags.clone();
         parent.total_chunks = Some(total_chunks as i32);
 
@@ -889,6 +899,7 @@ async fn ingest_file(
     } else {
         // Single memory, no chunking needed
         let mut memory = Memory::new(memory_type, body.to_string(), category);
+        ctx.agent_ctx.merge_into_metadata(&mut memory.metadata);
         memory.tags = tags;
 
         if let Some(ref source) = source_path {

@@ -92,6 +92,15 @@ pub struct SearchCmd {
         help = "Only return memories created before this date (RFC 3339 or YYYY-MM-DD)"
     )]
     pub before: Option<String>,
+
+    #[arg(long, help = "Filter by AGENT_CTX_WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    #[arg(long, help = "Filter by AGENT_CTX_PLATFORM_SESSION_ID")]
+    pub platform_session_id: Option<String>,
+
+    #[arg(long, help = "Filter by AGENT_CTX_HARNESS_SESSION_ID")]
+    pub harness_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -244,6 +253,9 @@ fn build_filters(cmd: &SearchCmd) -> anyhow::Result<SearchFilters<'_>> {
         min_importance: cmd.min_importance,
         after,
         before,
+        workspace_id: cmd.workspace_id.as_deref(),
+        platform_session_id: cmd.platform_session_id.as_deref(),
+        harness_session_id: cmd.harness_session_id.as_deref(),
     })
 }
 

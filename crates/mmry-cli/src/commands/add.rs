@@ -4,6 +4,7 @@ use std::io::Read;
 use std::io::{self};
 use std::sync::Arc;
 
+use mmry_core::agent_ctx::AgentCtx;
 use mmry_core::agents::AgentIdentity;
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
@@ -84,26 +85,37 @@ pub async fn handle(
         anyhow::bail!("Content cannot be empty");
     }
 
-    // Resolve agent identity (--agent / MMRY_AGENT, defaults to "human")
+    // Capture AGENT_CTX_* runtime metadata once per command. Defensive: empty
+    // when nothing is set; otherwise drives sensible defaults (agent name,
+    // agent metadata) and gets stamped onto each persisted memory below.
+    let agent_ctx = AgentCtx::from_env();
+
+    // Resolve agent identity. Precedence: CLI flag > MMRY_AGENT env > AGENT_CTX
+    // harness > "human". Per AGENT_CTX schema, env values fill in defaults
+    // only — explicit flags always win.
     let agent_identity = AgentIdentity {
-        name: cmd.agent.clone(),
-        kind: cmd.agent_kind.clone(),
-        meta: cmd.agent_meta.clone(),
+        name: cmd.agent.clone().or_else(|| agent_ctx.default_agent_name()),
+        kind: cmd
+            .agent_kind
+            .clone()
+            .or_else(|| agent_ctx.default_agent_kind()),
+        meta: merged_agent_meta(cmd.agent_meta.clone(), &agent_ctx),
     };
     let agent = agent_identity.resolve(db.pool()).await?;
 
     // Try to parse as JSON first
     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&input) {
-        let ctx = AddContext {
+        let add_ctx = AddContext {
             config,
             db,
             embeddings: &embeddings,
             sparse_embeddings: &sparse_embeddings,
             agent: &agent,
+            agent_ctx: &agent_ctx,
         };
 
         // Handle JSON input
-        return handle_json_input(json_value, cmd, &ctx).await;
+        return handle_json_input(json_value, cmd, &add_ctx).await;
     }
 
     // Plain text input
@@ -129,6 +141,7 @@ pub async fn handle(
         .unwrap_or_else(|| config.memory.default_category.clone());
 
     let mut memory = Memory::new(memory_type, content.clone(), category);
+    agent_ctx.merge_into_metadata(&mut memory.metadata);
 
     if let Some(tags_str) = cmd.tags {
         memory.tags = tags_str.split(',').map(|s| s.trim().to_string()).collect();
@@ -270,6 +283,27 @@ struct AddContext<'a> {
     embeddings: &'a Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: &'a Arc<SparseEmbeddingService>,
     agent: &'a mmry_core::agents::AgentRecord,
+    agent_ctx: &'a AgentCtx,
+}
+
+/// Merge a caller-supplied `--agent-meta` JSON value with `AGENT_CTX_*`
+/// env metadata. Caller-supplied keys win; ctx fills missing slots and
+/// always carries a structured `agent_ctx` snapshot for forward-compat.
+fn merged_agent_meta(
+    caller_meta: Option<serde_json::Value>,
+    ctx: &AgentCtx,
+) -> Option<serde_json::Value> {
+    if ctx.is_empty() {
+        return caller_meta;
+    }
+    let mut meta = caller_meta.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+    ctx.enrich_agent_meta(&mut meta);
+    let non_empty = meta.as_object().map(|obj| !obj.is_empty()).unwrap_or(false);
+    if non_empty {
+        Some(meta)
+    } else {
+        None
+    }
 }
 
 async fn handle_json_input(
@@ -287,6 +321,7 @@ async fn handle_json_input(
                 ctx.config,
                 ctx.embeddings,
                 ctx.sparse_embeddings,
+                ctx.agent_ctx,
             )
             .await?;
             operations::insert_memory(ctx.db.pool(), &memory).await?;
@@ -331,6 +366,7 @@ async fn handle_json_input(
         ctx.config,
         ctx.embeddings,
         ctx.sparse_embeddings,
+        ctx.agent_ctx,
     )
     .await?;
     operations::insert_memory(ctx.db.pool(), &memory).await?;
@@ -354,6 +390,7 @@ async fn process_json_memory(
     config: &Config,
     embeddings: &Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: &Arc<SparseEmbeddingService>,
+    agent_ctx: &AgentCtx,
 ) -> anyhow::Result<Memory> {
     let obj = json_value
         .as_object()
@@ -403,6 +440,7 @@ async fn process_json_memory(
     };
 
     let mut memory = Memory::new(memory_type, content.clone(), category);
+    agent_ctx.merge_into_metadata(&mut memory.metadata);
 
     if let Some(importance) = cmd.importance {
         memory.importance = importance.clamp(1, 10);
