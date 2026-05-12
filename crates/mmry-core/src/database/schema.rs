@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS memories (
     sparse_embedding BLOB,
     metadata JSON,
     importance INTEGER DEFAULT 5,
+    helpful_count INTEGER NOT NULL DEFAULT 0,
+    harmful_count INTEGER NOT NULL DEFAULT 0,
     expires_at DATETIME,
     expired_at DATETIME,
     source_attribution JSON,
@@ -82,6 +84,20 @@ CREATE TABLE IF NOT EXISTS learning_feedback (
     agent_id TEXT REFERENCES agents(id)
 );
 
+CREATE TABLE IF NOT EXISTS episodes (
+    id TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    returned_ids JSON NOT NULL DEFAULT '[]',
+    used_ids JSON,
+    result TEXT,
+    workspace_id TEXT,
+    platform_session_id TEXT,
+    harness_session_id TEXT,
+    agent_id TEXT REFERENCES agents(id),
+    ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+    closed_at DATETIME
+);
+
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
@@ -95,4 +111,8 @@ CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id);
 CREATE INDEX IF NOT EXISTS idx_learnings_scope ON learnings(scope, scope_key);
 CREATE INDEX IF NOT EXISTS idx_learning_feedback_learning ON learning_feedback(learning_id);
 CREATE INDEX IF NOT EXISTS idx_learning_feedback_timestamp ON learning_feedback(timestamp);
+CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_workspace ON episodes(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_platform_session ON episodes(platform_session_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_closed_at ON episodes(closed_at);
 "#;

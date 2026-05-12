@@ -525,6 +525,43 @@ impl Database {
         .execute(pool)
         .await?;
 
+        // Episodes: append-only log of (query, returned_ids, used_ids, agent_ctx, ts).
+        // Substrate for derived feedback signals — no separate counter tables.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS episodes (
+                id TEXT PRIMARY KEY,
+                query TEXT NOT NULL,
+                returned_ids JSON NOT NULL DEFAULT '[]',
+                used_ids JSON,
+                result TEXT,
+                workspace_id TEXT,
+                platform_session_id TEXT,
+                harness_session_id TEXT,
+                agent_id TEXT REFERENCES agents(id),
+                ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                closed_at DATETIME
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts DESC)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_episodes_workspace ON episodes(workspace_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_episodes_platform_session ON episodes(platform_session_id)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_episodes_closed_at ON episodes(closed_at)")
+            .execute(pool)
+            .await?;
+
         // Check if bridge_block_id column exists, add if not (for HMLR feature)
         let bridge_block_id_exists: bool = sqlx::query_scalar(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='bridge_block_id'",
@@ -569,6 +606,24 @@ impl Database {
             ))
             .execute(pool)
             .await?;
+        }
+
+        // Feedback counters on memories — bumped by `close_episode` when an
+        // agent's follow-up `mmry add --using <ids>` cites a returned memory.
+        for column in ["helpful_count", "harmful_count"] {
+            let exists: bool = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='{column}'"
+            ))
+            .fetch_one(pool)
+            .await?;
+            if !exists {
+                tracing::info!("Adding {column} column to memories table...");
+                sqlx::query(&format!(
+                    "ALTER TABLE memories ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                ))
+                .execute(pool)
+                .await?;
+            }
         }
 
         Ok(())

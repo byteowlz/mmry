@@ -4,6 +4,7 @@ pub mod chunking;
 pub mod config;
 pub mod database;
 pub mod embeddings;
+pub mod episodes;
 pub mod error;
 pub mod http_json;
 pub mod integrations;

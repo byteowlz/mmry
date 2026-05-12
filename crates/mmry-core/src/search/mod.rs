@@ -13,10 +13,12 @@ use strsim::jaro_winkler;
 use uuid::Uuid;
 use zerocopy::IntoBytes;
 
+use crate::agent_ctx::AgentCtx;
 use crate::config::SearchConfig;
 use crate::config::SearchMode;
 use crate::database::operations;
 use crate::embeddings::EmbeddingServiceWrapper;
+use crate::episodes;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
 use crate::memory::SourceAttribution;
@@ -657,25 +659,44 @@ impl SearchService {
             None
         };
 
-        self.execute_search(ExecuteSearchOptions {
-            query: opts.query,
-            category: opts.category,
-            limit: opts.limit,
-            include_expired: opts.include_expired,
-            query_embedding,
-            query_sparse_embedding,
-            mode_override: Some(mode),
-            rerank_override: opts.rerank,
-            tags: opts.filters.tags,
-            memory_type: opts.filters.memory_type,
-            min_importance: opts.filters.min_importance,
-            after: opts.filters.after,
-            before: opts.filters.before,
-            workspace_id: opts.filters.workspace_id,
-            platform_session_id: opts.filters.platform_session_id,
-            harness_session_id: opts.filters.harness_session_id,
-        })
+        let results = self
+            .execute_search(ExecuteSearchOptions {
+                query: opts.query,
+                category: opts.category,
+                limit: opts.limit,
+                include_expired: opts.include_expired,
+                query_embedding,
+                query_sparse_embedding,
+                mode_override: Some(mode),
+                rerank_override: opts.rerank,
+                tags: opts.filters.tags,
+                memory_type: opts.filters.memory_type,
+                min_importance: opts.filters.min_importance,
+                after: opts.filters.after,
+                before: opts.filters.before,
+                workspace_id: opts.filters.workspace_id,
+                platform_session_id: opts.filters.platform_session_id,
+                harness_session_id: opts.filters.harness_session_id,
+            })
+            .await?;
+
+        // Append to the episode log so feedback signals can be derived later.
+        // Best-effort: never fail a search because recording failed.
+        let ctx = AgentCtx::from_env();
+        let returned_ids: Vec<Uuid> = results.iter().map(|m| m.id).collect();
+        if let Err(e) = episodes::record_episode(
+            &self.pool,
+            opts.query,
+            &returned_ids,
+            ctx.index_keys(),
+            None,
+        )
         .await
+        {
+            tracing::warn!(error = %e, "failed to record search episode");
+        }
+
+        Ok(results)
     }
 
     pub async fn search_with_options(

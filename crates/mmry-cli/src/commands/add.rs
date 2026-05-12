@@ -11,9 +11,14 @@ use mmry_core::config::Config;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::episodes;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
+use uuid::Uuid;
+
+/// Maximum age of an open episode that `--using` will retroactively close.
+const EPISODE_LOOKUP_WINDOW_SECONDS: i64 = 30 * 60;
 
 #[derive(Parser)]
 pub struct AddCmd {
@@ -59,10 +64,75 @@ pub struct AddCmd {
     /// Free-form agent metadata as JSON (e.g. '{"repo":"mmry","session":"abc"}')
     #[arg(long, env = "MMRY_AGENT_META", value_parser = parse_json_value)]
     pub agent_meta: Option<serde_json::Value>,
+
+    /// Comma-separated memory ids that informed this new memory. Closes the
+    /// open search episode for this agent session, bumping `helpful_count`
+    /// on each cited memory so retrieval ranking learns from the citation.
+    #[arg(long, value_delimiter = ',')]
+    pub using: Vec<Uuid>,
+
+    /// Episode id to close (skips the session-based lookup). Use when
+    /// `--using` should target a specific search rather than the most
+    /// recent open one in this session.
+    #[arg(long)]
+    pub episode: Option<Uuid>,
 }
 
 fn parse_json_value(s: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(s).map_err(|e| format!("invalid JSON for --agent-meta: {e}"))
+}
+
+/// Close the relevant search episode with the cited memory ids. Best-effort:
+/// prints a warning on failure but never errors the add command. No-op when
+/// `--using` is empty.
+async fn maybe_close_episode(
+    db: &Database,
+    using: &[Uuid],
+    explicit_episode: Option<Uuid>,
+    agent_ctx: &AgentCtx,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    if using.is_empty() {
+        return Ok(());
+    }
+
+    let episode_id = if let Some(id) = explicit_episode {
+        Some(id)
+    } else {
+        match episodes::find_latest_open_episode(
+            db.pool(),
+            agent_ctx.index_keys(),
+            EPISODE_LOOKUP_WINDOW_SECONDS,
+        )
+        .await
+        {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to look up open episode");
+                None
+            }
+        }
+    };
+
+    let Some(ep) = episode_id else {
+        if !quiet {
+            eprintln!(
+                "  (note: --using ignored — no open search episode for this session within {}m)",
+                EPISODE_LOOKUP_WINDOW_SECONDS / 60
+            );
+        }
+        return Ok(());
+    };
+
+    if let Err(e) = episodes::close_episode(db.pool(), ep, using, Some("succeeded")).await {
+        tracing::warn!(error = %e, episode_id = %ep, "failed to close episode");
+        return Ok(());
+    }
+
+    if !quiet {
+        println!("  ↳ closed episode {ep} with {} citation(s)", using.len());
+    }
+    Ok(())
 }
 
 pub async fn handle(
@@ -115,7 +185,11 @@ pub async fn handle(
         };
 
         // Handle JSON input
-        return handle_json_input(json_value, cmd, &add_ctx).await;
+        let using = cmd.using.clone();
+        let episode = cmd.episode;
+        let quiet = cmd.json;
+        handle_json_input(json_value, cmd, &add_ctx).await?;
+        return maybe_close_episode(db, &using, episode, &agent_ctx, quiet).await;
     }
 
     // Plain text input
@@ -273,6 +347,8 @@ pub async fn handle(
             println!("  Agent: {} ({})", agent.name, agent.kind);
         }
     }
+
+    maybe_close_episode(db, &cmd.using, cmd.episode, &agent_ctx, cmd.json).await?;
 
     Ok(())
 }
@@ -596,6 +672,8 @@ mod tests {
             agent: None,
             agent_kind: None,
             agent_meta: None,
+            using: Vec::new(),
+            episode: None,
         };
 
         handle(
@@ -640,6 +718,8 @@ mod tests {
             agent: None,
             agent_kind: None,
             agent_meta: None,
+            using: Vec::new(),
+            episode: None,
         };
 
         handle(
