@@ -13,6 +13,9 @@ use strsim::jaro_winkler;
 use uuid::Uuid;
 use zerocopy::IntoBytes;
 
+#[cfg(test)]
+mod episode_benchmark;
+
 use crate::agent_ctx::AgentCtx;
 use crate::config::SearchConfig;
 use crate::config::SearchMode;
@@ -199,6 +202,8 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         source_attribution,
         trust_level,
         source_reinforcement_score,
+        helpful_count: row.try_get("helpful_count").unwrap_or(0),
+        harmful_count: row.try_get("harmful_count").unwrap_or(0),
         category: row.try_get("category")?,
         tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
         created_at,
@@ -487,8 +492,16 @@ impl SearchService {
             let trust_multiplier = 0.7 + 0.3 * memory.trust_level.clamp(0.0, 1.0);
             let reinforcement_boost = memory.source_reinforcement_score.clamp(0.0, 1.5) * 0.05;
 
+            // Episode feedback prior: each closed `search → add --using <id>`
+            // pair bumps `helpful_count`, lifting this memory in future
+            // rankings. log1p keeps the prior bounded and prevents one
+            // popular memory from dominating.
+            let net_feedback = (memory.helpful_count - memory.harmful_count) as f32;
+            let feedback_boost = self.config.feedback_weight * net_feedback.max(0.0).ln_1p();
+
             let score = (base_score + recency_boost + importance_boost) * trust_multiplier
-                + reinforcement_boost;
+                + reinforcement_boost
+                + feedback_boost;
 
             scored_results.push((score, memory));
         }
@@ -826,7 +839,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
+                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");

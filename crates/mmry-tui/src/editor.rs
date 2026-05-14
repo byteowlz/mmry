@@ -198,6 +198,8 @@ pub fn parse_edited_memory(content: &str, original_id: Option<Uuid>) -> Result<M
         source_attribution: None,
         trust_level: 0.5,
         source_reinforcement_score: 0.0,
+        helpful_count: 0,
+        harmful_count: 0,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         category,

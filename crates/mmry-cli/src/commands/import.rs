@@ -183,6 +183,8 @@ fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow
         source_attribution,
         trust_level,
         source_reinforcement_score,
+        helpful_count: 0,
+        harmful_count: 0,
         created_at,
         updated_at,
         category: exported.category.clone(),

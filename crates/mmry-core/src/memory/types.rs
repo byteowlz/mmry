@@ -29,6 +29,12 @@ pub struct Memory {
     pub source_attribution: Option<SourceAttribution>,
     pub trust_level: f32,
     pub source_reinforcement_score: f32,
+    /// Times a search returning this memory was closed with this id in `--using`.
+    #[serde(default)]
+    pub helpful_count: i64,
+    /// Reserved for explicit negative feedback. Not yet populated.
+    #[serde(default)]
+    pub harmful_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub category: String,
@@ -102,6 +108,8 @@ impl Memory {
             source_attribution,
             trust_level,
             source_reinforcement_score,
+            helpful_count: 0,
+            harmful_count: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             category,

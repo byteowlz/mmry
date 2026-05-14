@@ -867,6 +867,8 @@ async fn memory_create_handler(
         source_attribution: None,
         trust_level: 1.0,
         source_reinforcement_score: 0.0,
+        helpful_count: 0,
+        harmful_count: 0,
         created_at: now,
         updated_at: now,
         category: payload.category,

@@ -144,6 +144,8 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         source_attribution,
         trust_level,
         source_reinforcement_score,
+        helpful_count: row.try_get("helpful_count").unwrap_or(0),
+        harmful_count: row.try_get("harmful_count").unwrap_or(0),
         category: row.try_get("category")?,
         tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
         created_at,
@@ -240,7 +242,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
         FROM memories
         WHERE id = ?
         "#,
@@ -264,7 +266,7 @@ pub async fn list_memories(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -278,7 +280,7 @@ pub async fn list_memories(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -313,7 +315,7 @@ pub async fn list_memories_paged(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -328,7 +330,7 @@ pub async fn list_memories_paged(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
