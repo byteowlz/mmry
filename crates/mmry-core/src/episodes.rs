@@ -29,7 +29,6 @@ pub struct Episode {
     pub workspace_id: Option<String>,
     pub platform_session_id: Option<String>,
     pub harness_session_id: Option<String>,
-    pub agent_id: Option<Uuid>,
     pub ts: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
 }
@@ -41,7 +40,6 @@ pub async fn record_episode(
     query: &str,
     returned_ids: &[Uuid],
     ctx: CtxIndexKeys<'_>,
-    agent_id: Option<Uuid>,
 ) -> crate::Result<Uuid> {
     let id = Uuid::new_v4();
     let returned_json =
@@ -51,9 +49,9 @@ pub async fn record_episode(
         r#"
         INSERT INTO episodes (
             id, query, returned_ids, workspace_id, platform_session_id,
-            harness_session_id, agent_id, ts
+            harness_session_id, ts
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(id.to_string())
@@ -62,7 +60,6 @@ pub async fn record_episode(
     .bind(ctx.workspace_id)
     .bind(ctx.platform_session_id)
     .bind(ctx.harness_session_id)
-    .bind(agent_id.map(|a| a.to_string()))
     .bind(Utc::now().to_rfc3339())
     .execute(pool)
     .await?;
@@ -197,7 +194,7 @@ mod tests {
             platform_session_id: Some("sess_a"),
             harness_session_id: None,
         };
-        let ep = record_episode(&pool, "how to foo", &[m1, m2], ctx, None)
+        let ep = record_episode(&pool, "how to foo", &[m1, m2], ctx)
             .await
             .unwrap();
 
@@ -240,8 +237,8 @@ mod tests {
             harness_session_id: None,
         };
 
-        let older = record_episode(&pool, "q1", &[], ctx, None).await.unwrap();
-        let newer = record_episode(&pool, "q2", &[], ctx, None).await.unwrap();
+        let older = record_episode(&pool, "q1", &[], ctx).await.unwrap();
+        let newer = record_episode(&pool, "q2", &[], ctx).await.unwrap();
 
         let found = find_latest_open_episode(&pool, ctx, 3600).await.unwrap();
         assert_eq!(found, Some(newer));

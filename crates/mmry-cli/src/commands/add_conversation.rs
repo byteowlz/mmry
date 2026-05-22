@@ -15,7 +15,6 @@ use clap::Parser;
 use serde::Deserialize;
 
 use mmry_core::agent_ctx::AgentCtx;
-use mmry_core::agents::AgentIdentity;
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
 use mmry_core::database::operations;
@@ -57,22 +56,6 @@ pub struct AddConversationCmd {
     /// Parse and report what would be inserted without writing to the store.
     #[arg(long)]
     pub dry_run: bool,
-
-    /// Agent name (who is ingesting). Defaults to AGENT_CTX or "human".
-    #[arg(long, env = "MMRY_AGENT")]
-    pub agent: Option<String>,
-
-    /// Agent kind (human, coding_agent, …).
-    #[arg(long, env = "MMRY_AGENT_KIND")]
-    pub agent_kind: Option<String>,
-
-    /// Free-form agent metadata JSON.
-    #[arg(long, env = "MMRY_AGENT_META", value_parser = parse_json_value)]
-    pub agent_meta: Option<serde_json::Value>,
-}
-
-fn parse_json_value(s: &str) -> Result<serde_json::Value, String> {
-    serde_json::from_str(s).map_err(|e| format!("invalid JSON for --agent-meta: {e}"))
 }
 
 /// Canonical byteowlz conversation shape. Mirrors hstry's `ExportConversation`
@@ -132,16 +115,6 @@ pub async fn handle(
     }
 
     let agent_ctx = AgentCtx::from_env();
-
-    let agent_identity = AgentIdentity {
-        name: cmd.agent.clone().or_else(|| agent_ctx.default_agent_name()),
-        kind: cmd
-            .agent_kind
-            .clone()
-            .or_else(|| agent_ctx.default_agent_kind()),
-        meta: merged_agent_meta(cmd.agent_meta.clone(), &agent_ctx),
-    };
-    let agent = agent_identity.resolve(db.pool()).await?;
 
     let category = cmd
         .category
@@ -251,10 +224,6 @@ pub async fn handle(
         cmd.json_out,
         false,
     )?;
-
-    if !cmd.json_out {
-        println!("  Agent: {} ({})", agent.name, agent.kind);
-    }
 
     Ok(())
 }
@@ -420,23 +389,6 @@ fn insert_some_str(
     }
 }
 
-fn merged_agent_meta(
-    caller_meta: Option<serde_json::Value>,
-    ctx: &AgentCtx,
-) -> Option<serde_json::Value> {
-    if ctx.is_empty() {
-        return caller_meta;
-    }
-    let mut meta =
-        caller_meta.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-    ctx.enrich_agent_meta(&mut meta);
-    let non_empty = meta.as_object().map(|obj| !obj.is_empty()).unwrap_or(false);
-    if non_empty {
-        Some(meta)
-    } else {
-        None
-    }
-}
 
 async fn insert_with_embedding(
     db: &Database,
@@ -576,9 +528,6 @@ mod tests {
             tags: None,
             json_out: false,
             dry_run: false,
-            agent: None,
-            agent_kind: None,
-            agent_meta: None,
         };
 
         handle(cmd, &config, &db, Arc::clone(&embeddings), Arc::clone(&sparse)).await?;
@@ -676,9 +625,6 @@ mod tests {
             tags: None,
             json_out: false,
             dry_run: false,
-            agent: None,
-            agent_kind: None,
-            agent_meta: None,
         };
 
         handle(cmd, &config, &db, Arc::clone(&embeddings), Arc::clone(&sparse)).await?;
@@ -728,9 +674,6 @@ mod tests {
             tags: None,
             json_out: false,
             dry_run: false,
-            agent: None,
-            agent_kind: None,
-            agent_meta: None,
         };
 
         let err = handle(cmd, &config, &db, Arc::clone(&embeddings), Arc::clone(&sparse))

@@ -354,45 +354,6 @@ impl Database {
             tracing::info!("Chunking columns and indices added");
         }
 
-        // Ensure agent tables exist
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS agents (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                description TEXT,
-                metadata JSON DEFAULT '{}',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS agent_events (
-                id TEXT PRIMARY KEY,
-                agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-                event_type TEXT NOT NULL,
-                status TEXT,
-                payload JSON,
-                span_id TEXT,
-                memory_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id)")
-            .execute(pool)
-            .await?;
-
         // Episodes: append-only log of (query, returned_ids, used_ids, agent_ctx, ts).
         // Substrate for derived feedback signals — no separate counter tables.
         sqlx::query(
@@ -406,7 +367,6 @@ impl Database {
                 workspace_id TEXT,
                 platform_session_id TEXT,
                 harness_session_id TEXT,
-                agent_id TEXT REFERENCES agents(id),
                 ts DATETIME DEFAULT CURRENT_TIMESTAMP,
                 closed_at DATETIME
             )
@@ -865,32 +825,6 @@ mod tests {
 
         // Verify legacy database was removed
         assert!(!legacy_path.exists());
-
-        db.close().await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn agent_and_events_roundtrip() -> crate::Result<()> {
-        use crate::agents::AgentEvent;
-        use crate::agents::AgentRecord;
-
-        let temp = tempdir().expect("create temp dir");
-        let db_path = temp.path().join("agent.db");
-
-        let db = Database::init(&db_path, TEST_DIM).await?;
-
-        let mut agent = AgentRecord::new("tester", "sidecar");
-        agent.description = Some("integration test agent".to_string());
-        operations::upsert_agent(db.pool(), &agent).await?;
-
-        let mut event = AgentEvent::new(agent.id, "route");
-        event.payload = json!({ "query": "hello" });
-        operations::record_agent_event(db.pool(), &event).await?;
-
-        let listed_events = operations::list_agent_events(db.pool(), 5).await?;
-        assert_eq!(listed_events.len(), 1);
-        assert_eq!(listed_events[0].agent_id, agent.id);
 
         db.close().await;
         Ok(())

@@ -7,7 +7,6 @@ use crate::state::sort::SortMode;
 use crate::state::AppMode;
 use crate::state::FilterState;
 use crate::state::MemoryKey;
-use crate::state::MiddleView;
 use crate::state::Pane;
 use crate::state::RightPaneView;
 use crate::state::Selection;
@@ -20,7 +19,6 @@ use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
-use mmry_core::agents::AgentEvent;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::operations;
@@ -91,13 +89,11 @@ pub struct App {
     sort_menu_index: usize,
     search_backup: Option<Vec<MemoryWithStore>>,
     pub memories: Vec<MemoryWithStore>,
-    pub agent_events: Vec<AgentEvent>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
 
     pub mode: AppMode,
     pub active_pane: Pane,
-    pub middle_view: MiddleView,
     pub right_pane_view: RightPaneView,
 
     pub left_selection: Selection,
@@ -154,12 +150,10 @@ impl App {
             sort_menu_index: 0,
             search_backup: None,
             memories: Vec::new(),
-            agent_events: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
             mode: AppMode::Normal,
             active_pane: Pane::Middle,
-            middle_view: MiddleView::Memories,
             right_pane_view: RightPaneView::default(),
             left_selection: Selection::new(),
             middle_selection: Selection::new(),
@@ -355,37 +349,26 @@ impl App {
     }
 
     pub async fn refresh_current_view(&mut self) -> Result<()> {
-        match self.middle_view {
-            MiddleView::Memories => {
-                if self.viewing_all_stores {
-                    let results = list_all_stores(&self.config, None, 1000).await?;
-                    self.memories = results;
-                } else {
-                    let memories = operations::list_memories(self.db.pool(), None, 1000).await?;
-                    self.memories = memories
-                        .into_iter()
-                        .map(|memory| MemoryWithStore {
-                            memory,
-                            store: self.current_store.clone(),
-                        })
-                        .collect();
-                }
-                self.sort_state.sort_memories(&mut self.memories);
-                self.update_categories_and_tags();
-                self.search_backup = None;
-                self.middle_selection.index = self
-                    .middle_selection
-                    .index
-                    .min(self.filtered_memories().len().saturating_sub(1));
-            }
-            MiddleView::AgentEvents => {
-                self.agent_events = operations::list_agent_events(self.db.pool(), 200).await?;
-                self.middle_selection.index = self
-                    .middle_selection
-                    .index
-                    .min(self.agent_events.len().saturating_sub(1));
-            }
+        if self.viewing_all_stores {
+            let results = list_all_stores(&self.config, None, 1000).await?;
+            self.memories = results;
+        } else {
+            let memories = operations::list_memories(self.db.pool(), None, 1000).await?;
+            self.memories = memories
+                .into_iter()
+                .map(|memory| MemoryWithStore {
+                    memory,
+                    store: self.current_store.clone(),
+                })
+                .collect();
         }
+        self.sort_state.sort_memories(&mut self.memories);
+        self.update_categories_and_tags();
+        self.search_backup = None;
+        self.middle_selection.index = self
+            .middle_selection
+            .index
+            .min(self.filtered_memories().len().saturating_sub(1));
 
         Ok(())
     }
@@ -409,19 +392,9 @@ impl App {
     }
 
     pub fn selected_memory(&self) -> Option<&MemoryWithStore> {
-        if self.middle_view != MiddleView::Memories {
-            return None;
-        }
         self.filtered_memories()
             .get(self.middle_selection.index)
             .copied()
-    }
-
-    pub fn selected_agent_event(&self) -> Option<&AgentEvent> {
-        if self.middle_view != MiddleView::AgentEvents {
-            return None;
-        }
-        self.agent_events.get(self.middle_selection.index)
     }
 
     pub fn filtered_memories(&self) -> Vec<&MemoryWithStore> {
@@ -469,9 +442,6 @@ impl App {
     }
 
     pub fn get_left_pane_item_count(&self) -> usize {
-        if self.middle_view != MiddleView::Memories {
-            return 3;
-        }
         // FILTERS header (1) + All/Recent/Important (3) + separator (1)
         // + MEMORY TYPES header (1) + Episodic/Semantic/Procedural (3) + separator (1)
         // + CATEGORIES header (1) + categories (N) + separator (1)
@@ -481,13 +451,6 @@ impl App {
     }
 
     pub fn get_selected_left_item(&self) -> Option<LeftPaneItem> {
-        if self.middle_view != MiddleView::Memories {
-            return match self.left_selection.index {
-                1 => Some(LeftPaneItem::Category("Memories".to_string())),
-                2 => Some(LeftPaneItem::Category("Agent Events".to_string())),
-                _ => Some(LeftPaneItem::Separator),
-            };
-        }
         let idx = self.left_selection.index;
         let mut current = 0;
 
@@ -626,9 +589,7 @@ impl App {
             KeyAction::PageUp => self.page_up(),
 
             KeyAction::Char('d') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message = Some("Delete works only in Memories view".to_string());
-                } else if self.middle_selection.has_selections() {
+                if self.middle_selection.has_selections() {
                     let filtered = self.filtered_memories();
                     let keys: Vec<MemoryKey> = self
                         .middle_selection
@@ -652,38 +613,27 @@ impl App {
 
             KeyAction::ToggleSelect => {
                 if self.active_pane == Pane::Middle {
-                    if self.middle_view != MiddleView::Memories {
-                        self.status_message =
-                            Some("Selection is only available in Memories view".to_string());
+                    self.middle_selection.toggle_selection();
+                    let count = self.filtered_memories().len();
+                    self.middle_selection.next(count, 20);
+                    self.status_message = if self.middle_selection.has_selections() {
+                        Some(format!(
+                            "{} selected",
+                            self.middle_selection.selection_count()
+                        ))
                     } else {
-                        self.middle_selection.toggle_selection();
-                        let count = self.filtered_memories().len();
-                        self.middle_selection.next(count, 20);
-                        self.status_message = if self.middle_selection.has_selections() {
-                            Some(format!(
-                                "{} selected",
-                                self.middle_selection.selection_count()
-                            ))
-                        } else {
-                            None
-                        };
-                    }
-                } else if self.active_pane == Pane::Left && self.middle_view == MiddleView::Memories
-                {
+                        None
+                    };
+                } else if self.active_pane == Pane::Left {
                     self.toggle_filter_item();
                 }
             }
 
             KeyAction::SelectAll => {
                 if self.active_pane == Pane::Middle {
-                    if self.middle_view != MiddleView::Memories {
-                        self.status_message =
-                            Some("Selection is only available in Memories view".to_string());
-                    } else {
-                        let count = self.filtered_memories().len();
-                        self.middle_selection.select_all(count);
-                        self.status_message = Some(format!("Selected all {count} memories"));
-                    }
+                    let count = self.filtered_memories().len();
+                    self.middle_selection.select_all(count);
+                    self.status_message = Some(format!("Selected all {count} memories"));
                 }
             }
 
@@ -695,10 +645,7 @@ impl App {
             }
 
             KeyAction::Char('e') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Editing is only available in Memories view".to_string());
-                } else if let Some(memory) = self.selected_memory() {
+                if let Some(memory) = self.selected_memory() {
                     self.edit_memory(MemoryKey {
                         id: memory.memory.id,
                         store: memory.store.clone(),
@@ -708,12 +655,7 @@ impl App {
             }
 
             KeyAction::Char('a') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Add is only available in Memories view".to_string());
-                } else {
-                    self.add_memory().await?;
-                }
+                self.add_memory().await?;
             }
 
             KeyAction::Char('r') => {
@@ -722,13 +664,8 @@ impl App {
             }
 
             KeyAction::Char('/') | KeyAction::Char(':') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Search is only available in Memories view".to_string());
-                } else {
-                    self.mode = AppMode::Search(String::new());
-                    self.search_mode_index = self.index_for_mode(self.config.search.mode);
-                }
+                self.mode = AppMode::Search(String::new());
+                self.search_mode_index = self.index_for_mode(self.config.search.mode);
             }
 
             KeyAction::Escape => {
@@ -738,29 +675,17 @@ impl App {
             }
 
             KeyAction::Char('s') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message = Some("Sorting applies only in Memories view".to_string());
-                } else {
-                    self.sort_menu_index = self.index_for_sort_mode(self.sort_state.mode);
-                    self.mode = AppMode::Sort;
-                }
+                self.sort_menu_index = self.index_for_sort_mode(self.sort_state.mode);
+                self.mode = AppMode::Sort;
             }
 
             KeyAction::Char('t') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Type quick-change only in Memories view".to_string());
-                } else {
-                    use crate::state::WhichKeyContext;
-                    self.mode = AppMode::WhichKey(WhichKeyContext::Type);
-                }
+                use crate::state::WhichKeyContext;
+                self.mode = AppMode::WhichKey(WhichKeyContext::Type);
             }
 
             KeyAction::Char('i') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Importance change only in Memories view".to_string());
-                } else if self.active_pane == Pane::Left {
+                if self.active_pane == Pane::Left {
                     self.isolate_filter_item();
                 } else {
                     use crate::state::WhichKeyContext;
@@ -769,12 +694,8 @@ impl App {
             }
 
             KeyAction::Char('c') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message = Some("Category change only in Memories view".to_string());
-                } else {
-                    use crate::state::WhichKeyContext;
-                    self.mode = AppMode::WhichKey(WhichKeyContext::Category);
-                }
+                use crate::state::WhichKeyContext;
+                self.mode = AppMode::WhichKey(WhichKeyContext::Category);
             }
 
             KeyAction::Char('v') => {
@@ -782,56 +703,31 @@ impl App {
                 self.status_message = Some("View: Preview".to_string());
             }
 
-            KeyAction::Char('b') => {
-                self.middle_view = match self.middle_view {
-                    MiddleView::Memories => MiddleView::AgentEvents,
-                    MiddleView::AgentEvents => MiddleView::Memories,
-                };
-                self.left_selection.index = 0;
-                self.middle_selection.index = 0;
-                self.refresh_current_view().await?;
-                self.status_message = Some(match self.middle_view {
-                    MiddleView::Memories => "View: Memories".to_string(),
-                    MiddleView::AgentEvents => "View: Agent Events".to_string(),
-                });
-            }
-
             KeyAction::Char('S') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Store switching applies only in Memories view".to_string());
+                self.available_stores = list_stores(&self.config).unwrap_or_default();
+                if self.available_stores.is_empty() {
+                    self.status_message = Some(
+                        "No stores available. Create one with: mmry stores create <name>"
+                            .to_string(),
+                    );
                 } else {
-                    self.available_stores = list_stores(&self.config).unwrap_or_default();
-                    if self.available_stores.is_empty() {
-                        self.status_message = Some(
-                            "No stores available. Create one with: mmry stores create <name>"
-                                .to_string(),
-                        );
+                    let current_idx = self.current_store_index();
+                    let mut selected = std::collections::BTreeSet::new();
+                    if self.viewing_all_stores {
+                        selected.insert(ALL_LOCAL_STORES_ID.to_string());
                     } else {
-                        let current_idx = self.current_store_index();
-                        let mut selected = std::collections::BTreeSet::new();
-                        if self.viewing_all_stores {
-                            selected.insert(ALL_LOCAL_STORES_ID.to_string());
-                        } else {
-                            selected.insert(self.current_store.clone());
-                        }
-
-                        self.mode = AppMode::StoreSelect(StoreSelectState {
-                            query: String::new(),
-                            cursor: current_idx,
-                            selected,
-                        });
+                        selected.insert(self.current_store.clone());
                     }
+
+                    self.mode = AppMode::StoreSelect(StoreSelectState {
+                        query: String::new(),
+                        cursor: current_idx,
+                        selected,
+                    });
                 }
             }
 
             KeyAction::Char('m') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Move is only available in Memories view".to_string());
-                    return Ok(true);
-                }
-                // Move memory to another store
                 if self.viewing_all_stores {
                     self.status_message =
                         Some("Cannot move memories while viewing all stores".to_string());
@@ -2003,12 +1899,10 @@ mod tests {
             sort_menu_index: 0,
             search_backup: None,
             memories: Vec::new(),
-            agent_events: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
             mode: AppMode::Normal,
             active_pane: Pane::Middle,
-            middle_view: MiddleView::Memories,
             right_pane_view: RightPaneView::default(),
             left_selection: Selection::new(),
             middle_selection: Selection::new(),

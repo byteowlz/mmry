@@ -564,15 +564,11 @@ async fn transfer_contents(
     Ok(result)
 }
 
-/// Delete all content from a store (memories, embeddings, agent events).
+/// Delete all content from a store (memories and embeddings).
 async fn clear_store_contents(pool: &sqlx::SqlitePool) -> crate::Result<()> {
     sqlx::query("DELETE FROM memory_embeddings")
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM agent_events")
-        .execute(pool)
-        .await?;
-    sqlx::query("DELETE FROM agents").execute(pool).await?;
     sqlx::query("DELETE FROM memories").execute(pool).await?;
     Ok(())
 }

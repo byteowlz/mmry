@@ -4,7 +4,6 @@ use std::io::{self};
 use std::sync::Arc;
 
 use mmry_core::agent_ctx::AgentCtx;
-use mmry_core::agents::AgentIdentity;
 use mmry_core::chunking::Chunker;
 use mmry_core::config::Config;
 use mmry_core::database::operations;
@@ -46,18 +45,6 @@ pub struct AddCmd {
     #[arg(long, short = 'f', help = "Include full embeddings in JSON output")]
     pub full: bool,
 
-    /// Agent name (who is adding this memory). Defaults to "human".
-    #[arg(long, env = "MMRY_AGENT")]
-    pub agent: Option<String>,
-
-    /// Agent kind (human, coding_agent, review_agent, ...). Defaults to "human".
-    #[arg(long, env = "MMRY_AGENT_KIND")]
-    pub agent_kind: Option<String>,
-
-    /// Free-form agent metadata as JSON (e.g. '{"repo":"mmry","session":"abc"}')
-    #[arg(long, env = "MMRY_AGENT_META", value_parser = parse_json_value)]
-    pub agent_meta: Option<serde_json::Value>,
-
     /// Comma-separated memory ids that informed this new memory. Closes the
     /// open search episode for this agent session, bumping `helpful_count`
     /// on each cited memory so retrieval ranking learns from the citation.
@@ -69,10 +56,6 @@ pub struct AddCmd {
     /// recent open one in this session.
     #[arg(long)]
     pub episode: Option<Uuid>,
-}
-
-fn parse_json_value(s: &str) -> Result<serde_json::Value, String> {
-    serde_json::from_str(s).map_err(|e| format!("invalid JSON for --agent-meta: {e}"))
 }
 
 /// Close the relevant search episode with the cited memory ids. Best-effort:
@@ -149,22 +132,9 @@ pub async fn handle(
     }
 
     // Capture AGENT_CTX_* runtime metadata once per command. Defensive: empty
-    // when nothing is set; otherwise drives sensible defaults (agent name,
-    // agent metadata) and gets stamped onto each persisted memory below.
+    // when nothing is set; otherwise stamps workspace/session info onto each
+    // persisted memory below.
     let agent_ctx = AgentCtx::from_env();
-
-    // Resolve agent identity. Precedence: CLI flag > MMRY_AGENT env > AGENT_CTX
-    // harness > "human". Per AGENT_CTX schema, env values fill in defaults
-    // only — explicit flags always win.
-    let agent_identity = AgentIdentity {
-        name: cmd.agent.clone().or_else(|| agent_ctx.default_agent_name()),
-        kind: cmd
-            .agent_kind
-            .clone()
-            .or_else(|| agent_ctx.default_agent_kind()),
-        meta: merged_agent_meta(cmd.agent_meta.clone(), &agent_ctx),
-    };
-    let agent = agent_identity.resolve(db.pool()).await?;
 
     // Try to parse as JSON first
     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&input) {
@@ -173,7 +143,6 @@ pub async fn handle(
             db,
             embeddings: &embeddings,
             sparse_embeddings: &sparse_embeddings,
-            agent: &agent,
             agent_ctx: &agent_ctx,
         };
 
@@ -286,14 +255,7 @@ pub async fn handle(
                     v
                 })
                 .collect();
-            let envelope = serde_json::json!({
-                "memories": values,
-                "agent": {
-                    "name": agent.name,
-                    "kind": agent.kind,
-                    "meta": agent.metadata,
-                },
-            });
+            let envelope = serde_json::json!({ "memories": values });
             let json = serde_json::to_string_pretty(&envelope)?;
             println!("{json}");
         } else {
@@ -326,13 +288,12 @@ pub async fn handle(
         operations::insert_memory(db.pool(), &memory).await?;
 
         if cmd.json {
-            let json = serialize_memory_with_agent(&memory, &agent, cmd.full)?;
+            let json = serialize_memory_json(&memory, cmd.full)?;
             println!("{json}");
         } else {
             println!("+ Added memory: {}", memory.id);
             println!("  Type: {:?}", memory.memory_type);
             println!("  Content: {}", memory.content);
-            println!("  Agent: {} ({})", agent.name, agent.kind);
         }
     }
 
@@ -346,28 +307,7 @@ struct AddContext<'a> {
     db: &'a Database,
     embeddings: &'a Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: &'a Arc<SparseEmbeddingService>,
-    agent: &'a mmry_core::agents::AgentRecord,
     agent_ctx: &'a AgentCtx,
-}
-
-/// Merge a caller-supplied `--agent-meta` JSON value with `AGENT_CTX_*`
-/// env metadata. Caller-supplied keys win; ctx fills missing slots and
-/// always carries a structured `agent_ctx` snapshot for forward-compat.
-fn merged_agent_meta(
-    caller_meta: Option<serde_json::Value>,
-    ctx: &AgentCtx,
-) -> Option<serde_json::Value> {
-    if ctx.is_empty() {
-        return caller_meta;
-    }
-    let mut meta = caller_meta.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-    ctx.enrich_agent_meta(&mut meta);
-    let non_empty = meta.as_object().map(|obj| !obj.is_empty()).unwrap_or(false);
-    if non_empty {
-        Some(meta)
-    } else {
-        None
-    }
 }
 
 async fn handle_json_input(
@@ -404,14 +344,7 @@ async fn handle_json_input(
                 }
                 values.push(value);
             }
-            let envelope = serde_json::json!({
-                "memories": values,
-                "agent": {
-                    "name": ctx.agent.name,
-                    "kind": ctx.agent.kind,
-                    "meta": ctx.agent.metadata,
-                },
-            });
+            let envelope = serde_json::json!({ "memories": values });
             let json = serde_json::to_string_pretty(&envelope)?;
             println!("{json}");
         } else {
@@ -436,13 +369,12 @@ async fn handle_json_input(
     operations::insert_memory(ctx.db.pool(), &memory).await?;
 
     if cmd.json {
-        let json = serialize_memory_with_agent(&memory, ctx.agent, cmd.full)?;
+        let json = serialize_memory_json(&memory, cmd.full)?;
         println!("{json}");
     } else {
         println!("+ Added memory: {}", memory.id);
         println!("  Type: {:?}", memory.memory_type);
         println!("  Content: {}", memory.content);
-        println!("  Agent: {} ({})", ctx.agent.name, ctx.agent.kind);
     }
 
     Ok(())
@@ -543,11 +475,7 @@ async fn process_json_memory(
     Ok(memory)
 }
 
-fn serialize_memory_with_agent(
-    memory: &Memory,
-    agent: &mmry_core::agents::AgentRecord,
-    full: bool,
-) -> anyhow::Result<String> {
+fn serialize_memory_json(memory: &Memory, full: bool) -> anyhow::Result<String> {
     let mut value = serde_json::to_value(memory)?;
     if !full {
         if let Some(obj) = value.as_object_mut() {
@@ -555,14 +483,7 @@ fn serialize_memory_with_agent(
             obj.remove("sparse_embedding");
         }
     }
-    let envelope = serde_json::json!({
-        "memory": value,
-        "agent": {
-            "name": agent.name,
-            "kind": agent.kind,
-            "meta": agent.metadata,
-        },
-    });
+    let envelope = serde_json::json!({ "memory": value });
     serde_json::to_string_pretty(&envelope).map_err(Into::into)
 }
 
@@ -632,9 +553,6 @@ mod tests {
             importance: None,
             json: false,
             full: false,
-            agent: None,
-            agent_kind: None,
-            agent_meta: None,
             using: Vec::new(),
             episode: None,
         };
@@ -677,9 +595,6 @@ mod tests {
             importance: None,
             json: true,
             full: false,
-            agent: None,
-            agent_kind: None,
-            agent_meta: None,
             using: Vec::new(),
             episode: None,
         };

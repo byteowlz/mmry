@@ -628,7 +628,6 @@ impl SearchService {
             opts.query,
             &returned_ids,
             ctx.index_keys(),
-            None,
         )
         .await
         {

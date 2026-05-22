@@ -10,7 +10,6 @@ use mcp_spec::resource::Resource;
 use mcp_spec::tool::Tool;
 use mcp_spec::ResourceContents;
 use mmry_core::agent_ctx::AgentCtx;
-use mmry_core::agents::AgentIdentity;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::operations;
@@ -103,12 +102,6 @@ struct MemoryAddArgs {
     sparse_embed: Option<bool>,
     #[serde(default)]
     store: Option<String>,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    agent_kind: Option<String>,
-    #[serde(default)]
-    agent_meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,14 +117,6 @@ struct MemoryUpdateArgs {
     importance: Option<i32>,
     #[serde(default)]
     clear_embeddings: Option<bool>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgentEventsListArgs {
-    #[serde(default)]
-    limit: Option<i64>,
     #[serde(default)]
     store: Option<String>,
 }
@@ -363,21 +348,6 @@ impl MmryMcpRouter {
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
 
         let ctx = &self.inner.agent_ctx;
-        let mut agent_meta = args.agent_meta.unwrap_or(Value::Null);
-        ctx.enrich_agent_meta(&mut agent_meta);
-        let agent_identity = AgentIdentity {
-            name: args.agent.or_else(|| ctx.default_agent_name()),
-            kind: args.agent_kind.or_else(|| ctx.default_agent_kind()),
-            meta: if agent_meta.is_null() {
-                None
-            } else {
-                Some(agent_meta)
-            },
-        };
-        let agent = agent_identity
-            .resolve(&pool)
-            .await
-            .map_err(|e| ToolError::ExecutionError(format!("agent resolution failed: {e}")))?;
 
         let category = args
             .category
@@ -431,7 +401,6 @@ impl MmryMcpRouter {
             json!({
                 "store": store,
                 "memory": Self::strip_embeddings(memory),
-                "agent": { "name": agent.name, "kind": agent.kind, "meta": agent.metadata },
             }),
         )
     }
@@ -521,25 +490,6 @@ impl MmryMcpRouter {
         )
     }
 
-    async fn tool_agent_events_list(
-        &self,
-        args: AgentEventsListArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let limit = args.limit.unwrap_or(50).max(1);
-        let events = operations::list_agent_events(&pool, limit)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/agent_events/list",
-            json!({ "store": store, "agent_events": events }),
-        )
-    }
 }
 
 impl mcp_server::Router for MmryMcpRouter {
@@ -615,10 +565,7 @@ impl mcp_server::Router for MmryMcpRouter {
                         "importance": { "type": ["integer", "null"], "minimum": 1, "maximum": 10 },
                         "embed": { "type": ["boolean", "null"], "default": true },
                         "sparse_embed": { "type": ["boolean", "null"], "default": true },
-                        "store": { "type": ["string", "null"] },
-                        "agent": { "type": ["string", "null"] },
-                        "agent_kind": { "type": ["string", "null"] },
-                        "agent_meta": { "type": ["object", "null"] }
+                        "store": { "type": ["string", "null"] }
                     },
                     "required": ["content"],
                     "additionalProperties": false
@@ -652,18 +599,6 @@ impl mcp_server::Router for MmryMcpRouter {
                         "store": { "type": ["string", "null"] }
                     },
                     "required": ["id"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.agent_events.list",
-                "List recent agent events.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "limit": { "type": ["integer", "null"], "minimum": 1 },
-                        "store": { "type": ["string", "null"] }
-                    },
                     "additionalProperties": false
                 }),
             ),
@@ -706,11 +641,6 @@ impl mcp_server::Router for MmryMcpRouter {
                     let args: MemoryIdArgs = serde_json::from_value(arguments)
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_memory_delete(args).await
-                }
-                "mmry.agent_events.list" => {
-                    let args: AgentEventsListArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_agent_events_list(args).await
                 }
                 _ => Err(ToolError::NotFound(tool_name)),
             }
@@ -828,9 +758,6 @@ mod tests {
                 embed: Some(false),
                 sparse_embed: Some(false),
                 store: None,
-                agent: None,
-                agent_kind: None,
-                agent_meta: None,
             })
             .await?;
         let add_json = extract_json(add);

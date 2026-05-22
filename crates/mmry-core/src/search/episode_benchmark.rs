@@ -235,7 +235,7 @@ async fn run_arm(label: &str, feedback_weight: f32) -> Vec<RoundMetrics> {
             // episode row has all-null session keys. For benchmark purposes
             // we record a fresh one with our synthetic ctx and close it.
             let returned: Vec<Uuid> = results.iter().map(|m| m.id).collect();
-            let ep = episodes::record_episode(&pool, &query, &returned, ctx, None)
+            let ep = episodes::record_episode(&pool, &query, &returned, ctx)
                 .await
                 .unwrap();
             episodes::close_episode(&pool, ep, &[cited], Some("succeeded"))
