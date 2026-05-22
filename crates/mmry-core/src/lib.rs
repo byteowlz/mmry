@@ -8,7 +8,6 @@ pub mod episodes;
 pub mod error;
 pub mod http_json;
 pub mod integrations;
-pub mod learnings;
 pub mod memory;
 pub mod reranker;
 pub mod search;

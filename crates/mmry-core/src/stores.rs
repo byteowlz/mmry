@@ -438,7 +438,7 @@ pub fn write_export_to_file(export: &ExportResult, path: &std::path::Path) -> cr
     Ok(())
 }
 
-/// How to handle conflicts when a memory or learning with the same ID
+/// How to handle conflicts when a memory with the same ID
 /// already exists in the destination store.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum ConflictStrategy {
@@ -458,21 +458,14 @@ pub struct TransferResult {
     pub memories_transferred: usize,
     /// Number of memories skipped (already existed in destination).
     pub memories_skipped: usize,
-    /// Number of learnings copied/moved.
-    pub learnings_transferred: usize,
-    /// Number of learnings skipped.
-    pub learnings_skipped: usize,
 }
 
 impl std::fmt::Display for TransferResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} memories transferred, {} skipped; {} learnings transferred, {} skipped",
-            self.memories_transferred,
-            self.memories_skipped,
-            self.learnings_transferred,
-            self.learnings_skipped
+            "{} memories transferred, {} skipped",
+            self.memories_transferred, self.memories_skipped,
         )
     }
 }
@@ -545,7 +538,7 @@ pub async fn move_store(
     Ok(result)
 }
 
-/// Transfer all memories and learnings from one pool to another.
+/// Transfer all memories from one pool to another.
 async fn transfer_contents(
     from: &sqlx::SqlitePool,
     to: &sqlx::SqlitePool,
@@ -553,7 +546,6 @@ async fn transfer_contents(
 ) -> crate::Result<TransferResult> {
     let mut result = TransferResult::default();
 
-    // Transfer memories
     let memories = crate::database::operations::list_memories(from, None, i64::MAX).await?;
 
     for memory in &memories {
@@ -586,55 +578,17 @@ async fn transfer_contents(
         result.memories_transferred += 1;
     }
 
-    // Transfer learnings
-    let learnings = crate::database::operations::list_learnings(from, None, None, i64::MAX).await?;
-
-    for learning in &learnings {
-        let exists = crate::database::operations::get_learning(to, learning.id)
-            .await?
-            .is_some();
-
-        if exists {
-            match strategy {
-                ConflictStrategy::Skip => {
-                    result.learnings_skipped += 1;
-                    continue;
-                }
-                ConflictStrategy::Overwrite => {
-                    // upsert_learning handles ON CONFLICT, so we can just proceed
-                }
-                ConflictStrategy::Fail => {
-                    return Err(crate::Error::Config(format!(
-                        "Learning {} already exists in destination store",
-                        learning.id
-                    )));
-                }
-            }
-        }
-
-        if let Err(e) = crate::database::operations::upsert_learning(to, learning).await {
-            warn!("Failed to transfer learning {}: {e}", learning.id);
-            continue;
-        }
-        result.learnings_transferred += 1;
-    }
-
     Ok(result)
 }
 
-/// Delete all content from a store (memories, embeddings, learnings, feedback).
+/// Delete all content from a store (memories, embeddings, agent events).
 async fn clear_store_contents(pool: &sqlx::SqlitePool) -> crate::Result<()> {
-    // Order matters: delete from dependent tables first
     sqlx::query("DELETE FROM memory_embeddings")
-        .execute(pool)
-        .await?;
-    sqlx::query("DELETE FROM learning_feedback")
         .execute(pool)
         .await?;
     sqlx::query("DELETE FROM agent_events")
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM learnings").execute(pool).await?;
     sqlx::query("DELETE FROM agents").execute(pool).await?;
     sqlx::query("DELETE FROM memories").execute(pool).await?;
     Ok(())

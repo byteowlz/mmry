@@ -52,38 +52,6 @@ CREATE TABLE IF NOT EXISTS agent_events (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS learnings (
-    id TEXT PRIMARY KEY,
-    content TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'guiding',
-    category TEXT NOT NULL DEFAULT 'general',
-    scope TEXT NOT NULL DEFAULT 'global',
-    scope_key TEXT,
-    maturity TEXT NOT NULL DEFAULT 'candidate',
-    pinned BOOLEAN NOT NULL DEFAULT 0,
-    helpful_count INTEGER NOT NULL DEFAULT 0,
-    harmful_count INTEGER NOT NULL DEFAULT 0,
-    effective_score REAL NOT NULL DEFAULT 0.0,
-    agent_id TEXT REFERENCES agents(id),
-    source_sessions JSON DEFAULT '[]',
-    reasoning TEXT,
-    tags JSON DEFAULT '[]',
-    metadata JSON DEFAULT '{}',
-    embedding BLOB,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS learning_feedback (
-    id TEXT PRIMARY KEY,
-    learning_id TEXT NOT NULL REFERENCES learnings(id) ON DELETE CASCADE,
-    feedback_type TEXT NOT NULL CHECK(feedback_type IN ('helpful', 'harmful')),
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    session_path TEXT,
-    reason TEXT,
-    agent_id TEXT REFERENCES agents(id)
-);
-
 CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
     query TEXT NOT NULL,
@@ -103,14 +71,6 @@ CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id);
-CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings(category);
-CREATE INDEX IF NOT EXISTS idx_learnings_kind ON learnings(kind);
-CREATE INDEX IF NOT EXISTS idx_learnings_maturity ON learnings(maturity);
-CREATE INDEX IF NOT EXISTS idx_learnings_score ON learnings(effective_score DESC);
-CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id);
-CREATE INDEX IF NOT EXISTS idx_learnings_scope ON learnings(scope, scope_key);
-CREATE INDEX IF NOT EXISTS idx_learning_feedback_learning ON learning_feedback(learning_id);
-CREATE INDEX IF NOT EXISTS idx_learning_feedback_timestamp ON learning_feedback(timestamp);
 CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_episodes_workspace ON episodes(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_platform_session ON episodes(platform_session_id);

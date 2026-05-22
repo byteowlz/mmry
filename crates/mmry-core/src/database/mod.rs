@@ -445,86 +445,6 @@ impl Database {
             .execute(pool)
             .await?;
 
-        // Learnings table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS learnings (
-                id TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                kind TEXT NOT NULL DEFAULT 'guiding',
-                category TEXT NOT NULL DEFAULT 'general',
-                scope TEXT NOT NULL DEFAULT 'global',
-                scope_key TEXT,
-                maturity TEXT NOT NULL DEFAULT 'candidate',
-                pinned BOOLEAN NOT NULL DEFAULT 0,
-                helpful_count INTEGER NOT NULL DEFAULT 0,
-                harmful_count INTEGER NOT NULL DEFAULT 0,
-                effective_score REAL NOT NULL DEFAULT 0.0,
-                agent_id TEXT REFERENCES agents(id),
-                source_sessions JSON DEFAULT '[]',
-                reasoning TEXT,
-                tags JSON DEFAULT '[]',
-                metadata JSON DEFAULT '{}',
-                embedding BLOB,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings(category)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_kind ON learnings(kind)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_maturity ON learnings(maturity)")
-            .execute(pool)
-            .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_learnings_score ON learnings(effective_score DESC)",
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id)")
-            .execute(pool)
-            .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_learnings_scope ON learnings(scope, scope_key)",
-        )
-        .execute(pool)
-        .await?;
-
-        // Learning feedback events
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS learning_feedback (
-                id TEXT PRIMARY KEY,
-                learning_id TEXT NOT NULL REFERENCES learnings(id) ON DELETE CASCADE,
-                feedback_type TEXT NOT NULL CHECK(feedback_type IN ('helpful', 'harmful')),
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                session_path TEXT,
-                reason TEXT,
-                agent_id TEXT REFERENCES agents(id)
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_learning_feedback_learning ON learning_feedback(learning_id)",
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_learning_feedback_timestamp ON learning_feedback(timestamp)",
-        )
-        .execute(pool)
-        .await?;
-
         // Episodes: append-only log of (query, returned_ids, used_ids, agent_ctx, ts).
         // Substrate for derived feedback signals — no separate counter tables.
         sqlx::query(
@@ -1104,14 +1024,6 @@ mod tests {
         assert!(has_embedding);
         assert!(has_sparse);
         assert!(has_chunk_index);
-
-        // Verify learnings table exists
-        let learnings_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='learnings'",
-        )
-        .fetch_one(db.pool())
-        .await?;
-        assert!(learnings_exists);
 
         // Second init should be idempotent
         let _ = Database::init(&db_path, TEST_DIM).await?;
