@@ -1,4 +1,3 @@
-use chrono::NaiveDate;
 use clap::Parser;
 use std::io::Read;
 use std::io::{self};
@@ -46,12 +45,6 @@ pub struct AddCmd {
 
     #[arg(long, short = 'f', help = "Include full embeddings in JSON output")]
     pub full: bool,
-
-    #[arg(
-        long,
-        help = "Expiration timestamp for the memory (RFC3339 or YYYY-MM-DD)"
-    )]
-    pub expires_at: Option<String>,
 
     /// Agent name (who is adding this memory). Defaults to "human".
     #[arg(long, env = "MMRY_AGENT")]
@@ -223,10 +216,6 @@ pub async fn handle(
 
     if let Some(importance) = cmd.importance {
         memory.importance = importance.clamp(1, 10);
-    }
-
-    if let Some(raw) = cmd.expires_at.as_deref() {
-        memory.expires_at = Some(parse_expiration_input(raw)?);
     }
 
     // Check if chunking is needed
@@ -526,12 +515,6 @@ async fn process_json_memory(
         }
     }
 
-    if let Some(raw) = cmd.expires_at.as_deref() {
-        memory.expires_at = Some(parse_expiration_input(raw)?);
-    } else if let Some(raw) = obj.get("expires_at").and_then(|v| v.as_str()) {
-        memory.expires_at = Some(parse_expiration_input(raw)?);
-    }
-
     if let Some(tags_str) = cmd.tags.as_ref() {
         memory.tags = tags_str.split(',').map(|s| s.trim().to_string()).collect();
     } else if let Some(tags_val) = obj.get("tags") {
@@ -559,24 +542,6 @@ async fn process_json_memory(
     }
 
     Ok(memory)
-}
-
-fn parse_expiration_input(raw: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
-    if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(raw) {
-        return Ok(ts.with_timezone(&chrono::Utc));
-    }
-
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        let naive = date
-            .and_hms_opt(0, 0, 0)
-            .ok_or_else(|| anyhow::anyhow!("Invalid date {raw}"))?;
-        return Ok(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-            naive,
-            chrono::Utc,
-        ));
-    }
-
-    anyhow::bail!("Invalid expires_at format: {raw}");
 }
 
 fn serialize_memory_with_agent(
@@ -666,7 +631,6 @@ mod tests {
             category: None,
             tags: None,
             importance: None,
-            expires_at: None,
             json: false,
             full: false,
             agent: None,
@@ -712,7 +676,6 @@ mod tests {
             category: None,
             tags: None,
             importance: None,
-            expires_at: None,
             json: true,
             full: false,
             agent: None,

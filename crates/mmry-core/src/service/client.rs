@@ -107,7 +107,6 @@ pub struct DaemonSearchOptions<'a> {
     pub limit: i64,
     pub mode: crate::config::SearchMode,
     pub rerank: bool,
-    pub include_expired: bool,
     pub store: Option<&'a str>,
     /// Filter by tags (memory must contain at least one)
     pub tags: Vec<String>,
@@ -357,7 +356,6 @@ impl DaemonClient {
             mode: search_mode_to_proto(opts.mode) as i32,
             rerank: opts.rerank,
             store: opts.store.unwrap_or_default().to_string(),
-            include_expired: opts.include_expired,
             tags: opts.tags,
             memory_type: opts.memory_type.unwrap_or_default(),
             min_importance: opts.min_importance.unwrap_or(0),
@@ -434,26 +432,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         }
     });
 
-    let expires_at = if mem.expires_at.is_empty() {
-        None
-    } else {
-        Some(
-            chrono::DateTime::parse_from_rfc3339(&mem.expires_at)
-                .map_err(|e| crate::Error::Service(format!("Invalid expires_at: {e}")))?
-                .with_timezone(&chrono::Utc),
-        )
-    };
-
-    let expired_at = if mem.expired_at.is_empty() {
-        None
-    } else {
-        Some(
-            chrono::DateTime::parse_from_rfc3339(&mem.expired_at)
-                .map_err(|e| crate::Error::Service(format!("Invalid expired_at: {e}")))?
-                .with_timezone(&chrono::Utc),
-        )
-    };
-
     Ok(Memory {
         id: Uuid::parse_str(&mem.id)
             .map_err(|e| crate::Error::Service(format!("Invalid memory id: {e}")))?,
@@ -468,8 +446,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         metadata: serde_json::from_str(&mem.metadata_json)
             .unwrap_or_else(|_| serde_json::json!({})),
         importance: mem.importance,
-        expires_at,
-        expired_at,
         helpful_count: 0,
         harmful_count: 0,
         created_at: chrono::DateTime::parse_from_rfc3339(&mem.created_at)

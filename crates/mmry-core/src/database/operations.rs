@@ -87,16 +87,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
             ))
         })?
         .with_timezone(&chrono::Utc);
-    let expires_at_raw: Option<String> = row.try_get("expires_at").ok().flatten();
-    let expires_at = match expires_at_raw {
-        Some(raw) => Some(parse_datetime(&raw, "expires_at", &format!("memory {id}"))?),
-        None => None,
-    };
-    let expired_at_raw: Option<String> = row.try_get("expired_at").ok().flatten();
-    let expired_at = match expired_at_raw {
-        Some(raw) => Some(parse_datetime(&raw, "expired_at", &format!("memory {id}"))?),
-        None => None,
-    };
     let bridge_block_id: Option<String> = row.try_get("bridge_block_id").ok().flatten();
     let bridge_block_id = match bridge_block_id {
         Some(raw) => Some(Uuid::parse_str(&raw).map_err(|e| {
@@ -115,8 +105,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         sparse_embedding: sparse_embedding_vec,
         metadata: serde_json::from_str(row.try_get("metadata")?)?,
         importance: row.try_get("importance")?,
-        expires_at,
-        expired_at,
         helpful_count: row.try_get("helpful_count").unwrap_or(0),
         harmful_count: row.try_get("harmful_count").unwrap_or(0),
         category: row.try_get("category")?,
@@ -148,23 +136,17 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
             .map(|s| s.trim_matches('"').to_string())
     });
 
-    let now = chrono::Utc::now();
-    let expired_at = memory
-        .expired_at
-        .or_else(|| memory.expires_at.filter(|ts| *ts <= now).map(|_| now));
-
     let ctx_keys = CtxIndexKeys::from_metadata(&memory.metadata);
 
     sqlx::query(
         r#"
         INSERT INTO memories (
             id, type, content, embedding, sparse_embedding, metadata, importance,
-            expires_at, expired_at,
             category, tags, created_at, updated_at,
             parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id,
             workspace_id, platform_session_id, harness_session_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(memory.id.to_string())
@@ -174,8 +156,6 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(sparse_embedding_bytes)
     .bind(memory.metadata.to_string())
     .bind(memory.importance)
-    .bind(memory.expires_at.map(|ts| ts.to_rfc3339()))
-    .bind(expired_at.map(|ts| ts.to_rfc3339()))
     .bind(&memory.category)
     .bind(serde_json::to_string(&memory.tags)?)
     .bind(memory.created_at.to_rfc3339())
@@ -201,7 +181,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
         FROM memories
         WHERE id = ?
         "#,
@@ -225,7 +205,7 @@ pub async fn list_memories(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -239,7 +219,7 @@ pub async fn list_memories(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -274,7 +254,7 @@ pub async fn list_memories_paged(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -289,7 +269,7 @@ pub async fn list_memories_paged(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
             FROM memories
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
@@ -331,27 +311,6 @@ pub async fn delete_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<bool> {
     } else {
         Ok(false)
     }
-}
-
-pub async fn mark_expired_memories(
-    pool: &SqlitePool,
-    now: chrono::DateTime<chrono::Utc>,
-) -> crate::Result<u64> {
-    let result = sqlx::query(
-        r#"
-        UPDATE memories
-        SET expired_at = ?
-        WHERE expired_at IS NULL
-          AND expires_at IS NOT NULL
-          AND expires_at <= ?
-        "#,
-    )
-    .bind(now.to_rfc3339())
-    .bind(now.to_rfc3339())
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected())
 }
 
 pub async fn update_memory_embeddings(
@@ -400,7 +359,7 @@ pub async fn update_memory_fields(
     sqlx::query(
         r#"
         UPDATE memories
-        SET type = ?, content = ?, metadata = ?, importance = ?, expires_at = ?, expired_at = ?,
+        SET type = ?, content = ?, metadata = ?, importance = ?,
             category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?, bridge_block_id = ?
         WHERE id = ?
         "#,
@@ -409,8 +368,6 @@ pub async fn update_memory_fields(
     .bind(&memory.content)
     .bind(memory.metadata.to_string())
     .bind(memory.importance)
-    .bind(memory.expires_at.map(|ts| ts.to_rfc3339()))
-    .bind(memory.expired_at.map(|ts| ts.to_rfc3339()))
     .bind(&memory.category)
     .bind(serde_json::to_string(&memory.tags)?)
     .bind(memory.updated_at.to_rfc3339())

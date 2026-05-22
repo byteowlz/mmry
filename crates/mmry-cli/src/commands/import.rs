@@ -152,14 +152,6 @@ fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow
         chrono::DateTime::parse_from_rfc3339(&exported.created_at)?.with_timezone(&chrono::Utc);
     let updated_at =
         chrono::DateTime::parse_from_rfc3339(&exported.updated_at)?.with_timezone(&chrono::Utc);
-    let expires_at = match exported.expires_at.as_deref() {
-        Some(raw) => Some(chrono::DateTime::parse_from_rfc3339(raw)?.with_timezone(&chrono::Utc)),
-        None => None,
-    };
-    let expired_at = match exported.expired_at.as_deref() {
-        Some(raw) => Some(chrono::DateTime::parse_from_rfc3339(raw)?.with_timezone(&chrono::Utc)),
-        None => None,
-    };
     Ok(Memory {
         id,
         memory_type,
@@ -168,8 +160,6 @@ fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow
         sparse_embedding: None,
         metadata: exported.metadata.clone(),
         importance: exported.importance,
-        expires_at,
-        expired_at,
         helpful_count: 0,
         harmful_count: 0,
         created_at,

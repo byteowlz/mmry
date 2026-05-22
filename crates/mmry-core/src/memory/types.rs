@@ -23,8 +23,6 @@ pub struct Memory {
     pub sparse_embedding: Option<StoredSparseEmbedding>,
     pub metadata: serde_json::Value,
     pub importance: i32,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub expired_at: Option<DateTime<Utc>>,
     /// Times a search returning this memory was closed with this id in `--using`.
     #[serde(default)]
     pub helpful_count: i64,
@@ -93,8 +91,6 @@ impl Memory {
             sparse_embedding: None,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             importance: 5,
-            expires_at: None,
-            expired_at: None,
             helpful_count: 0,
             harmful_count: 0,
             created_at: Utc::now(),

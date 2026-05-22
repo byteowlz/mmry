@@ -46,7 +46,6 @@ pub fn serialize_memory_for_editing(memory: &Memory) -> String {
 type: {}
 category: {}
 importance: {}
-expires_at: {}
 
 tags:
 {}
@@ -59,10 +58,6 @@ content: |
         type_str,
         memory.category,
         memory.importance,
-        memory
-            .expires_at
-            .map(|ts| ts.to_rfc3339())
-            .unwrap_or_else(|| "none".to_string()),
         if tags.is_empty() {
             "  # No tags".to_string()
         } else {
@@ -86,7 +81,6 @@ pub fn serialize_new_memory_template() -> String {
 type: episodic
 category: default
 importance: 5
-expires_at: none
 
 tags:
   # Add tags below (one per line, starting with -)
@@ -103,7 +97,6 @@ pub fn parse_edited_memory(content: &str, original_id: Option<Uuid>) -> Result<M
     let mut memory_type = MemoryType::Episodic;
     let mut category = String::from("default");
     let mut importance = 5;
-    let mut expires_at = None;
     let mut tags = Vec::new();
     let mut memory_content = String::new();
     let mut in_content = false;
@@ -147,23 +140,6 @@ pub fn parse_edited_memory(content: &str, original_id: Option<Uuid>) -> Result<M
                 importance = imp_str.trim().parse().unwrap_or(5);
             }
             in_tags = false;
-        } else if line.starts_with("expires_at:") {
-            if let Some(value) = line.split(':').nth(1) {
-                let trimmed = value.trim();
-                expires_at = if trimmed.is_empty()
-                    || trimmed.eq_ignore_ascii_case("none")
-                    || trimmed.eq_ignore_ascii_case("null")
-                {
-                    None
-                } else {
-                    Some(
-                        chrono::DateTime::parse_from_rfc3339(trimmed)
-                            .map_err(|e| anyhow::anyhow!("Invalid expires_at: {e}"))?
-                            .with_timezone(&chrono::Utc),
-                    )
-                };
-            }
-            in_tags = false;
         } else if line.starts_with("tags:") {
             in_tags = true;
         } else if line.starts_with("content:") {
@@ -193,8 +169,6 @@ pub fn parse_edited_memory(content: &str, original_id: Option<Uuid>) -> Result<M
         sparse_embedding: None,
         metadata: serde_json::Value::Object(serde_json::Map::new()),
         importance,
-        expires_at,
-        expired_at: None,
         helpful_count: 0,
         harmful_count: 0,
         created_at: chrono::Utc::now(),

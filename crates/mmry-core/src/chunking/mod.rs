@@ -441,8 +441,6 @@ impl Chunker {
                 memory.importance = parent.importance;
                 memory.tags = parent.tags.clone();
                 memory.metadata = parent.metadata.clone();
-                memory.expires_at = parent.expires_at;
-                memory.expired_at = parent.expired_at;
                 memory
             })
             .collect()

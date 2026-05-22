@@ -357,30 +357,6 @@ impl Database {
             tracing::info!("Chunking columns and indices added");
         }
 
-        let expires_at_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='expires_at'",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if !expires_at_exists {
-            tracing::info!("Adding expiration columns to memories table...");
-            sqlx::query("ALTER TABLE memories ADD COLUMN expires_at DATETIME")
-                .execute(pool)
-                .await?;
-            sqlx::query("ALTER TABLE memories ADD COLUMN expired_at DATETIME")
-                .execute(pool)
-                .await?;
-            tracing::info!("Expiration columns added");
-        }
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_expired_at ON memories(expired_at)")
-            .execute(pool)
-            .await?;
-
         // Ensure agent tables exist
         sqlx::query(
             r#"

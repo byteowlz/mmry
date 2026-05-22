@@ -507,7 +507,6 @@ impl EmbeddingService for EmbeddingServiceImpl {
                         limit,
                         mode: Some(mode),
                         rerank: Some(req.rerank),
-                        include_expired: req.include_expired,
                         filters,
                     })
                     .await
@@ -560,7 +559,6 @@ impl EmbeddingService for EmbeddingServiceImpl {
                     limit,
                     mode: Some(mode),
                     rerank: Some(req.rerank),
-                    include_expired: req.include_expired,
                     filters,
                 })
                 .await
@@ -599,14 +597,6 @@ impl EmbeddingService for EmbeddingServiceImpl {
                     chunk_method: memory
                         .chunk_method
                         .map(|m| format!("{:?}", m))
-                        .unwrap_or_default(),
-                    expires_at: memory
-                        .expires_at
-                        .map(|t| t.to_rfc3339())
-                        .unwrap_or_default(),
-                    expired_at: memory
-                        .expired_at
-                        .map(|t| t.to_rfc3339())
                         .unwrap_or_default(),
                 }
             })
@@ -862,8 +852,6 @@ async fn memory_create_handler(
         sparse_embedding: None,
         metadata: serde_json::json!({}),
         importance: payload.importance.unwrap_or(5),
-        expires_at: None,
-        expired_at: None,
         helpful_count: 0,
         harmful_count: 0,
         created_at: now,

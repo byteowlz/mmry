@@ -69,9 +69,6 @@ pub struct SearchCmd {
     #[arg(long, help = "Include full embeddings in JSON output")]
     pub full: bool,
 
-    #[arg(long, help = "Include expired memories in results")]
-    pub include_expired: bool,
-
     #[arg(long, help = "Filter by tag (can be specified multiple times)")]
     pub tag: Vec<String>,
 
@@ -161,7 +158,6 @@ pub async fn handle(
             limit,
             mode: Some(resolved_mode),
             rerank: Some(rerank),
-            include_expired: cmd.include_expired,
             filters,
             embeddings,
             sparse_embeddings,
@@ -188,7 +184,6 @@ pub async fn handle(
                 limit,
                 mode: Some(resolved_mode),
                 rerank: Some(rerank),
-                include_expired: cmd.include_expired,
                 filters,
             })
             .await?
@@ -224,7 +219,6 @@ pub async fn handle_remote(
             limit,
             mode: resolved_mode,
             rerank,
-            include_expired: cmd.include_expired,
             store,
             tags: cmd.tag.clone(),
             memory_type: cmd.r#type.clone().map(|t| format!("{t:?}").to_lowercase()),

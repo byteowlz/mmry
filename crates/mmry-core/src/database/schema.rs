@@ -11,8 +11,6 @@ CREATE TABLE IF NOT EXISTS memories (
     importance INTEGER DEFAULT 5,
     helpful_count INTEGER NOT NULL DEFAULT 0,
     harmful_count INTEGER NOT NULL DEFAULT 0,
-    expires_at DATETIME,
-    expired_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     category TEXT DEFAULT 'default',

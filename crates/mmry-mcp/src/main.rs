@@ -315,7 +315,6 @@ impl MmryMcpRouter {
                 limit,
                 mode,
                 rerank: args.rerank,
-                include_expired: false,
                 filters,
             })
             .await

@@ -201,7 +201,6 @@ async fn run_arm(label: &str, feedback_weight: f32) -> Vec<RoundMetrics> {
                     limit: TOP_K,
                     mode: None,
                     rerank: None,
-                    include_expired: false,
                     filters: Default::default(),
                 })
                 .await

@@ -23,7 +23,6 @@ pub struct SearchAllStoresOptions<'a> {
     pub limit: i64,
     pub mode: Option<SearchMode>,
     pub rerank: Option<bool>,
-    pub include_expired: bool,
     pub filters: SearchFilters<'a>,
     pub embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
     pub sparse_embeddings: Arc<SparseEmbeddingService>,
@@ -208,7 +207,6 @@ pub async fn search_all_stores(
                 limit: opts.limit,
                 mode: opts.mode,
                 rerank: opts.rerank,
-                include_expired: opts.include_expired,
                 filters: SearchFilters {
                     tags: opts.filters.tags,
                     memory_type: opts.filters.memory_type.clone(),
@@ -327,10 +325,6 @@ pub struct ExportedMemory {
     pub category: String,
     pub tags: Vec<String>,
     pub importance: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expired_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -347,8 +341,6 @@ impl From<&Memory> for ExportedMemory {
             category: memory.category.clone(),
             tags: memory.tags.clone(),
             importance: memory.importance,
-            expires_at: memory.expires_at.map(|ts| ts.to_rfc3339()),
-            expired_at: memory.expired_at.map(|ts| ts.to_rfc3339()),
             created_at: memory.created_at.to_rfc3339(),
             updated_at: memory.updated_at.to_rfc3339(),
             store: None,

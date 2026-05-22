@@ -45,8 +45,6 @@ pub struct ExecuteSearchOptions<'a> {
     pub category: Option<&'a str>,
     /// Maximum number of results
     pub limit: i64,
-    /// Include expired memories in results
-    pub include_expired: bool,
     /// Pre-computed dense embedding for the query
     pub query_embedding: Option<Vec<f32>>,
     /// Pre-computed sparse embedding for the query
@@ -102,7 +100,6 @@ pub struct SearchQueryOptions<'a> {
     pub limit: i64,
     pub mode: Option<SearchMode>,
     pub rerank: Option<bool>,
-    pub include_expired: bool,
     pub filters: SearchFilters<'a>,
 }
 
@@ -143,32 +140,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
             ))
         })?
         .with_timezone(&chrono::Utc);
-    let expires_at_raw: Option<String> = row.try_get("expires_at").ok().flatten();
-    let expires_at = match expires_at_raw {
-        Some(raw) => Some(
-            chrono::DateTime::parse_from_rfc3339(&raw)
-                .map_err(|e| {
-                    crate::Error::InvalidInput(format!(
-                        "Invalid expires_at for memory {id} ({raw}): {e}"
-                    ))
-                })?
-                .with_timezone(&chrono::Utc),
-        ),
-        None => None,
-    };
-    let expired_at_raw: Option<String> = row.try_get("expired_at").ok().flatten();
-    let expired_at = match expired_at_raw {
-        Some(raw) => Some(
-            chrono::DateTime::parse_from_rfc3339(&raw)
-                .map_err(|e| {
-                    crate::Error::InvalidInput(format!(
-                        "Invalid expired_at for memory {id} ({raw}): {e}"
-                    ))
-                })?
-                .with_timezone(&chrono::Utc),
-        ),
-        None => None,
-    };
     let bridge_block_id: Option<String> = row.try_get("bridge_block_id").ok().flatten();
     let bridge_block_id = bridge_block_id.and_then(|s| Uuid::parse_str(&s).ok());
 
@@ -180,8 +151,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         sparse_embedding: sparse_embedding_vec,
         metadata: serde_json::from_str(row.try_get("metadata")?)?,
         importance: row.try_get("importance")?,
-        expires_at,
-        expired_at,
         helpful_count: row.try_get("helpful_count").unwrap_or(0),
         harmful_count: row.try_get("harmful_count").unwrap_or(0),
         category: row.try_get("category")?,
@@ -230,8 +199,6 @@ impl SearchService {
     }
 
     async fn execute_search(&self, opts: ExecuteSearchOptions<'_>) -> Result<Vec<Memory>> {
-        let now = Utc::now();
-        operations::mark_expired_memories(&self.pool, now).await?;
         let mut vector_distance_hint: HashMap<Uuid, f32> = HashMap::new();
         let mut memories = {
             let mut candidate_ids = Vec::new();
@@ -244,7 +211,7 @@ impl SearchService {
                     .min(MAX_CANDIDATE_POOL);
 
                 let vector_candidates = self
-                    .vector_candidates(query_vec, opts.category, vector_limit, opts.include_expired)
+                    .vector_candidates(query_vec, opts.category, vector_limit)
                     .await?;
 
                 for (id, distance) in vector_candidates {
@@ -258,7 +225,7 @@ impl SearchService {
             if candidate_ids.len() < MAX_CANDIDATE_POOL {
                 let fallback_limit = MAX_CANDIDATE_POOL - candidate_ids.len();
                 let recents = self
-                    .recent_candidate_ids(opts.category, fallback_limit, opts.include_expired)
+                    .recent_candidate_ids(opts.category, fallback_limit)
                     .await?;
                 for id in recents {
                     if seen.insert(id) {
@@ -274,13 +241,8 @@ impl SearchService {
                 return Ok(Vec::new());
             }
 
-            self.load_memories_by_ids(&candidate_ids, opts.include_expired)
-                .await?
+            self.load_memories_by_ids(&candidate_ids).await?
         };
-
-        if !opts.include_expired {
-            memories.retain(|memory| memory.expired_at.is_none());
-        }
 
         // Apply additional filters
         if let Some(tags) = opts.tags {
@@ -613,7 +575,7 @@ impl SearchService {
         category: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Memory>> {
-        self.search_with_options(query, category, limit, None, None, false)
+        self.search_with_options(query, category, limit, None, None)
             .await
     }
 
@@ -652,7 +614,6 @@ impl SearchService {
                 query: opts.query,
                 category: opts.category,
                 limit: opts.limit,
-                include_expired: opts.include_expired,
                 query_embedding,
                 query_sparse_embedding,
                 mode_override: Some(mode),
@@ -694,7 +655,6 @@ impl SearchService {
         limit: i64,
         mode: Option<SearchMode>,
         rerank: Option<bool>,
-        include_expired: bool,
     ) -> Result<Vec<Memory>> {
         self.search_with_query_options(SearchQueryOptions {
             query,
@@ -702,7 +662,6 @@ impl SearchService {
             limit,
             mode,
             rerank,
-            include_expired,
             filters: SearchFilters::default(),
         })
         .await
@@ -713,7 +672,6 @@ impl SearchService {
         query_embedding: &[f32],
         category: Option<&str>,
         limit: usize,
-        include_expired: bool,
     ) -> Result<Vec<(Uuid, f32)>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -723,13 +681,7 @@ impl SearchService {
             "SELECT memory_id, distance FROM memory_embeddings WHERE embedding MATCH ? AND k = ?",
         );
         if category.is_some() {
-            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE category = ?");
-            if !include_expired {
-                sql.push_str(" AND expired_at IS NULL");
-            }
-            sql.push(')');
-        } else if !include_expired {
-            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE expired_at IS NULL)");
+            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE category = ?)");
         }
         sql.push_str(" ORDER BY distance");
 
@@ -758,24 +710,14 @@ impl SearchService {
         &self,
         category: Option<&str>,
         limit: usize,
-        include_expired: bool,
     ) -> Result<Vec<Uuid>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
         let mut sql = String::from("SELECT id FROM memories");
-        if category.is_some() || !include_expired {
-            sql.push_str(" WHERE");
-        }
-        if category.is_some() {
-            sql.push_str(" category = ?");
-        }
-        if !include_expired {
-            if category.is_some() {
-                sql.push_str(" AND");
-            }
-            sql.push_str(" expired_at IS NULL");
+        if let Some(_) = category {
+            sql.push_str(" WHERE category = ?");
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
 
@@ -797,11 +739,7 @@ impl SearchService {
         Ok(ids)
     }
 
-    async fn load_memories_by_ids(
-        &self,
-        ids: &[Uuid],
-        include_expired: bool,
-    ) -> Result<Vec<Memory>> {
+    async fn load_memories_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Memory>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -814,7 +752,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
+                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");
@@ -823,9 +761,6 @@ impl SearchService {
                 }
             }
             builder.push(")");
-            if !include_expired {
-                builder.push(" AND expired_at IS NULL");
-            }
 
             let rows = builder.build().fetch_all(&self.pool).await?;
             for row in rows {
@@ -1187,21 +1122,14 @@ mod tests {
         // With embeddings disabled, semantic mode returns no results (no query vector).
         // Use keyword mode to verify the memory is stored and searchable.
         let results = service
-            .search_with_options("sudo", None, 10, Some(SearchMode::Keyword), None, false)
+            .search_with_options("sudo", None, 10, Some(SearchMode::Keyword), None)
             .await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, memory.id);
 
         // Unrelated keyword should return nothing
         let unrelated = service
-            .search_with_options(
-                "vogelfutter",
-                None,
-                10,
-                Some(SearchMode::Keyword),
-                None,
-                false,
-            )
+            .search_with_options("vogelfutter", None, 10, Some(SearchMode::Keyword), None)
             .await?;
         assert!(unrelated.is_empty());
 
@@ -1209,49 +1137,4 @@ mod tests {
 
         Ok(())
     }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn expired_memories_are_excluded_by_default() -> Result<()> {
-        crate::database::ensure_sqlite_vec_loaded()?;
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        sqlx::query(schema::INIT_SQL).execute(&pool).await?;
-        Database::ensure_vector_table(&pool, TEST_DIMENSION).await?;
-
-        let mut memory = Memory::new(
-            MemoryType::Episodic,
-            "temporary note".to_string(),
-            "default".to_string(),
-        );
-        memory.expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
-        operations::insert_memory(&pool, &memory).await?;
-
-        let embeddings = disabled_embeddings();
-        let sparse_embeddings = disabled_sparse_embeddings();
-        let mut search_config = base_search_config();
-        search_config.mode = SearchMode::Keyword;
-        let reranker = Arc::new(RerankerService::from_config(&search_config)?);
-
-        let service = SearchService::new(
-            pool.clone(),
-            search_config,
-            Arc::clone(&embeddings),
-            Arc::clone(&sparse_embeddings),
-            Arc::clone(&reranker),
-        );
-
-        let results = service.search("temporary", None, 10).await?;
-        assert!(results.is_empty());
-
-        let results = service
-            .search_with_options("temporary", None, 10, None, None, true)
-            .await?;
-        assert_eq!(results.len(), 1);
-
-        Ok(())
-    }
-
 }

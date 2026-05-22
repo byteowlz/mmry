@@ -910,7 +910,7 @@ impl App {
 
         let results = self
             .search_service
-            .search_with_options(query, None, limit, Some(mode), None, false)
+            .search_with_options(query, None, limit, Some(mode), None)
             .await?
             .into_iter()
             .map(|memory| MemoryWithStore {
@@ -1237,14 +1237,6 @@ impl App {
                     Ok(mut updated_memory) => {
                         updated_memory.created_at = memory.created_at;
                         updated_memory.updated_at = chrono::Utc::now();
-                        let now = chrono::Utc::now();
-                        updated_memory.expired_at = match updated_memory.expires_at {
-                            Some(expiration) if expiration <= now => {
-                                Some(memory.expired_at.unwrap_or(now))
-                            }
-                            Some(_) => None,
-                            None => None,
-                        };
 
                         let clear_embeddings = updated_memory.content != memory.content;
                         self.with_store_db(&store, move |db| {
