@@ -428,9 +428,6 @@ impl SearchService {
                 0.0
             };
 
-            let importance_boost =
-                (memory.importance.clamp(1, 10) as f32 / 10.0) * self.config.importance_weight;
-
             // Episode feedback prior: each closed `search → add --using <id>`
             // pair bumps `helpful_count`, lifting this memory in future
             // rankings. log1p keeps the prior bounded and prevents one
@@ -438,7 +435,7 @@ impl SearchService {
             let net_feedback = (memory.helpful_count - memory.harmful_count) as f32;
             let feedback_boost = self.config.feedback_weight * net_feedback.max(0.0).ln_1p();
 
-            let score = base_score + recency_boost + importance_boost + feedback_boost;
+            let score = base_score + recency_boost + feedback_boost;
 
             scored_results.push((score, memory));
         }

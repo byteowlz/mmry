@@ -124,7 +124,6 @@ fn bm25_only_config(feedback_weight: f32) -> SearchConfig {
         vector_weight: 0.0,
         bm25_weight: 1.0,
         sparse_embedding_weight: 0.0,
-        importance_weight: 0.0,
         recency_weight: 0.0,
         boost_recent: false,
         rerank_enabled: false,

@@ -216,7 +216,6 @@ pub struct SearchConfig {
     pub vector_weight: f32,
     pub bm25_weight: f32,
     pub sparse_embedding_weight: f32,
-    pub importance_weight: f32,
     /// Coefficient on `log1p(helpful_count - harmful_count)` added to the final
     /// score. Translates cited-search outcomes into a re-ranking prior so the
     /// retrieval gateway gets sharper with every closed episode.
@@ -525,7 +524,6 @@ impl Default for SearchConfig {
             vector_weight: 0.35,
             bm25_weight: 0.0,
             sparse_embedding_weight: 0.0,
-            importance_weight: 0.05,
             feedback_weight: 0.1,
             bm25_k1: 1.2,
             bm25_b: 0.75,
