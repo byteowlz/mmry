@@ -1,34 +1,11 @@
 // Store management utilities
 
 use crate::config::Config;
-use crate::config::SearchMode;
 use crate::database::operations;
 use crate::database::Database;
 use crate::database::UNIFIED_DB_FILENAME;
-use crate::embeddings::EmbeddingServiceWrapper;
 use crate::memory::Memory;
-use crate::reranker::RerankerService;
-use crate::search::SearchFilters;
-use crate::search::SearchQueryOptions;
-use crate::search::SearchService;
-use crate::sparse_embeddings::SparseEmbeddingService;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
-/// Options for searching across all stores
-pub struct SearchAllStoresOptions<'a> {
-    pub config: &'a Config,
-    pub query: &'a str,
-    pub category: Option<&'a str>,
-    pub limit: i64,
-    pub mode: Option<SearchMode>,
-    pub rerank: Option<bool>,
-    pub filters: SearchFilters<'a>,
-    pub embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
-    pub sparse_embeddings: Arc<SparseEmbeddingService>,
-    pub reranker: Arc<RerankerService>,
-}
 
 /// Information about a store
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -198,53 +175,6 @@ pub struct MemoryWithStore {
     #[serde(flatten)]
     pub memory: Memory,
     pub store: String,
-}
-
-/// Search across every store in the unified DB. With a single DB this
-/// is just one search call with no store filter — the per-store fanout
-/// is gone.
-pub async fn search_all_stores(
-    opts: SearchAllStoresOptions<'_>,
-) -> crate::Result<Vec<MemoryWithStore>> {
-    let db = Database::init_store(opts.config, None).await?;
-    let search_service = SearchService::new(
-        db.pool().clone(),
-        opts.config.search.clone(),
-        Arc::clone(&opts.embeddings),
-        Arc::clone(&opts.sparse_embeddings),
-        Arc::clone(&opts.reranker),
-    );
-
-    let results = search_service
-        .search_with_query_options(SearchQueryOptions {
-            query: opts.query,
-            category: opts.category,
-            limit: opts.limit,
-            mode: opts.mode,
-            rerank: opts.rerank,
-            filters: SearchFilters {
-                tags: opts.filters.tags,
-                memory_type: opts.filters.memory_type.clone(),
-                min_importance: opts.filters.min_importance,
-                after: opts.filters.after,
-                before: opts.filters.before,
-                workspace_id: opts.filters.workspace_id,
-                platform_session_id: opts.filters.platform_session_id,
-                harness_session_id: opts.filters.harness_session_id,
-            },
-        })
-        .await?;
-
-    let out = results
-        .into_iter()
-        .map(|memory| {
-            let store = memory.store.clone();
-            MemoryWithStore { memory, store }
-        })
-        .collect();
-
-    db.close().await;
-    Ok(out)
 }
 
 /// List memories from every store in the unified DB.

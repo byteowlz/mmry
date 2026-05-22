@@ -182,8 +182,8 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize database for the specified store
-    // When store is "all", use the default store for initial DB; commands handle multi-store iteration
+    // Initialize the unified DB. "all" is a special keyword meaning
+    // "no store filter"; otherwise the store name scopes reads/writes.
     let db_store = if store_name == Some("all") {
         None
     } else {
