@@ -52,30 +52,22 @@ pub async fn handle(
         eprintln!("Warning: Sparse embeddings are disabled in config, skipping sparse embeddings");
     }
 
-    // Handle -s all: iterate over every store
+    // `-s all` is now a single pass over the unified DB with no store filter.
     if store_name == Some("all") {
-        let store_list = stores::list_stores(config)?;
-        if store_list.is_empty() {
-            println!("No stores found.");
-            return Ok(());
-        }
-        println!("Re-embedding all stores ({} stores)...\n", store_list.len());
-        for store_info in &store_list {
-            println!("--- Store: {} ---", store_info.name);
-            let store_db = Database::init_store(config, Some(&store_info.name)).await?;
-            reembed_store(
-                &cmd,
-                &store_db,
-                regenerate_dense,
-                regenerate_sparse,
-                embeddings_enabled,
-                &embeddings,
-                &sparse_embeddings,
-            )
-            .await?;
-            store_db.close().await;
-            println!();
-        }
+        let _ = stores::list_stores; // keep import live for future use
+        let unified_db = Database::init_store(config, None).await?;
+        println!("Re-embedding all stores...");
+        reembed_store(
+            &cmd,
+            &unified_db,
+            regenerate_dense,
+            regenerate_sparse,
+            embeddings_enabled,
+            &embeddings,
+            &sparse_embeddings,
+        )
+        .await?;
+        unified_db.close().await;
         println!("Done re-embedding all stores.");
         return Ok(());
     }

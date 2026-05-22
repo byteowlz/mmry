@@ -165,46 +165,53 @@ pub async fn list_memories(
     category: Option<&str>,
     limit: i64,
 ) -> crate::Result<Vec<Memory>> {
-    let rows = if let Some(cat) = category {
-        sqlx::query(
-            r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
-            FROM memories
-            WHERE category = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            "#
-        )
-        .bind(cat)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
-            FROM memories
-            ORDER BY created_at DESC
-            LIMIT ?
-            "#
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?
-    };
+    list_memories_scoped(pool, None, category, limit).await
+}
 
+/// Like `list_memories`, but scoped to a specific store. `None` means
+/// "no scope" — return rows from all stores in the unified DB.
+pub async fn list_memories_scoped(
+    pool: &SqlitePool,
+    store: Option<&str>,
+    category: Option<&str>,
+    limit: i64,
+) -> crate::Result<Vec<Memory>> {
+    let mut sql = String::from(
+        "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories",
+    );
+    let mut where_clauses = Vec::new();
+    if store.is_some() {
+        where_clauses.push("store = ?");
+    }
+    if category.is_some() {
+        where_clauses.push("category = ?");
+    }
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+
+    let mut query = sqlx::query(&sql);
+    if let Some(s) = store {
+        query = query.bind(s);
+    }
+    if let Some(c) = category {
+        query = query.bind(c);
+    }
+    query = query.bind(limit);
+
+    let rows = query.fetch_all(pool).await?;
     let mut memories = Vec::new();
     for row in rows {
         match memory_from_row(&row) {
             Ok(memory) => memories.push(memory),
             Err(e) => {
-                // Try to get the ID for logging, fall back to "unknown"
                 let id_str: String = row.try_get("id").unwrap_or_else(|_| "unknown".to_string());
                 warn!("Skipping corrupt memory row {id_str}: {e}");
             }
         }
     }
-
     Ok(memories)
 }
 
@@ -214,36 +221,42 @@ pub async fn list_memories_paged(
     limit: i64,
     offset: i64,
 ) -> crate::Result<Vec<Memory>> {
-    let rows = if let Some(cat) = category {
-        sqlx::query(
-            r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
-            FROM memories
-            WHERE category = ?
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-            "#,
-        )
-        .bind(cat)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
-            FROM memories
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-            "#,
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?
-    };
+    list_memories_paged_scoped(pool, None, category, limit, offset).await
+}
 
+pub async fn list_memories_paged_scoped(
+    pool: &SqlitePool,
+    store: Option<&str>,
+    category: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> crate::Result<Vec<Memory>> {
+    let mut sql = String::from(
+        "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories",
+    );
+    let mut where_clauses = Vec::new();
+    if store.is_some() {
+        where_clauses.push("store = ?");
+    }
+    if category.is_some() {
+        where_clauses.push("category = ?");
+    }
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
+
+    let mut query = sqlx::query(&sql);
+    if let Some(s) = store {
+        query = query.bind(s);
+    }
+    if let Some(c) = category {
+        query = query.bind(c);
+    }
+    query = query.bind(limit).bind(offset);
+
+    let rows = query.fetch_all(pool).await?;
     let mut memories = Vec::new();
     for row in rows {
         match memory_from_row(&row) {
@@ -254,7 +267,6 @@ pub async fn list_memories_paged(
             }
         }
     }
-
     Ok(memories)
 }
 
@@ -317,7 +329,8 @@ pub async fn update_memory_fields(
         r#"
         UPDATE memories
         SET type = ?, content = ?, metadata = ?, importance = ?,
-            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?
+            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?,
+            store = ?
         WHERE id = ?
         "#,
     )
@@ -331,6 +344,7 @@ pub async fn update_memory_fields(
     .bind(memory.parent_id.map(|id| id.to_string()))
     .bind(memory.chunk_index)
     .bind(memory.total_chunks)
+    .bind(&memory.store)
     .bind(memory.id.to_string())
     .execute(pool)
     .await?;
@@ -384,14 +398,27 @@ pub async fn upsert_memory_for_import(pool: &SqlitePool, memory: &Memory) -> cra
 
 /// Get memory IDs that need embeddings (have no embedding or sparse_embedding)
 pub async fn get_memories_needing_embeddings(pool: &SqlitePool) -> crate::Result<Vec<Uuid>> {
-    let rows: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT id FROM memories 
-        WHERE embedding IS NULL OR sparse_embedding IS NULL
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
+    get_memories_needing_embeddings_scoped(pool, None).await
+}
+
+pub async fn get_memories_needing_embeddings_scoped(
+    pool: &SqlitePool,
+    store: Option<&str>,
+) -> crate::Result<Vec<Uuid>> {
+    let rows: Vec<String> = if let Some(s) = store {
+        sqlx::query_scalar(
+            "SELECT id FROM memories WHERE (embedding IS NULL OR sparse_embedding IS NULL) AND store = ?",
+        )
+        .bind(s)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_scalar(
+            "SELECT id FROM memories WHERE embedding IS NULL OR sparse_embedding IS NULL",
+        )
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(rows
         .into_iter()
@@ -401,8 +428,40 @@ pub async fn get_memories_needing_embeddings(pool: &SqlitePool) -> crate::Result
 
 /// Count total memories
 pub async fn count_memories(pool: &SqlitePool) -> crate::Result<i64> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories")
-        .fetch_one(pool)
-        .await?;
+    count_memories_scoped(pool, None).await
+}
+
+pub async fn count_memories_scoped(
+    pool: &SqlitePool,
+    store: Option<&str>,
+) -> crate::Result<i64> {
+    let count: i64 = if let Some(s) = store {
+        sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE store = ?")
+            .bind(s)
+            .fetch_one(pool)
+            .await?
+    } else {
+        sqlx::query_scalar("SELECT COUNT(*) FROM memories")
+            .fetch_one(pool)
+            .await?
+    };
     Ok(count)
+}
+
+/// List the distinct stores present in the unified DB along with their
+/// memory counts. Replaces the old filesystem-scan based `list_stores`.
+pub async fn list_distinct_stores(pool: &SqlitePool) -> crate::Result<Vec<(String, i64)>> {
+    let rows = sqlx::query(
+        "SELECT store, COUNT(*) as cnt FROM memories GROUP BY store ORDER BY store",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let store: String = row.try_get("store")?;
+        let cnt: i64 = row.try_get("cnt")?;
+        out.push((store, cnt));
+    }
+    Ok(out)
 }

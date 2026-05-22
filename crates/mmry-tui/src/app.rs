@@ -140,7 +140,7 @@ impl App {
         );
 
         // Get available stores
-        let available_stores = list_stores(&config).unwrap_or_default();
+        let available_stores = list_stores(&config).await.unwrap_or_default();
 
         let mut app = Self {
             config,
@@ -205,7 +205,7 @@ impl App {
         self.middle_selection.reset();
         self.filter_state.clear();
         self.search_backup = None; // Refresh available stores list
-        self.available_stores = list_stores(&self.config).unwrap_or_default();
+        self.available_stores = list_stores(&self.config).await.unwrap_or_default();
 
         self.status_message = Some(format!("Switched to store: {store_name}"));
 
@@ -225,7 +225,7 @@ impl App {
         self.middle_selection.reset();
         self.filter_state.clear();
         self.search_backup = None; // Refresh available stores list
-        self.available_stores = list_stores(&self.config).unwrap_or_default();
+        self.available_stores = list_stores(&self.config).await.unwrap_or_default();
 
         self.status_message = Some("Viewing all stores".to_string());
 
@@ -263,7 +263,7 @@ impl App {
     pub async fn create_store(&mut self, name: &str) -> Result<()> {
         validate_store_name(name)?;
 
-        if store_exists(&self.config, name) {
+        if store_exists(&self.config, name).await.unwrap_or(false) {
             self.status_message = Some(format!("Store '{name}' already exists"));
             return Ok(());
         }
@@ -273,7 +273,7 @@ impl App {
         db.close().await;
 
         // Refresh available stores list
-        self.available_stores = list_stores(&self.config).unwrap_or_default();
+        self.available_stores = list_stores(&self.config).await.unwrap_or_default();
 
         self.status_message = Some(format!("Created store '{name}'"));
 
@@ -320,7 +320,7 @@ impl App {
             items.push(StoreSelectItem {
                 id: store.name.clone(),
                 title: store.name.clone(),
-                detail: Some(mmry_core::stores::format_size(store.size_bytes)),
+                detail: Some(mmry_core::stores::format_count(store.memory_count)),
             });
         }
 
@@ -704,7 +704,7 @@ impl App {
             }
 
             KeyAction::Char('S') => {
-                self.available_stores = list_stores(&self.config).unwrap_or_default();
+                self.available_stores = list_stores(&self.config).await.unwrap_or_default();
                 if self.available_stores.is_empty() {
                     self.status_message = Some(
                         "No stores available. Create one with: mmry stores create <name>"
@@ -738,7 +738,7 @@ impl App {
                         store: m.store.clone(),
                     });
                     if let Some(memory_key) = memory_key {
-                        self.available_stores = list_stores(&self.config).unwrap_or_default();
+                        self.available_stores = list_stores(&self.config).await.unwrap_or_default();
                         if self.available_stores.len() < 2 {
                             self.status_message =
                                 Some("Need at least 2 stores to move memories".to_string());
@@ -1889,7 +1889,7 @@ mod tests {
             Arc::clone(&reranker),
         );
 
-        let available_stores = list_stores(&config).unwrap_or_default();
+        let available_stores = list_stores(&config).await.unwrap_or_default();
 
         let app = App {
             config,

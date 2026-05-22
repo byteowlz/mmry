@@ -175,6 +175,10 @@ pub struct SearchService {
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     reranker: Arc<RerankerService>,
+    /// Store-scope filter. When set, search restricts candidates to rows
+    /// in this store. `None` means search across all stores in the
+    /// unified DB.
+    current_store: Option<String>,
 }
 
 impl SearchService {
@@ -191,7 +195,14 @@ impl SearchService {
             embeddings,
             sparse_embeddings,
             reranker,
+            current_store: None,
         }
+    }
+
+    /// Scope this search service to a single store. `None` clears the filter.
+    pub fn with_store(mut self, store: Option<String>) -> Self {
+        self.current_store = store;
+        self
     }
 
     async fn execute_search(&self, opts: ExecuteSearchOptions<'_>) -> Result<Vec<Memory>> {
@@ -669,11 +680,22 @@ impl SearchService {
             return Ok(Vec::new());
         }
 
+        let store = self.current_store.as_deref();
+        let mut sub_clauses: Vec<&str> = Vec::new();
+        if category.is_some() {
+            sub_clauses.push("category = ?");
+        }
+        if store.is_some() {
+            sub_clauses.push("store = ?");
+        }
+
         let mut sql = String::from(
             "SELECT memory_id, distance FROM memory_embeddings WHERE embedding MATCH ? AND k = ?",
         );
-        if category.is_some() {
-            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE category = ?)");
+        if !sub_clauses.is_empty() {
+            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE ");
+            sql.push_str(&sub_clauses.join(" AND "));
+            sql.push(')');
         }
         sql.push_str(" ORDER BY distance");
 
@@ -682,6 +704,9 @@ impl SearchService {
         query = query.bind(limit as i64);
         if let Some(cat) = category {
             query = query.bind(cat);
+        }
+        if let Some(s) = store {
+            query = query.bind(s);
         }
 
         let rows = query.fetch_all(&self.pool).await?;
@@ -707,15 +732,27 @@ impl SearchService {
             return Ok(Vec::new());
         }
 
+        let store = self.current_store.as_deref();
         let mut sql = String::from("SELECT id FROM memories");
-        if let Some(_) = category {
-            sql.push_str(" WHERE category = ?");
+        let mut clauses: Vec<&str> = Vec::new();
+        if category.is_some() {
+            clauses.push("category = ?");
+        }
+        if store.is_some() {
+            clauses.push("store = ?");
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
 
         let mut query = sqlx::query(&sql);
         if let Some(cat) = category {
             query = query.bind(cat);
+        }
+        if let Some(s) = store {
+            query = query.bind(s);
         }
         query = query.bind(limit as i64);
 

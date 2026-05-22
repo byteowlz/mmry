@@ -474,8 +474,9 @@ impl EmbeddingService for EmbeddingServiceImpl {
 
         let results = if store.as_deref() == Some("all") {
             let mut merged = Vec::new();
-            let store_infos =
-                list_stores(&self.state.config).map_err(|e| Status::internal(e.to_string()))?;
+            let store_infos = list_stores(&self.state.config)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
 
             for store_info in store_infos {
                 let db = Database::init_store(&self.state.config, Some(&store_info.name))
@@ -1032,6 +1033,7 @@ async fn stores_list_handler(
     app_state.state.record_activity().await;
 
     let stores = mmry_core::stores::list_stores(&app_state.state.config)
+        .await
         .map_err(|e| ApiError::internal(format!("Failed to list stores: {e}")))?;
 
     let default_store = app_state.state.config.stores.default.clone();

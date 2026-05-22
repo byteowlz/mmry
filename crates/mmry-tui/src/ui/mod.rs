@@ -394,7 +394,7 @@ fn draw_store_create(f: &mut Frame, input: &str) {
 }
 
 fn draw_move_to_store(f: &mut Frame, app: &App, selected_idx: usize) {
-    use mmry_core::stores::format_size;
+    use mmry_core::stores::format_count;
     use ratatui::style::Color;
     use ratatui::style::Modifier;
     use ratatui::style::Style;
@@ -444,7 +444,7 @@ fn draw_move_to_store(f: &mut Frame, app: &App, selected_idx: usize) {
                 Span::styled(&store.name, style),
                 Span::raw(" - "),
                 Span::styled(
-                    format_size(store.size_bytes),
+                    format_count(store.memory_count),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]))

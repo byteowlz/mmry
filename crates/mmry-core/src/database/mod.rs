@@ -10,14 +10,19 @@ use tracing::warn;
 use uuid::Uuid;
 use zerocopy::IntoBytes;
 
+pub const UNIFIED_DB_FILENAME: &str = "mmry.db";
+
 pub struct Database {
     pool: SqlitePool,
+    /// The store the caller asked for when opening this Database. Used to
+    /// scope reads/writes when the single unified DB holds rows from many
+    /// stores. `None` means "no scope filter" — all stores visible.
+    current_store: Option<String>,
 }
 
 impl Database {
     pub async fn init(path: &Path, embedding_dim: usize) -> crate::Result<Self> {
         ensure_sqlite_vec_loaded()?;
-        // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -25,229 +30,204 @@ impl Database {
         let database_url = format!("sqlite://{}?mode=rwc", path.display());
         let pool = SqlitePool::connect(&database_url).await?;
 
-        // Initialize schema
         sqlx::query(schema::INIT_SQL).execute(&pool).await?;
 
-        // Apply schema migrations
         Self::apply_schema_updates(&pool).await?;
         Self::ensure_vector_table(&pool, embedding_dim).await?;
         Self::backfill_vector_table(&pool, embedding_dim).await?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            current_store: None,
+        })
     }
 
-    /// Initialize a database for a specific store
+    /// Open the unified database, optionally scoped to a specific store name.
     ///
-    /// If initializing the default store, this will automatically migrate
-    /// the legacy database (database.path) if present - either by copying
-    /// (if store doesn't exist) or by merging (if store already exists).
+    /// The unified path is `{stores.directory}/mmry.db`. On first open, any
+    /// legacy per-store `*.db` files in `{stores.directory}` and the older
+    /// `config.database.path` single-file install are imported with their
+    /// rows tagged by store, then renamed to `*.db.migrated` so they stay on
+    /// disk for safety. `store_name` is recorded as the active scope; pass
+    /// `None` to operate across all stores.
     pub async fn init_store(
         config: &crate::config::Config,
         store_name: Option<&str>,
     ) -> crate::Result<Self> {
-        let store = store_name.unwrap_or(&config.stores.default);
-        let store_path = config.store_path(store);
+        let unified_path = config.stores.directory.join(UNIFIED_DB_FILENAME);
+        std::fs::create_dir_all(&config.stores.directory)?;
 
-        // Check if we need to migrate the legacy database (only for default store)
-        // We need to check BOTH conditions upfront before any modifications
-        let legacy_has_data = store == config.stores.default
-            && Self::check_legacy_migration_needed(config, &store_path);
-        let store_already_exists = store_path.exists();
-
-        // Determine what action to take:
-        // - If store doesn't exist but legacy does: copy legacy to store
-        // - If both exist: merge legacy into store after init
-        let needs_merge = legacy_has_data && store_already_exists;
-
-        // If store doesn't exist but legacy does, copy it first
-        if legacy_has_data && !store_already_exists {
-            Self::copy_legacy_database_if_exists(config, &store_path)?;
-        }
-
-        // Initialize the database
-        let db = Self::init(&store_path, config.embeddings.dimension).await?;
-
-        // If both databases existed at the start, merge the legacy data and remove the legacy db
-        if needs_merge {
-            Self::merge_and_remove_legacy_database(config, db.pool()).await?;
-        }
-
-        Ok(db)
-    }
-
-    /// Check if legacy database exists and has data that needs migration
-    fn check_legacy_migration_needed(
-        config: &crate::config::Config,
-        default_store_path: &Path,
-    ) -> bool {
-        let legacy_path = &config.database.path;
-
-        // No migration needed if legacy doesn't exist or is same as store path
-        if !legacy_path.exists() || legacy_path == default_store_path {
-            return false;
-        }
-
-        // Check if legacy database has any data
-        if let Ok(metadata) = std::fs::metadata(legacy_path) {
-            metadata.len() > 0
-        } else {
-            false
-        }
-    }
-
-    /// Copy legacy database to store path if legacy exists and store doesn't
-    fn copy_legacy_database_if_exists(
-        config: &crate::config::Config,
-        default_store_path: &Path,
-    ) -> crate::Result<()> {
-        let legacy_path = &config.database.path;
-
-        if !legacy_path.exists() || legacy_path == default_store_path {
-            return Ok(());
-        }
-
-        if let Ok(metadata) = std::fs::metadata(legacy_path) {
-            if metadata.len() == 0 {
-                return Ok(());
+        // Step 1: if unified DB does not yet exist but the very-old
+        // `database.path` single-file install does, seed unified by copying
+        // it directly — its rows pick up store='default' via the column
+        // default. Per-store files are still migrated in Step 2.
+        if !unified_path.exists() {
+            let legacy_path = &config.database.path;
+            let legacy_outside_stores_dir = legacy_path != &unified_path
+                && !legacy_path.starts_with(&config.stores.directory);
+            if legacy_outside_stores_dir && legacy_path.exists() {
+                if let Ok(metadata) = std::fs::metadata(legacy_path) {
+                    if metadata.len() > 0 {
+                        tracing::info!(
+                            "Seeding unified DB {} from legacy {}",
+                            unified_path.display(),
+                            legacy_path.display()
+                        );
+                        std::fs::copy(legacy_path, &unified_path)?;
+                        Self::rename_to_migrated(legacy_path);
+                    }
+                }
             }
         }
 
-        tracing::info!(
-            "Copying legacy database from {} to {}",
-            legacy_path.display(),
-            default_store_path.display()
-        );
+        let db = Self::init(&unified_path, config.embeddings.dimension).await?;
 
-        // Ensure stores directory exists
-        if let Some(parent) = default_store_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Step 2: import any per-store legacy files sitting next to the
+        // unified DB and tag their rows with the file-stem as `store`.
+        Self::migrate_per_store_files(&config.stores.directory, db.pool()).await?;
+        Self::backfill_vector_table(db.pool(), config.embeddings.dimension).await?;
+
+        Ok(Self {
+            pool: db.pool,
+            current_store: store_name.map(str::to_string),
+        })
+    }
+
+    /// Scan `{stores.directory}` for legacy per-store `*.db` files and
+    /// import their `memories` rows into the unified DB, tagging each row
+    /// with the file stem as `store`. Renames each migrated file to
+    /// `<stem>.db.migrated` so it is safe to keep on disk.
+    async fn migrate_per_store_files(
+        stores_dir: &Path,
+        unified_pool: &SqlitePool,
+    ) -> crate::Result<()> {
+        let entries = match std::fs::read_dir(stores_dir) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(()),
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("db") {
+                continue;
+            }
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            if file_name == UNIFIED_DB_FILENAME {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => continue,
+            };
+
+            if let Err(e) = Self::import_per_store_file(unified_pool, &path, &stem).await {
+                tracing::warn!(
+                    error = %e,
+                    file = %path.display(),
+                    "failed to import legacy per-store DB; leaving on disk",
+                );
+                continue;
+            }
+
+            Self::rename_to_migrated(&path);
         }
-
-        // Copy the legacy database to the new location
-        std::fs::copy(legacy_path, default_store_path)?;
-
-        // Also copy WAL and SHM files if they exist
-        let legacy_wal = legacy_path.with_extension("db-wal");
-        let legacy_shm = legacy_path.with_extension("db-shm");
-        let store_wal = default_store_path.with_extension("db-wal");
-        let store_shm = default_store_path.with_extension("db-shm");
-
-        if legacy_wal.exists() {
-            let _ = std::fs::copy(&legacy_wal, &store_wal);
-        }
-        if legacy_shm.exists() {
-            let _ = std::fs::copy(&legacy_shm, &store_shm);
-        }
-
-        // Remove the legacy database after successful copy
-        Self::remove_legacy_database(config);
-
-        tracing::info!(
-            "Successfully migrated legacy database to default store '{}'",
-            config.stores.default
-        );
 
         Ok(())
     }
 
-    /// Merge memories from legacy database into the store, then remove legacy db
-    async fn merge_and_remove_legacy_database(
-        config: &crate::config::Config,
-        store_pool: &SqlitePool,
+    /// Attach a legacy per-store DB and copy its `memories` rows into the
+    /// unified DB, stamping each row with `store = <store_name>`. Best-
+    /// effort: if the legacy file has no `memories` table (e.g., it is a
+    /// stray file), the import is a no-op.
+    async fn import_per_store_file(
+        unified_pool: &SqlitePool,
+        legacy_path: &Path,
+        store_name: &str,
     ) -> crate::Result<()> {
-        let legacy_path = &config.database.path;
-
-        if !legacy_path.exists() {
-            return Ok(());
-        }
-
-        tracing::info!(
-            "Merging legacy database {} into default store",
-            legacy_path.display()
-        );
-
-        // IMPORTANT: ATTACH is connection-specific in SQLite, so we need to use
-        // a single connection for all operations (not the pool which may use different connections)
-        let mut conn = store_pool.acquire().await?;
-
-        // Attach the legacy database and merge memories
-        // Need to escape the path for SQLite
-        let legacy_path_str = legacy_path.to_string_lossy().replace('\'', "''");
-        let attach_sql = format!("ATTACH DATABASE '{legacy_path_str}' AS legacy");
-        sqlx::query(&attach_sql).execute(&mut *conn).await?;
-
-        // Count memories before merge
-        let legacy_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM legacy.memories")
-            .fetch_one(&mut *conn)
-            .await
-            .unwrap_or(0);
-
-        tracing::info!("Found {} memories in legacy database", legacy_count);
-
-        if legacy_count > 0 {
-            // Insert memories that don't already exist (by id)
-            let result = sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO memories
-                    (id, type, content, embedding, sparse_embedding, metadata, importance,
-                     category, tags, created_at, updated_at, parent_id, chunk_index,
-                     total_chunks)
-                SELECT
-                    id, type, content, embedding, sparse_embedding, metadata, importance,
-                    category, tags, created_at, updated_at, parent_id, chunk_index,
-                    total_chunks
-                FROM legacy.memories
-                WHERE id NOT IN (SELECT id FROM memories)
-                "#,
-            )
+        let mut conn = unified_pool.acquire().await?;
+        let legacy_str = legacy_path.to_string_lossy().replace('\'', "''");
+        sqlx::query(&format!("ATTACH DATABASE '{legacy_str}' AS legacy"))
             .execute(&mut *conn)
             .await?;
 
-            let merged_count = result.rows_affected();
+        let has_memories: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM legacy.sqlite_master WHERE type='table' AND name='memories'",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or(false);
+
+        if has_memories {
+            let legacy_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM legacy.memories")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap_or(0);
+
+            // INSERT OR IGNORE on id keeps the merge idempotent if a row
+            // with the same id already exists in the unified DB.
+            let result = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO main.memories (
+                    id, type, content, embedding, sparse_embedding, metadata, importance,
+                    category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks,
+                    store
+                )
+                SELECT
+                    id, type, content, embedding, sparse_embedding, metadata, importance,
+                    category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks,
+                    ?
+                FROM legacy.memories
+                "#,
+            )
+            .bind(store_name)
+            .execute(&mut *conn)
+            .await?;
+
             tracing::info!(
-                "Merged {} memories from legacy database ({} already existed)",
-                merged_count,
-                legacy_count as u64 - merged_count
+                "Imported {} of {} memories from {} (store='{}')",
+                result.rows_affected(),
+                legacy_count,
+                legacy_path.display(),
+                store_name,
             );
         }
 
-        // Detach the legacy database
         sqlx::query("DETACH DATABASE legacy")
             .execute(&mut *conn)
             .await?;
-
-        // Drop the connection before doing other pool operations
-        drop(conn);
-
-        // Backfill vector embeddings for any newly merged memories
-        Self::backfill_vector_table(store_pool, config.embeddings.dimension).await?;
-
-        // Remove the legacy database files
-        Self::remove_legacy_database(config);
-
-        tracing::info!("Legacy database migration complete");
-
         Ok(())
     }
 
-    /// Remove the legacy database and its WAL/SHM files
-    fn remove_legacy_database(config: &crate::config::Config) {
-        let legacy_path = &config.database.path;
-        let legacy_wal = legacy_path.with_extension("db-wal");
-        let legacy_shm = legacy_path.with_extension("db-shm");
+    /// Rename `<file>.db` and any sibling `-wal`/`-shm` files to a
+    /// `.migrated` suffix so the originals stay on disk for recovery but
+    /// won't be picked up by future migration scans.
+    fn rename_to_migrated(path: &Path) {
+        let migrated = path.with_extension("db.migrated");
+        if let Err(e) = std::fs::rename(path, &migrated) {
+            tracing::warn!("Failed to rename {} to .migrated: {}", path.display(), e);
+            return;
+        }
+        for suffix in ["db-wal", "db-shm"] {
+            let sidecar = path.with_extension(suffix);
+            if sidecar.exists() {
+                let _ = std::fs::rename(&sidecar, sidecar.with_extension(format!("{suffix}.migrated")));
+            }
+        }
+    }
 
-        if let Err(e) = std::fs::remove_file(legacy_path) {
-            tracing::warn!("Failed to remove legacy database: {}", e);
-        } else {
-            tracing::info!("Removed legacy database: {}", legacy_path.display());
-        }
+    /// The store this Database is scoped to, if any. Used by callers to
+    /// add `store = ?` filters to their queries.
+    pub fn current_store(&self) -> Option<&str> {
+        self.current_store.as_deref()
+    }
 
-        if legacy_wal.exists() {
-            let _ = std::fs::remove_file(&legacy_wal);
-        }
-        if legacy_shm.exists() {
-            let _ = std::fs::remove_file(&legacy_shm);
-        }
+    /// Replace the active store scope. Used by the TUI when the user
+    /// switches stores without re-opening the DB file.
+    pub fn set_current_store(&mut self, store: Option<String>) {
+        self.current_store = store;
     }
 
     async fn apply_schema_updates(pool: &SqlitePool) -> crate::Result<()> {
@@ -750,15 +730,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_store_migrates_legacy_database() -> crate::Result<()> {
+    async fn init_store_seeds_unified_from_old_single_file() -> crate::Result<()> {
         use crate::config::Config;
 
         let temp = tempdir().expect("create temp dir");
 
-        // Create a legacy database with some data
+        // Pre-unification: single-file `database.path` install.
         let legacy_path = temp.path().join("memories.db");
         let legacy_db = Database::init(&legacy_path, TEST_DIM).await?;
-
         let memory = Memory::new(
             MemoryType::Episodic,
             "legacy memory content".to_string(),
@@ -767,24 +746,23 @@ mod tests {
         operations::insert_memory(legacy_db.pool(), &memory).await?;
         legacy_db.close().await;
 
-        // Create config pointing to our temp directories
         let mut config = Config::default();
         config.database.path = legacy_path.clone();
         config.stores.directory = temp.path().join("stores");
         config.stores.default = "default".to_string();
         config.embeddings.dimension = TEST_DIM;
 
-        // The stores directory and default store should not exist yet
-        let store_path = config.store_path("default");
-        assert!(!store_path.exists());
+        let unified_path = config.stores.directory.join(UNIFIED_DB_FILENAME);
+        assert!(!unified_path.exists());
 
-        // Initialize the default store - this should trigger migration
         let db = Database::init_store(&config, None).await?;
 
-        // Verify the store database now exists
-        assert!(store_path.exists());
+        // Unified DB now exists and contains the legacy row, and the
+        // legacy file has been renamed out of the way.
+        assert!(unified_path.exists());
+        assert!(!legacy_path.exists());
+        assert!(legacy_path.with_extension("db.migrated").exists());
 
-        // Verify the memory was migrated
         let memories = operations::list_memories(db.pool(), None, 100).await?;
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].content, "legacy memory content");
@@ -794,55 +772,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_store_merges_legacy_into_existing_store() -> crate::Result<()> {
+    async fn init_store_imports_per_store_files_with_tag() -> crate::Result<()> {
         use crate::config::Config;
 
         let temp = tempdir().expect("create temp dir");
+        let stores_dir = temp.path().join("stores");
+        std::fs::create_dir_all(&stores_dir)?;
 
-        // Create a legacy database with some data
-        let legacy_path = temp.path().join("memories.db");
-        let legacy_db = Database::init(&legacy_path, TEST_DIM).await?;
-        let legacy_memory = Memory::new(
-            MemoryType::Episodic,
-            "legacy memory".to_string(),
-            "default".to_string(),
-        );
-        operations::insert_memory(legacy_db.pool(), &legacy_memory).await?;
-        legacy_db.close().await;
+        // Two pre-existing per-store files; their rows should be tagged
+        // with the file stem as `store` when imported into the unified DB.
+        let work_path = stores_dir.join("work.db");
+        let personal_path = stores_dir.join("personal.db");
+        {
+            let work = Database::init(&work_path, TEST_DIM).await?;
+            operations::insert_memory(
+                work.pool(),
+                &Memory::new(MemoryType::Episodic, "work note".into(), "default".into()),
+            )
+            .await?;
+            work.close().await;
 
-        // Create config
+            let personal = Database::init(&personal_path, TEST_DIM).await?;
+            operations::insert_memory(
+                personal.pool(),
+                &Memory::new(MemoryType::Episodic, "personal note".into(), "default".into()),
+            )
+            .await?;
+            personal.close().await;
+        }
+
         let mut config = Config::default();
-        config.database.path = legacy_path.clone();
-        config.stores.directory = temp.path().join("stores");
+        config.database.path = temp.path().join("nonexistent.db");
+        config.stores.directory = stores_dir.clone();
         config.stores.default = "default".to_string();
         config.embeddings.dimension = TEST_DIM;
 
-        // Pre-create the store with different data
-        std::fs::create_dir_all(&config.stores.directory)?;
-        let store_path = config.store_path("default");
-        let store_db = Database::init(&store_path, TEST_DIM).await?;
-        let store_memory = Memory::new(
-            MemoryType::Semantic,
-            "store memory".to_string(),
-            "default".to_string(),
-        );
-        operations::insert_memory(store_db.pool(), &store_memory).await?;
-        store_db.close().await;
-
-        // Initialize - should merge legacy memories into existing store
         let db = Database::init_store(&config, None).await?;
 
-        // Verify both memories exist (merged)
+        // Both per-store files were imported and renamed.
+        assert!(!work_path.exists());
+        assert!(!personal_path.exists());
+        assert!(work_path.with_extension("db.migrated").exists());
+        assert!(personal_path.with_extension("db.migrated").exists());
+
         let memories = operations::list_memories(db.pool(), None, 100).await?;
         assert_eq!(memories.len(), 2);
+        let by_store: std::collections::HashMap<&str, &str> = memories
+            .iter()
+            .map(|m| (m.store.as_str(), m.content.as_str()))
+            .collect();
+        assert_eq!(by_store.get("work").copied(), Some("work note"));
+        assert_eq!(by_store.get("personal").copied(), Some("personal note"));
 
-        let contents: Vec<&str> = memories.iter().map(|m| m.content.as_str()).collect();
-        assert!(contents.contains(&"legacy memory"));
-        assert!(contents.contains(&"store memory"));
+        db.close().await;
+        Ok(())
+    }
 
-        // Verify legacy database was removed
-        assert!(!legacy_path.exists());
+    #[tokio::test]
+    async fn init_store_is_idempotent_on_second_open() -> crate::Result<()> {
+        use crate::config::Config;
 
+        let temp = tempdir().expect("create temp dir");
+        let stores_dir = temp.path().join("stores");
+        std::fs::create_dir_all(&stores_dir)?;
+
+        let mut config = Config::default();
+        config.database.path = temp.path().join("nonexistent.db");
+        config.stores.directory = stores_dir;
+        config.stores.default = "default".to_string();
+        config.embeddings.dimension = TEST_DIM;
+
+        let db = Database::init_store(&config, None).await?;
+        operations::insert_memory(
+            db.pool(),
+            &Memory::new(MemoryType::Episodic, "row".into(), "default".into()),
+        )
+        .await?;
+        db.close().await;
+
+        // Reopening should not duplicate or destroy data.
+        let db = Database::init_store(&config, None).await?;
+        let memories = operations::list_memories(db.pool(), None, 100).await?;
+        assert_eq!(memories.len(), 1);
         db.close().await;
         Ok(())
     }

@@ -476,6 +476,7 @@ impl MmryMcpRouter {
 
     async fn tool_stores_list(&self) -> Result<Vec<Content>, ToolError> {
         let stores = mmry_core::stores::list_stores(&self.inner.config)
+            .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
 
         self.json_content(
@@ -484,7 +485,7 @@ impl MmryMcpRouter {
                 "stores": stores.iter().map(|s| json!({
                     "name": s.name,
                     "is_default": s.is_default,
-                    "size_bytes": s.size_bytes,
+                    "memory_count": s.memory_count,
                 })).collect::<Vec<_>>(),
             }),
         )
