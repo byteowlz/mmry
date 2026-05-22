@@ -857,6 +857,7 @@ async fn memory_create_handler(
         parent_id: None,
         chunk_index: None,
         total_chunks: None,
+        store: store.unwrap_or("default").to_string(),
     };
 
     AgentCtx::from_env().merge_into_metadata(&mut memory.metadata);

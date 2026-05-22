@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS memories (
     total_chunks INTEGER,
     workspace_id TEXT,
     platform_session_id TEXT,
-    harness_session_id TEXT
+    harness_session_id TEXT,
+    store TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE TABLE IF NOT EXISTS episodes (

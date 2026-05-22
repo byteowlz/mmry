@@ -82,6 +82,9 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         parent_id,
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
+        store: row
+            .try_get::<String, _>("store")
+            .unwrap_or_else(|_| "default".to_string()),
     })
 }
 
@@ -104,9 +107,10 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
             id, type, content, embedding, sparse_embedding, metadata, importance,
             category, tags, created_at, updated_at,
             parent_id, chunk_index, total_chunks,
-            workspace_id, platform_session_id, harness_session_id
+            workspace_id, platform_session_id, harness_session_id,
+            store
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(memory.id.to_string())
@@ -126,6 +130,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(ctx_keys.workspace_id)
     .bind(ctx_keys.platform_session_id)
     .bind(ctx_keys.harness_session_id)
+    .bind(&memory.store)
     .execute(pool)
     .await?;
 
@@ -139,7 +144,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
         FROM memories
         WHERE id = ?
         "#,
@@ -163,7 +168,7 @@ pub async fn list_memories(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -177,7 +182,7 @@ pub async fn list_memories(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -212,7 +217,7 @@ pub async fn list_memories_paged(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -227,7 +232,7 @@ pub async fn list_memories_paged(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
             FROM memories
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?

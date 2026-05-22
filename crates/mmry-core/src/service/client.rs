@@ -450,5 +450,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         } else {
             Some(mem.total_chunks)
         },
+        store: "default".to_string(),
     })
 }

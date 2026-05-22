@@ -416,6 +416,23 @@ impl Database {
             .await?;
         }
 
+        // `store` column: replaces the legacy "one file per store" layout with
+        // a single DB keyed by store name. Backfills existing rows to 'default'.
+        let store_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='store'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if !store_exists {
+            tracing::info!("Adding store column to memories table...");
+            sqlx::query("ALTER TABLE memories ADD COLUMN store TEXT NOT NULL DEFAULT 'default'")
+                .execute(pool)
+                .await?;
+        }
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_store ON memories(store)")
+            .execute(pool)
+            .await?;
+
         // Feedback counters on memories — bumped by `close_episode` when an
         // agent's follow-up `mmry add --using <ids>` cites a returned memory.
         for column in ["helpful_count", "harmful_count"] {

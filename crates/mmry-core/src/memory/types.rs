@@ -36,6 +36,12 @@ pub struct Memory {
     pub parent_id: Option<Uuid>,
     pub chunk_index: Option<i32>,
     pub total_chunks: Option<i32>,
+    #[serde(default = "default_store")]
+    pub store: String,
+}
+
+fn default_store() -> String {
+    "default".to_string()
 }
 
 impl Memory {
@@ -57,6 +63,7 @@ impl Memory {
             parent_id: None,
             chunk_index: None,
             total_chunks: None,
+            store: default_store(),
         }
     }
 
