@@ -24,7 +24,6 @@ use crate::embeddings::EmbeddingServiceWrapper;
 use crate::episodes;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
-use crate::memory::SourceAttribution;
 use crate::reranker::RerankerService;
 use crate::sparse_embeddings::SparseEmbeddingService;
 use crate::sparse_embeddings::StoredSparseEmbedding;
@@ -170,22 +169,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         ),
         None => None,
     };
-    let source_attribution_raw: Option<String> = row.try_get("source_attribution").ok().flatten();
-    let source_attribution = match source_attribution_raw {
-        Some(raw) => match serde_json::from_str::<SourceAttribution>(&raw) {
-            Ok(attribution) => Some(attribution),
-            Err(e) => {
-                tracing::warn!(memory_id = %id, error = %e, "Invalid source attribution stored; skipping value");
-                None
-            }
-        },
-        None => None,
-    };
-    let trust_level: Option<f32> = row.try_get("trust_level").ok();
-    let trust_level = trust_level.unwrap_or(0.5);
-    let source_reinforcement_score: Option<f32> = row.try_get("source_reinforcement_score").ok();
-    let source_reinforcement_score = source_reinforcement_score.unwrap_or(0.0);
-
     let bridge_block_id: Option<String> = row.try_get("bridge_block_id").ok().flatten();
     let bridge_block_id = bridge_block_id.and_then(|s| Uuid::parse_str(&s).ok());
 
@@ -199,9 +182,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         importance: row.try_get("importance")?,
         expires_at,
         expired_at,
-        source_attribution,
-        trust_level,
-        source_reinforcement_score,
         helpful_count: row.try_get("helpful_count").unwrap_or(0),
         harmful_count: row.try_get("harmful_count").unwrap_or(0),
         category: row.try_get("category")?,
@@ -489,9 +469,6 @@ impl SearchService {
             let importance_boost =
                 (memory.importance.clamp(1, 10) as f32 / 10.0) * self.config.importance_weight;
 
-            let trust_multiplier = 0.7 + 0.3 * memory.trust_level.clamp(0.0, 1.0);
-            let reinforcement_boost = memory.source_reinforcement_score.clamp(0.0, 1.5) * 0.05;
-
             // Episode feedback prior: each closed `search → add --using <id>`
             // pair bumps `helpful_count`, lifting this memory in future
             // rankings. log1p keeps the prior bounded and prevents one
@@ -499,9 +476,7 @@ impl SearchService {
             let net_feedback = (memory.helpful_count - memory.harmful_count) as f32;
             let feedback_boost = self.config.feedback_weight * net_feedback.max(0.0).ln_1p();
 
-            let score = (base_score + recency_boost + importance_boost) * trust_multiplier
-                + reinforcement_boost
-                + feedback_boost;
+            let score = base_score + recency_boost + importance_boost + feedback_boost;
 
             scored_results.push((score, memory));
         }
@@ -839,7 +814,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
+                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");
@@ -1279,61 +1254,4 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn trust_weighting_prefers_higher_trust() -> Result<()> {
-        crate::database::ensure_sqlite_vec_loaded()?;
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        sqlx::query(schema::INIT_SQL).execute(&pool).await?;
-        Database::ensure_vector_table(&pool, TEST_DIMENSION).await?;
-
-        let now = chrono::Utc::now();
-        let mut low_trust = Memory::new(
-            MemoryType::Episodic,
-            "trust me on this".to_string(),
-            "default".to_string(),
-        );
-        low_trust.source_attribution = None;
-        low_trust.trust_level = 0.2;
-        low_trust.source_reinforcement_score = 0.0;
-        low_trust.created_at = now;
-        low_trust.updated_at = now;
-
-        let mut high_trust = Memory::new(
-            MemoryType::Episodic,
-            "trust me on this".to_string(),
-            "default".to_string(),
-        );
-        high_trust.source_attribution = None;
-        high_trust.trust_level = 0.9;
-        high_trust.source_reinforcement_score = 0.0;
-        high_trust.created_at = now;
-        high_trust.updated_at = now;
-
-        operations::insert_memory(&pool, &low_trust).await?;
-        operations::insert_memory(&pool, &high_trust).await?;
-
-        let embeddings = disabled_embeddings();
-        let sparse_embeddings = disabled_sparse_embeddings();
-        let mut search_config = base_search_config();
-        search_config.mode = SearchMode::Keyword;
-        let reranker = Arc::new(RerankerService::from_config(&search_config)?);
-
-        let service = SearchService::new(
-            pool.clone(),
-            search_config,
-            Arc::clone(&embeddings),
-            Arc::clone(&sparse_embeddings),
-            Arc::clone(&reranker),
-        );
-
-        let results = service.search("trust", None, 2).await?;
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].trust_level, 0.9);
-
-        Ok(())
-    }
 }

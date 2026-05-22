@@ -18,8 +18,6 @@ use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
-use mmry_core::memory::SourceEntry;
-use mmry_core::memory::SourceKind;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchFilters;
 use mmry_core::search::SearchQueryOptions;
@@ -87,32 +85,6 @@ struct MemoryIdArgs {
     store: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct MemoryProvenanceArgs {
-    id: String,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MemorySourceArgs {
-    id: String,
-    source: SourceInput,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SourceInput {
-    kind: String,
-    #[serde(default)]
-    label: Option<String>,
-    trust: f32,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    reference: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct MemoryAddArgs {
@@ -274,43 +246,6 @@ impl MmryMcpRouter {
         }
     }
 
-    fn parse_source_entry(input: SourceInput) -> Result<SourceEntry, ToolError> {
-        if !(0.0..=1.0).contains(&input.trust) {
-            return Err(ToolError::InvalidParameters(
-                "trust must be between 0 and 1".to_string(),
-            ));
-        }
-
-        let kind = input.kind.to_lowercase();
-        match kind.as_str() {
-            "user" => Ok(SourceEntry::user(
-                input.label.as_deref().unwrap_or("direct_input"),
-                input.trust,
-            )),
-            "llm" => Ok(SourceEntry::llm(
-                input.label.as_deref().unwrap_or("inference"),
-                input.trust,
-                input.model,
-            )),
-            "external" => {
-                let reference = input.reference.ok_or_else(|| {
-                    ToolError::InvalidParameters("external sources require reference".to_string())
-                })?;
-                Ok(SourceEntry::external(&reference, input.trust))
-            }
-            "system" => Ok(SourceEntry {
-                kind: SourceKind::System,
-                label: input.label,
-                trust: input.trust,
-                model: input.model,
-                reference: input.reference,
-            }),
-            other => Err(ToolError::InvalidParameters(format!(
-                "Invalid source kind '{other}' (expected user|llm|external|system)"
-            ))),
-        }
-    }
-
     fn classify_memory(content: &str) -> MemoryType {
         let content_lower = content.to_lowercase();
         if content_lower.contains("step")
@@ -419,33 +354,6 @@ impl MmryMcpRouter {
         )
     }
 
-    async fn tool_memory_provenance(
-        &self,
-        args: MemoryProvenanceArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let id = Self::parse_uuid("id", &args.id)?;
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let memory = operations::get_memory(&pool, id)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?
-            .ok_or_else(|| ToolError::NotFound(format!("Memory {id} not found")))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/memory/provenance",
-            json!({
-                "store": store,
-                "memory_id": id.to_string(),
-                "source_attribution": memory.source_attribution,
-                "trust_level": memory.trust_level,
-                "source_reinforcement_score": memory.source_reinforcement_score,
-            }),
-        )
-    }
-
     async fn tool_memory_add(&self, args: MemoryAddArgs) -> Result<Vec<Content>, ToolError> {
         if args.content.trim().is_empty() {
             return Err(ToolError::InvalidParameters(
@@ -525,34 +433,6 @@ impl MmryMcpRouter {
                 "store": store,
                 "memory": Self::strip_embeddings(memory),
                 "agent": { "name": agent.name, "kind": agent.kind, "meta": agent.metadata },
-            }),
-        )
-    }
-
-    async fn tool_memory_source_add(
-        &self,
-        args: MemorySourceArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let id = Self::parse_uuid("id", &args.id)?;
-        let source = Self::parse_source_entry(args.source)?;
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-
-        let memory = operations::add_memory_source(&pool, id, source)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/memory/source/add",
-            json!({
-                "store": store,
-                "memory_id": id.to_string(),
-                "source_attribution": memory.source_attribution,
-                "trust_level": memory.trust_level,
-                "source_reinforcement_score": memory.source_reinforcement_score,
             }),
         )
     }
@@ -724,19 +604,6 @@ impl mcp_server::Router for MmryMcpRouter {
                 }),
             ),
             Tool::new(
-                "mmry.memory.provenance.get",
-                "Fetch provenance and trust metadata for a memory.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["id"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
                 "mmry.memory.add",
                 "Add a new memory (optionally embedding it).",
                 json!({
@@ -755,31 +622,6 @@ impl mcp_server::Router for MmryMcpRouter {
                         "agent_meta": { "type": ["object", "null"] }
                     },
                     "required": ["content"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.memory.source.add",
-                "Add a provenance source to an existing memory.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" },
-                        "source": {
-                            "type": "object",
-                            "properties": {
-                                "kind": { "type": "string", "enum": ["user", "llm", "external", "system"] },
-                                "label": { "type": ["string", "null"] },
-                                "trust": { "type": "number", "minimum": 0, "maximum": 1 },
-                                "model": { "type": ["string", "null"] },
-                                "reference": { "type": ["string", "null"] }
-                            },
-                            "required": ["kind", "trust"],
-                            "additionalProperties": false
-                        },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["id", "source"],
                     "additionalProperties": false
                 }),
             ),
@@ -851,20 +693,10 @@ impl mcp_server::Router for MmryMcpRouter {
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_memory_get(args).await
                 }
-                "mmry.memory.provenance.get" => {
-                    let args: MemoryProvenanceArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_memory_provenance(args).await
-                }
                 "mmry.memory.add" => {
                     let args: MemoryAddArgs = serde_json::from_value(arguments)
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_memory_add(args).await
-                }
-                "mmry.memory.source.add" => {
-                    let args: MemorySourceArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_memory_source_add(args).await
                 }
                 "mmry.memory.update" => {
                     let args: MemoryUpdateArgs = serde_json::from_value(arguments)

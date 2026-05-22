@@ -443,9 +443,6 @@ impl Chunker {
                 memory.metadata = parent.metadata.clone();
                 memory.expires_at = parent.expires_at;
                 memory.expired_at = parent.expired_at;
-                memory.source_attribution = parent.source_attribution.clone();
-                memory.trust_level = parent.trust_level;
-                memory.source_reinforcement_score = parent.source_reinforcement_score;
                 memory
             })
             .collect()

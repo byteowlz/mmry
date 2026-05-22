@@ -26,7 +26,6 @@ use mmry_core::config::SearchMode;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
-use mmry_core::memory::SourceAttribution;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
@@ -1238,11 +1237,6 @@ impl App {
                     Ok(mut updated_memory) => {
                         updated_memory.created_at = memory.created_at;
                         updated_memory.updated_at = chrono::Utc::now();
-                        updated_memory.source_attribution = memory.source_attribution.clone();
-                        updated_memory.trust_level = memory.trust_level;
-                        updated_memory.source_reinforcement_score =
-                            memory.source_reinforcement_score;
-                        updated_memory.recompute_trust_metrics();
                         let now = chrono::Utc::now();
                         updated_memory.expired_at = match updated_memory.expires_at {
                             Some(expiration) if expiration <= now => {
@@ -1315,12 +1309,7 @@ impl App {
         match edited_result {
             Ok(edited) => {
                 match editor::parse_edited_memory(&edited, None) {
-                    Ok(mut new_memory) => {
-                        if new_memory.source_attribution.is_none() {
-                            new_memory.source_attribution = Some(SourceAttribution::default_user());
-                            new_memory.recompute_trust_metrics();
-                        }
-
+                    Ok(new_memory) => {
                         let new_id = new_memory.id;
                         operations::insert_memory(self.db.pool(), &new_memory).await?;
 

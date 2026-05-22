@@ -470,9 +470,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         importance: mem.importance,
         expires_at,
         expired_at,
-        source_attribution: None,
-        trust_level: 0.5,
-        source_reinforcement_score: 0.0,
         helpful_count: 0,
         harmful_count: 0,
         created_at: chrono::DateTime::parse_from_rfc3339(&mem.created_at)
