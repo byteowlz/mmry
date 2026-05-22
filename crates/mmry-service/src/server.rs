@@ -862,7 +862,6 @@ async fn memory_create_handler(
         chunk_index: None,
         total_chunks: None,
         chunk_method: None,
-        bridge_block_id: None,
     };
 
     AgentCtx::from_env().merge_into_metadata(&mut memory.metadata);

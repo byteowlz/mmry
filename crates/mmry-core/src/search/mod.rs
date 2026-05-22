@@ -140,8 +140,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
             ))
         })?
         .with_timezone(&chrono::Utc);
-    let bridge_block_id: Option<String> = row.try_get("bridge_block_id").ok().flatten();
-    let bridge_block_id = bridge_block_id.and_then(|s| Uuid::parse_str(&s).ok());
 
     Ok(Memory {
         id,
@@ -161,7 +159,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
         chunk_method,
-        bridge_block_id,
     })
 }
 
@@ -749,7 +746,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
+                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");

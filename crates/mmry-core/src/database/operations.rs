@@ -87,15 +87,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
             ))
         })?
         .with_timezone(&chrono::Utc);
-    let bridge_block_id: Option<String> = row.try_get("bridge_block_id").ok().flatten();
-    let bridge_block_id = match bridge_block_id {
-        Some(raw) => Some(Uuid::parse_str(&raw).map_err(|e| {
-            crate::Error::InvalidInput(format!(
-                "Invalid bridge_block_id '{raw}' for memory {id}: {e}"
-            ))
-        })?),
-        None => None,
-    };
 
     Ok(Memory {
         id,
@@ -115,7 +106,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
         chunk_method,
-        bridge_block_id,
     })
 }
 
@@ -143,10 +133,10 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
         INSERT INTO memories (
             id, type, content, embedding, sparse_embedding, metadata, importance,
             category, tags, created_at, updated_at,
-            parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id,
+            parent_id, chunk_index, total_chunks, chunk_method,
             workspace_id, platform_session_id, harness_session_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(memory.id.to_string())
@@ -164,7 +154,6 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(memory.chunk_index)
     .bind(memory.total_chunks)
     .bind(chunk_method_str)
-    .bind(memory.bridge_block_id.map(|id| id.to_string()))
     .bind(ctx_keys.workspace_id)
     .bind(ctx_keys.platform_session_id)
     .bind(ctx_keys.harness_session_id)
@@ -181,7 +170,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
         FROM memories
         WHERE id = ?
         "#,
@@ -205,7 +194,7 @@ pub async fn list_memories(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -219,7 +208,7 @@ pub async fn list_memories(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -254,7 +243,7 @@ pub async fn list_memories_paged(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -269,7 +258,7 @@ pub async fn list_memories_paged(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
             FROM memories
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
@@ -360,7 +349,7 @@ pub async fn update_memory_fields(
         r#"
         UPDATE memories
         SET type = ?, content = ?, metadata = ?, importance = ?,
-            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?, bridge_block_id = ?
+            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?
         WHERE id = ?
         "#,
     )
@@ -375,7 +364,6 @@ pub async fn update_memory_fields(
     .bind(memory.chunk_index)
     .bind(memory.total_chunks)
     .bind(chunk_method_str)
-    .bind(memory.bridge_block_id.map(|id| id.to_string()))
     .bind(memory.id.to_string())
     .execute(pool)
     .await?;

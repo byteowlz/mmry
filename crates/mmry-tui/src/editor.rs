@@ -179,7 +179,6 @@ pub fn parse_edited_memory(content: &str, original_id: Option<Uuid>) -> Result<M
         chunk_index: None,
         total_chunks: None,
         chunk_method: None,
-        bridge_block_id: None,
     })
 }
 
