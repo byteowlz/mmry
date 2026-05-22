@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS memories (
     parent_id TEXT,
     chunk_index INTEGER,
     total_chunks INTEGER,
-    chunk_method TEXT,
     workspace_id TEXT,
     platform_session_id TEXT,
     harness_session_id TEXT

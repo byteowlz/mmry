@@ -207,7 +207,6 @@ pub async fn handle(
         let text_chunks = chunker.chunk_text(&msg.content)?;
         let total = text_chunks.len() as i32;
         msg.total_chunks = Some(total);
-        msg.chunk_method = text_chunks.first().map(|c| c.method.clone());
         let mut chunks = chunker.create_memory_chunks(msg, text_chunks);
         for chunk in chunks.iter_mut() {
             // create_memory_chunks already copied the message's metadata and

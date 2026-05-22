@@ -120,7 +120,6 @@ message MemoryResult {
   string parent_id = 12;
   int32 chunk_index = 13;
   int32 total_chunks = 14;
-  string chunk_method = 15;
 }
 
 message SearchResponse {

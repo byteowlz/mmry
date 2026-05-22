@@ -188,14 +188,14 @@ impl Database {
             // Insert memories that don't already exist (by id)
             let result = sqlx::query(
                 r#"
-                INSERT OR IGNORE INTO memories 
-                    (id, type, content, embedding, sparse_embedding, metadata, importance, 
-                     category, tags, created_at, updated_at, parent_id, chunk_index, 
-                     total_chunks, chunk_method)
-                SELECT 
+                INSERT OR IGNORE INTO memories
+                    (id, type, content, embedding, sparse_embedding, metadata, importance,
+                     category, tags, created_at, updated_at, parent_id, chunk_index,
+                     total_chunks)
+                SELECT
                     id, type, content, embedding, sparse_embedding, metadata, importance,
                     category, tags, created_at, updated_at, parent_id, chunk_index,
-                    total_chunks, chunk_method
+                    total_chunks
                 FROM legacy.memories
                 WHERE id NOT IN (SELECT id FROM memories)
                 "#,
@@ -341,9 +341,6 @@ impl Database {
                 .execute(pool)
                 .await?;
             sqlx::query("ALTER TABLE memories ADD COLUMN total_chunks INTEGER")
-                .execute(pool)
-                .await?;
-            sqlx::query("ALTER TABLE memories ADD COLUMN chunk_method TEXT")
                 .execute(pool)
                 .await?;
 

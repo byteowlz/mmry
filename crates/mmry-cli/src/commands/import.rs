@@ -169,6 +169,5 @@ fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow
         parent_id: None,
         chunk_index: None,
         total_chunks: None,
-        chunk_method: None,
     })
 }

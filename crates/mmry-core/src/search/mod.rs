@@ -120,9 +120,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let parent_id: Option<String> = row.try_get("parent_id").ok().flatten();
     let parent_id = parent_id.and_then(|s| Uuid::parse_str(&s).ok());
 
-    let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
-    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok());
-
     let created_at_raw: String = row.try_get("created_at")?;
     let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_raw)
         .map_err(|e| {
@@ -158,7 +155,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         parent_id,
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
-        chunk_method,
     })
 }
 
@@ -746,7 +742,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method FROM memories WHERE id IN (",
+                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");

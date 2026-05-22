@@ -1,5 +1,4 @@
 use crate::config::ExternalApiConfig;
-use crate::memory::ChunkMethod;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
 use crate::service::manager::ServiceManager;
@@ -405,22 +404,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
             })?)
         };
 
-    let chunk_method = if mem.chunk_method.is_empty() {
-        None
-    } else {
-        match mem.chunk_method.as_str() {
-            "none" => Some(ChunkMethod::None),
-            "paragraph" => Some(ChunkMethod::Paragraph),
-            "sentence" => Some(ChunkMethod::Sentence),
-            "word" => Some(ChunkMethod::Word),
-            other => {
-                return Err(crate::Error::Service(format!(
-                    "Unknown chunk_method in response: {other}"
-                )))
-            }
-        }
-    };
-
     let sparse_embedding = mem.sparse_embedding.and_then(|sparse| {
         if sparse.indices.is_empty() {
             None
@@ -467,6 +450,5 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         } else {
             Some(mem.total_chunks)
         },
-        chunk_method,
     })
 }

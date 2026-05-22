@@ -232,14 +232,13 @@ pub async fn handle(
                 text_chunks
                     .first()
                     .map(|c| &c.method)
-                    .unwrap_or(&mmry_core::memory::ChunkMethod::None)
+                    .unwrap_or(&mmry_core::chunking::ChunkMethod::None)
             );
         }
 
         let mut chunk_memories = chunker.create_memory_chunks(&memory, text_chunks);
 
         memory.total_chunks = Some(total_chunks as i32);
-        memory.chunk_method = chunk_memories.first().and_then(|c| c.chunk_method.clone());
 
         for chunk in &mut chunk_memories {
             let embed_text = if config.chunking.embed_metadata {

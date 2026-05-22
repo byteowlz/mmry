@@ -1,6 +1,5 @@
 pub mod types;
 
-pub use types::ChunkMethod;
 pub use types::EpisodicMemory;
 pub use types::Memory;
 pub use types::MemoryType;

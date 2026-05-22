@@ -36,16 +36,6 @@ pub struct Memory {
     pub parent_id: Option<Uuid>,
     pub chunk_index: Option<i32>,
     pub total_chunks: Option<i32>,
-    pub chunk_method: Option<ChunkMethod>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ChunkMethod {
-    None,
-    Paragraph,
-    Sentence,
-    Word,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,7 +88,6 @@ impl Memory {
             parent_id: None,
             chunk_index: None,
             total_chunks: None,
-            chunk_method: None,
         }
     }
 

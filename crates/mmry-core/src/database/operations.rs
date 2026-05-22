@@ -63,14 +63,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         None => None,
     };
 
-    let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
-    let chunk_method = match chunk_method {
-        Some(raw) => Some(serde_json::from_str(&format!("\"{raw}\"")).map_err(|e| {
-            crate::Error::InvalidInput(format!("Invalid chunk_method '{raw}' for memory {id}: {e}"))
-        })?),
-        None => None,
-    };
-
     let created_at_raw: String = row.try_get("created_at")?;
     let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_raw)
         .map_err(|e| {
@@ -105,7 +97,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         parent_id,
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
-        chunk_method,
     })
 }
 
@@ -120,12 +111,6 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
         .as_ref()
         .and_then(|e| serde_json::to_vec(e).ok());
 
-    let chunk_method_str = memory.chunk_method.as_ref().and_then(|cm| {
-        serde_json::to_string(cm)
-            .ok()
-            .map(|s| s.trim_matches('"').to_string())
-    });
-
     let ctx_keys = CtxIndexKeys::from_metadata(&memory.metadata);
 
     sqlx::query(
@@ -133,10 +118,10 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
         INSERT INTO memories (
             id, type, content, embedding, sparse_embedding, metadata, importance,
             category, tags, created_at, updated_at,
-            parent_id, chunk_index, total_chunks, chunk_method,
+            parent_id, chunk_index, total_chunks,
             workspace_id, platform_session_id, harness_session_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(memory.id.to_string())
@@ -153,7 +138,6 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     .bind(memory.parent_id.map(|id| id.to_string()))
     .bind(memory.chunk_index)
     .bind(memory.total_chunks)
-    .bind(chunk_method_str)
     .bind(ctx_keys.workspace_id)
     .bind(ctx_keys.platform_session_id)
     .bind(ctx_keys.harness_session_id)
@@ -170,7 +154,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
         FROM memories
         WHERE id = ?
         "#,
@@ -194,7 +178,7 @@ pub async fn list_memories(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -208,7 +192,7 @@ pub async fn list_memories(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
             FROM memories
             ORDER BY created_at DESC
             LIMIT ?
@@ -243,7 +227,7 @@ pub async fn list_memories_paged(
     let rows = if let Some(cat) = category {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
             FROM memories
             WHERE category = ?
             ORDER BY created_at DESC
@@ -258,7 +242,7 @@ pub async fn list_memories_paged(
     } else {
         sqlx::query(
             r#"
-            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method
+            SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks
             FROM memories
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
@@ -339,17 +323,11 @@ pub async fn update_memory_fields(
     memory: &Memory,
     clear_embeddings: bool,
 ) -> crate::Result<()> {
-    let chunk_method_str = memory.chunk_method.as_ref().and_then(|cm| {
-        serde_json::to_string(cm)
-            .ok()
-            .map(|s| s.trim_matches('"').to_string())
-    });
-
     sqlx::query(
         r#"
         UPDATE memories
         SET type = ?, content = ?, metadata = ?, importance = ?,
-            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?, chunk_method = ?
+            category = ?, tags = ?, updated_at = ?, parent_id = ?, chunk_index = ?, total_chunks = ?
         WHERE id = ?
         "#,
     )
@@ -363,7 +341,6 @@ pub async fn update_memory_fields(
     .bind(memory.parent_id.map(|id| id.to_string()))
     .bind(memory.chunk_index)
     .bind(memory.total_chunks)
-    .bind(chunk_method_str)
     .bind(memory.id.to_string())
     .execute(pool)
     .await?;

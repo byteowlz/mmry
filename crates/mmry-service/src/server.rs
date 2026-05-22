@@ -594,10 +594,6 @@ impl EmbeddingService for EmbeddingServiceImpl {
                         .unwrap_or_default(),
                     chunk_index: memory.chunk_index.unwrap_or_default(),
                     total_chunks: memory.total_chunks.unwrap_or_default(),
-                    chunk_method: memory
-                        .chunk_method
-                        .map(|m| format!("{:?}", m))
-                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -861,7 +857,6 @@ async fn memory_create_handler(
         parent_id: None,
         chunk_index: None,
         total_chunks: None,
-        chunk_method: None,
     };
 
     AgentCtx::from_env().merge_into_metadata(&mut memory.metadata);
