@@ -38,37 +38,6 @@ pub struct Memory {
     pub total_chunks: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EpisodicMemory {
-    pub id: Uuid,
-    pub content: String,
-    pub timestamp: DateTime<Utc>,
-    pub embedding: Option<Vec<f32>>,
-    pub entities: Vec<String>,
-    pub tags: Vec<String>,
-    pub importance: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SemanticMemory {
-    pub id: Uuid,
-    pub fact: String,
-    pub embedding: Vec<f32>,
-    pub related_memories: Vec<Uuid>,
-    pub confidence: f32,
-    pub last_updated: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProceduralMemory {
-    pub id: Uuid,
-    pub name: String,
-    pub steps: Vec<String>,
-    pub context: Option<String>,
-    pub embedding: Vec<f32>,
-    pub tags: Vec<String>,
-}
-
 impl Memory {
     pub fn new(memory_type: MemoryType, content: String, category: String) -> Self {
         Self {
