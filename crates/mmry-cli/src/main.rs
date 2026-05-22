@@ -47,6 +47,9 @@ enum Commands {
     /// Add a new memory
     Add(commands::add::AddCmd),
 
+    /// Ingest a canonical conversation JSON as a session header + N message records
+    AddConversation(commands::add_conversation::AddConversationCmd),
+
     /// Search memories
     Search(commands::search::SearchCmd),
 
@@ -205,6 +208,16 @@ async fn async_main() -> anyhow::Result<()> {
     let result = match command {
         Commands::Add(cmd) => {
             commands::add::handle(
+                cmd,
+                &config,
+                &db,
+                Arc::clone(&embeddings),
+                Arc::clone(&sparse_embeddings),
+            )
+            .await
+        }
+        Commands::AddConversation(cmd) => {
+            commands::add_conversation::handle(
                 cmd,
                 &config,
                 &db,
