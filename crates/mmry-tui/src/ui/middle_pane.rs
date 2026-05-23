@@ -42,8 +42,9 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
 
             let date_str = memory.memory.created_at.format("%Y-%m-%d").to_string();
 
-            let content_preview_full = if memory.memory.content.len() > 60 {
-                format!("{}...", &memory.memory.content[..60])
+            let content_preview_full = if memory.memory.content.chars().count() > 60 {
+                let truncated: String = memory.memory.content.chars().take(60).collect();
+                format!("{truncated}...")
             } else {
                 memory.memory.content.clone()
             };

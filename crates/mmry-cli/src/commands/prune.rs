@@ -185,8 +185,9 @@ async fn find_duplicate_memories(db: &Database) -> anyhow::Result<MemoryPruneRes
         let duplicate_ids: Vec<String> = entries.iter().map(|(id, _, _)| id.clone()).collect();
         total_duplicates += duplicate_ids.len();
 
-        let content_preview = if content.len() > 80 {
-            format!("{}...", &content[..80])
+        let content_preview = if content.chars().count() > 80 {
+            let truncated: String = content.chars().take(80).collect();
+            format!("{truncated}...")
         } else {
             content
         };
