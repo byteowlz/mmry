@@ -2,10 +2,14 @@ pub mod operations;
 pub mod schema;
 
 use sqlite_vec::sqlite3_vec_init;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqliteJournalMode;
 use sqlx::sqlite::SqlitePool;
+use sqlx::sqlite::SqliteSynchronous;
 use sqlx::Row;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
 use zerocopy::IntoBytes;
@@ -27,14 +31,29 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
 
-        let database_url = format!("sqlite://{}?mode=rwc", path.display());
-        let pool = SqlitePool::connect(&database_url).await?;
+        // WAL + busy_timeout: readers and writers don't block each other,
+        // and the pool waits a few seconds on transient locks instead of
+        // failing immediately with SQLITE_BUSY. `synchronous=NORMAL` is the
+        // documented safe pairing with WAL and is dramatically faster than
+        // FULL on writes.
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePool::connect_with(opts).await?;
 
         sqlx::query(schema::INIT_SQL).execute(&pool).await?;
 
         Self::apply_schema_updates(&pool).await?;
         Self::ensure_vector_table(&pool, embedding_dim).await?;
-        Self::backfill_vector_table(&pool, embedding_dim).await?;
+        // NB: vector backfill is intentionally NOT run here. `insert_memory`
+        // upserts the vector entry inline, so the only case that needs
+        // backfill is post-migration. `init_store` runs it once *after* a
+        // migration actually imports rows; the steady-state hot path stays
+        // pure schema + open and returns in milliseconds even on a multi-GB
+        // DB.
 
         Ok(Self {
             pool,
@@ -84,8 +103,12 @@ impl Database {
 
         // Step 2: import any per-store legacy files sitting next to the
         // unified DB and tag their rows with the file-stem as `store`.
-        Self::migrate_per_store_files(&config.stores.directory, db.pool()).await?;
-        Self::backfill_vector_table(db.pool(), config.embeddings.dimension).await?;
+        // Backfill the vector table only if something was actually imported
+        // — otherwise this is the steady-state hot path and must be free.
+        let imported = Self::migrate_per_store_files(&config.stores.directory, db.pool()).await?;
+        if imported {
+            Self::backfill_vector_table(db.pool(), config.embeddings.dimension).await?;
+        }
 
         Ok(Self {
             pool: db.pool,
@@ -100,12 +123,13 @@ impl Database {
     async fn migrate_per_store_files(
         stores_dir: &Path,
         unified_pool: &SqlitePool,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<bool> {
         let entries = match std::fs::read_dir(stores_dir) {
             Ok(entries) => entries,
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(false),
         };
 
+        let mut imported = false;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("db") {
@@ -133,9 +157,10 @@ impl Database {
             }
 
             Self::rename_to_migrated(&path);
+            imported = true;
         }
 
-        Ok(())
+        Ok(imported)
     }
 
     /// Attach a legacy per-store DB and copy its `memories` rows into the
