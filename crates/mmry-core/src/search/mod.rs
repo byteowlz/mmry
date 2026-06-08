@@ -109,10 +109,9 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let id = Uuid::parse_str(&id_raw)
         .map_err(|e| crate::Error::InvalidInput(format!("Invalid memory id '{id_raw}': {e}")))?;
 
-    let embedding_bytes: Option<Vec<u8>> = row.try_get("embedding").ok();
-    let embedding_vec =
-        embedding_bytes.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
-
+    // Dense embeddings live in the `memory_embeddings` sqlite-vec virtual
+    // table, not on `memories` anymore. Search reads them via vec0 MATCH
+    // queries when it needs them, not by deserializing per-row JSON.
     let sparse_embedding_bytes: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
     let sparse_embedding_vec = sparse_embedding_bytes
         .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
@@ -142,7 +141,7 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         id,
         memory_type: serde_json::from_str(row.try_get("type")?)?,
         content: row.try_get("content")?,
-        embedding: embedding_vec,
+        embedding: None,
         sparse_embedding: sparse_embedding_vec,
         metadata: serde_json::from_str(row.try_get("metadata")?)?,
         importance: row.try_get("importance")?,
@@ -637,13 +636,8 @@ impl SearchService {
         // Best-effort: never fail a search because recording failed.
         let ctx = AgentCtx::from_env();
         let returned_ids: Vec<Uuid> = results.iter().map(|m| m.id).collect();
-        if let Err(e) = episodes::record_episode(
-            &self.pool,
-            opts.query,
-            &returned_ids,
-            ctx.index_keys(),
-        )
-        .await
+        if let Err(e) =
+            episodes::record_episode(&self.pool, opts.query, &returned_ids, ctx.index_keys()).await
         {
             tracing::warn!(error = %e, "failed to record search episode");
         }
@@ -781,7 +775,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories WHERE id IN (",
+                "SELECT id, type, content, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");

@@ -28,25 +28,25 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
         .enumerate()
         .map(|(idx, memory)| {
             let is_selected = app.middle_selection.is_selected(idx);
-            let type_str = match memory.memory.memory_type {
+            let type_str = match memory.memory_type {
                 MemoryType::Episodic => "E",
                 MemoryType::Semantic => "S",
                 MemoryType::Procedural => "P",
             };
 
-            let type_color = match memory.memory.memory_type {
+            let type_color = match memory.memory_type {
                 MemoryType::Episodic => Color::Cyan,
                 MemoryType::Semantic => Color::Green,
                 MemoryType::Procedural => Color::Yellow,
             };
 
-            let date_str = memory.memory.created_at.format("%Y-%m-%d").to_string();
+            let date_str = memory.created_at.format("%Y-%m-%d").to_string();
 
-            let content_preview_full = if memory.memory.content.chars().count() > 60 {
-                let truncated: String = memory.memory.content.chars().take(60).collect();
+            let content_preview_full = if memory.content.chars().count() > 60 {
+                let truncated: String = memory.content.chars().take(60).collect();
                 format!("{truncated}...")
             } else {
-                memory.memory.content.clone()
+                memory.content.clone()
             };
             let content_preview = content_preview_full
                 .lines()
@@ -54,8 +54,8 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
                 .unwrap_or("")
                 .to_string();
 
-            let tags_str = if !memory.memory.tags.is_empty() {
-                format!(" [{}]", memory.memory.tags.join(", "))
+            let tags_str = if !memory.tags.is_empty() {
+                format!(" [{}]", memory.tags.join(", "))
             } else {
                 String::new()
             };
@@ -93,12 +93,12 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
 
             line1_spans.push(Span::raw(" | "));
             line1_spans.push(Span::styled(
-                &memory.memory.category,
+                &memory.category,
                 Style::default().fg(Color::Green),
             ));
             line1_spans.push(Span::raw(" | "));
             line1_spans.push(Span::styled(
-                format!("★{}", memory.memory.importance),
+                format!("★{}", memory.importance),
                 Style::default().fg(Color::Yellow),
             ));
 

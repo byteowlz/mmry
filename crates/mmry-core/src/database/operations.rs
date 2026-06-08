@@ -14,18 +14,10 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let id = uuid::Uuid::parse_str(&id_raw)
         .map_err(|e| crate::Error::InvalidInput(format!("Invalid memory id '{id_raw}': {e}")))?;
 
-    let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
-    let embedding_vec = match embedding {
-        Some(bytes) if !bytes.is_empty() => match serde_json::from_slice::<Vec<f32>>(&bytes) {
-            Ok(vec) => Some(vec),
-            Err(e) => {
-                tracing::warn!(memory_id = %id, error = %e, "Invalid dense embedding stored; skipping value");
-                None
-            }
-        },
-        _ => None,
-    };
-
+    // Dense vectors live exclusively in the sqlite-vec virtual table;
+    // there is no `embedding` column on `memories` anymore. Leave the
+    // in-memory field None on read — search hydrates it through the
+    // vec0 path when needed.
     let sparse_embedding: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
     let sparse_embedding_vec = match sparse_embedding {
         Some(bytes) if !bytes.is_empty() => {
@@ -69,7 +61,7 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         id,
         memory_type: serde_json::from_str(row.try_get("type")?)?,
         content: row.try_get("content")?,
-        embedding: embedding_vec,
+        embedding: None,
         sparse_embedding: sparse_embedding_vec,
         metadata: serde_json::from_str(row.try_get("metadata")?)?,
         importance: row.try_get("importance")?,
@@ -89,11 +81,6 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
 }
 
 pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<()> {
-    let embedding_bytes = memory
-        .embedding
-        .as_ref()
-        .and_then(|e| serde_json::to_vec(e).ok());
-
     let sparse_embedding_bytes = memory
         .sparse_embedding
         .as_ref()
@@ -104,19 +91,18 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
     sqlx::query(
         r#"
         INSERT INTO memories (
-            id, type, content, embedding, sparse_embedding, metadata, importance,
+            id, type, content, sparse_embedding, metadata, importance,
             category, tags, created_at, updated_at,
             parent_id, chunk_index, total_chunks,
             workspace_id, platform_session_id, harness_session_id,
             store
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(memory.id.to_string())
     .bind(serde_json::to_string(&memory.memory_type)?)
     .bind(&memory.content)
-    .bind(embedding_bytes)
     .bind(sparse_embedding_bytes)
     .bind(memory.metadata.to_string())
     .bind(memory.importance)
@@ -144,7 +130,7 @@ pub async fn insert_memory(pool: &SqlitePool, memory: &Memory) -> crate::Result<
 pub async fn get_memory(pool: &SqlitePool, id: Uuid) -> crate::Result<Option<Memory>> {
     let row = sqlx::query(
         r#"
-        SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
+        SELECT id, type, content, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store
         FROM memories
         WHERE id = ?
         "#,
@@ -168,6 +154,117 @@ pub async fn list_memories(
     list_memories_scoped(pool, None, category, limit).await
 }
 
+/// Same as `list_memories`, but skips the heavy `embedding`,
+/// `sparse_embedding`, and `metadata` columns. Used by list views (TUI,
+/// `mmry ls`) where these fields are never rendered — selecting them is
+/// the difference between a millisecond query and seconds of BLOB
+/// deserialization on a multi-GB DB.
+pub async fn list_memories_lean(
+    pool: &SqlitePool,
+    category: Option<&str>,
+    limit: i64,
+) -> crate::Result<Vec<Memory>> {
+    list_memories_lean_scoped(pool, None, category, limit).await
+}
+
+pub async fn list_memories_lean_scoped(
+    pool: &SqlitePool,
+    store: Option<&str>,
+    category: Option<&str>,
+    limit: i64,
+) -> crate::Result<Vec<Memory>> {
+    let mut sql = String::from(
+        "SELECT id, type, content, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories",
+    );
+    let mut where_clauses = Vec::new();
+    if store.is_some() {
+        where_clauses.push("store = ?");
+    }
+    if category.is_some() {
+        where_clauses.push("category = ?");
+    }
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+
+    let mut query = sqlx::query(&sql);
+    if let Some(s) = store {
+        query = query.bind(s);
+    }
+    if let Some(c) = category {
+        query = query.bind(c);
+    }
+    query = query.bind(limit);
+
+    let rows = query.fetch_all(pool).await?;
+    let mut memories = Vec::new();
+    for row in rows {
+        match memory_from_lean_row(&row) {
+            Ok(memory) => memories.push(memory),
+            Err(e) => {
+                let id_str: String = row.try_get("id").unwrap_or_else(|_| "unknown".to_string());
+                warn!("Skipping corrupt memory row {id_str}: {e}");
+            }
+        }
+    }
+    Ok(memories)
+}
+
+fn memory_from_lean_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
+    let id_raw: String = row.try_get("id")?;
+    let id = uuid::Uuid::parse_str(&id_raw)
+        .map_err(|e| crate::Error::InvalidInput(format!("Invalid memory id '{id_raw}': {e}")))?;
+
+    let parent_id: Option<String> = row.try_get("parent_id").ok().flatten();
+    let parent_id = match parent_id {
+        Some(raw) => Some(Uuid::parse_str(&raw).map_err(|e| {
+            crate::Error::InvalidInput(format!("Invalid parent_id '{raw}' for memory {id}: {e}"))
+        })?),
+        None => None,
+    };
+
+    let created_at_raw: String = row.try_get("created_at")?;
+    let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_raw)
+        .map_err(|e| {
+            crate::Error::InvalidInput(format!(
+                "Invalid created_at for memory {id} ({created_at_raw}): {e}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
+    let updated_at_raw: String = row.try_get("updated_at")?;
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_raw)
+        .map_err(|e| {
+            crate::Error::InvalidInput(format!(
+                "Invalid updated_at for memory {id} ({updated_at_raw}): {e}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
+
+    Ok(Memory {
+        id,
+        memory_type: serde_json::from_str(row.try_get("type")?)?,
+        content: row.try_get("content")?,
+        embedding: None,
+        sparse_embedding: None,
+        metadata: serde_json::Value::Object(serde_json::Map::new()),
+        importance: row.try_get("importance")?,
+        helpful_count: row.try_get("helpful_count").unwrap_or(0),
+        harmful_count: row.try_get("harmful_count").unwrap_or(0),
+        category: row.try_get("category")?,
+        tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
+        created_at,
+        updated_at,
+        parent_id,
+        chunk_index: row.try_get("chunk_index").ok(),
+        total_chunks: row.try_get("total_chunks").ok(),
+        store: row
+            .try_get::<String, _>("store")
+            .unwrap_or_else(|_| "default".to_string()),
+    })
+}
+
 /// Like `list_memories`, but scoped to a specific store. `None` means
 /// "no scope" — return rows from all stores in the unified DB.
 pub async fn list_memories_scoped(
@@ -177,7 +274,7 @@ pub async fn list_memories_scoped(
     limit: i64,
 ) -> crate::Result<Vec<Memory>> {
     let mut sql = String::from(
-        "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories",
+        "SELECT id, type, content, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories",
     );
     let mut where_clauses = Vec::new();
     if store.is_some() {
@@ -232,7 +329,7 @@ pub async fn list_memories_paged_scoped(
     offset: i64,
 ) -> crate::Result<Vec<Memory>> {
     let mut sql = String::from(
-        "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories",
+        "SELECT id, type, content, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories",
     );
     let mut where_clauses = Vec::new();
     if store.is_some() {
@@ -294,17 +391,15 @@ pub async fn update_memory_embeddings(
     embedding: Option<&Vec<f32>>,
     sparse_embedding: Option<&StoredSparseEmbedding>,
 ) -> crate::Result<()> {
-    let embedding_bytes = embedding.and_then(|e| serde_json::to_vec(e).ok());
     let sparse_embedding_bytes = sparse_embedding.and_then(|e| serde_json::to_vec(e).ok());
 
     sqlx::query(
         r#"
         UPDATE memories
-        SET embedding = ?, sparse_embedding = ?, updated_at = ?
+        SET sparse_embedding = ?, updated_at = ?
         WHERE id = ?
         "#,
     )
-    .bind(embedding_bytes)
     .bind(sparse_embedding_bytes)
     .bind(chrono::Utc::now().to_rfc3339())
     .bind(id.to_string())
@@ -407,14 +502,19 @@ pub async fn get_memories_needing_embeddings_scoped(
 ) -> crate::Result<Vec<Uuid>> {
     let rows: Vec<String> = if let Some(s) = store {
         sqlx::query_scalar(
-            "SELECT id FROM memories WHERE (embedding IS NULL OR sparse_embedding IS NULL) AND store = ?",
+            "SELECT id FROM memories \
+             WHERE (sparse_embedding IS NULL \
+                    OR id NOT IN (SELECT memory_id FROM memory_embeddings)) \
+               AND store = ?",
         )
         .bind(s)
         .fetch_all(pool)
         .await?
     } else {
         sqlx::query_scalar(
-            "SELECT id FROM memories WHERE embedding IS NULL OR sparse_embedding IS NULL",
+            "SELECT id FROM memories \
+             WHERE sparse_embedding IS NULL \
+                OR id NOT IN (SELECT memory_id FROM memory_embeddings)",
         )
         .fetch_all(pool)
         .await?
@@ -431,10 +531,7 @@ pub async fn count_memories(pool: &SqlitePool) -> crate::Result<i64> {
     count_memories_scoped(pool, None).await
 }
 
-pub async fn count_memories_scoped(
-    pool: &SqlitePool,
-    store: Option<&str>,
-) -> crate::Result<i64> {
+pub async fn count_memories_scoped(pool: &SqlitePool, store: Option<&str>) -> crate::Result<i64> {
     let count: i64 = if let Some(s) = store {
         sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE store = ?")
             .bind(s)
@@ -451,11 +548,10 @@ pub async fn count_memories_scoped(
 /// List the distinct stores present in the unified DB along with their
 /// memory counts. Replaces the old filesystem-scan based `list_stores`.
 pub async fn list_distinct_stores(pool: &SqlitePool) -> crate::Result<Vec<(String, i64)>> {
-    let rows = sqlx::query(
-        "SELECT store, COUNT(*) as cnt FROM memories GROUP BY store ORDER BY store",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows =
+        sqlx::query("SELECT store, COUNT(*) as cnt FROM memories GROUP BY store ORDER BY store")
+            .fetch_all(pool)
+            .await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {

@@ -30,32 +30,46 @@ pub struct AddCmd {
     )]
     pub memory_type: Option<String>,
 
-    #[arg(long, short = 'c', help = "Category for the memory")]
+    #[arg(long, short = 'c', hide = true, help = "Legacy indexed category")]
     pub category: Option<String>,
 
     #[arg(long, short = 't', help = "Tags for the memory (comma-separated)")]
     pub tags: Option<String>,
 
-    #[arg(long, short = 'i', help = "Importance (1-10)")]
+    #[arg(
+        long,
+        short = 'i',
+        hide = true,
+        help = "Legacy indexed importance (1-10)"
+    )]
     pub importance: Option<i32>,
 
     #[arg(long, short = 'j', help = "Output result as JSON")]
     pub json: bool,
 
-    #[arg(long, short = 'f', help = "Include full embeddings in JSON output")]
+    #[arg(
+        long,
+        short = 'f',
+        hide = true,
+        help = "Legacy indexed full JSON output"
+    )]
     pub full: bool,
 
     /// Comma-separated memory ids that informed this new memory. Closes the
     /// open search episode for this agent session, bumping `helpful_count`
     /// on each cited memory so retrieval ranking learns from the citation.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', hide = true)]
     pub using: Vec<Uuid>,
 
     /// Episode id to close (skips the session-based lookup). Use when
     /// `--using` should target a specific search rather than the most
     /// recent open one in this session.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub episode: Option<Uuid>,
+
+    /// Use the legacy SQLite/indexed backend instead of .mmry/mmry.jsonl.
+    #[arg(long)]
+    pub indexed: bool,
 }
 
 /// Close the relevant search episode with the cited memory ids. Best-effort:
@@ -109,6 +123,112 @@ async fn maybe_close_episode(
         println!("  ↳ closed episode {ep} with {} citation(s)", using.len());
     }
     Ok(())
+}
+
+pub async fn handle_jsonl(cmd: AddCmd, config: &Config) -> anyhow::Result<()> {
+    let input = if cmd.content == "-" {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer)?;
+        buffer.trim().to_string()
+    } else {
+        cmd.content.clone()
+    };
+
+    if input.is_empty() {
+        anyhow::bail!("Content cannot be empty");
+    }
+
+    let (content, memory_type, _category, tags) =
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&input) {
+            if let Some(obj) = value.as_object() {
+                let content = obj
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&input)
+                    .to_string();
+                let memory_type = obj
+                    .get("memory_type")
+                    .or_else(|| obj.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(parse_memory_type)
+                    .transpose()?
+                    .unwrap_or_else(|| classify_memory(&content));
+                let category = cmd
+                    .category
+                    .clone()
+                    .or_else(|| {
+                        obj.get("category")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToString::to_string)
+                    })
+                    .unwrap_or_else(|| config.memory.default_category.clone());
+                let tags = parse_tags(cmd.tags.as_deref())
+                    .or_else(|| {
+                        obj.get("tags").and_then(|tags| {
+                            tags.as_array().map(|arr| {
+                                arr.iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()
+                            })
+                        })
+                    })
+                    .unwrap_or_default();
+                (content, memory_type, category, tags)
+            } else {
+                (
+                    input.clone(),
+                    classify_memory(&input),
+                    config.memory.default_category.clone(),
+                    parse_tags(cmd.tags.as_deref()).unwrap_or_default(),
+                )
+            }
+        } else {
+            let memory_type = cmd
+                .memory_type
+                .as_deref()
+                .map(parse_memory_type)
+                .transpose()?
+                .unwrap_or_else(|| classify_memory(&input));
+            let category = cmd
+                .category
+                .clone()
+                .unwrap_or_else(|| config.memory.default_category.clone());
+            let tags = parse_tags(cmd.tags.as_deref()).unwrap_or_default();
+            (input, memory_type, category, tags)
+        };
+
+    let agent_ctx = AgentCtx::from_env();
+    let event = mmry_core::memory_file::MemoryEvent::add(content, memory_type, tags, &agent_ctx);
+    let memory_file = mmry_core::memory_file::MemoryFile::open_current()?;
+    memory_file.append(&event)?;
+
+    if cmd.json {
+        println!("{}", serde_json::to_string_pretty(&event)?);
+    } else {
+        println!("+ Added memory: {}", event.memory_id);
+        println!("  File: {}", memory_file.path().display());
+    }
+    Ok(())
+}
+
+fn parse_memory_type(value: &str) -> anyhow::Result<MemoryType> {
+    match value.to_lowercase().as_str() {
+        "episodic" => Ok(MemoryType::Episodic),
+        "semantic" => Ok(MemoryType::Semantic),
+        "procedural" => Ok(MemoryType::Procedural),
+        _ => anyhow::bail!("Invalid memory type: {value}"),
+    }
+}
+
+fn parse_tags(tags: Option<&str>) -> Option<Vec<String>> {
+    tags.map(|tags| {
+        tags.split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(ToString::to_string)
+            .collect()
+    })
 }
 
 pub async fn handle(
@@ -555,6 +675,7 @@ mod tests {
             full: false,
             using: Vec::new(),
             episode: None,
+            indexed: true,
         };
 
         handle(
@@ -597,6 +718,7 @@ mod tests {
             full: false,
             using: Vec::new(),
             episode: None,
+            indexed: true,
         };
 
         handle(

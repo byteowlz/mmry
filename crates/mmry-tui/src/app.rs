@@ -24,6 +24,7 @@ use mmry_core::config::SearchMode;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
+use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
@@ -35,7 +36,6 @@ use mmry_core::stores::move_memory_to_store;
 use mmry_core::stores::store_exists;
 use mmry_core::stores::validate_store_name;
 use mmry_core::stores::write_export_to_file;
-use mmry_core::stores::MemoryWithStore;
 use mmry_core::stores::StoreInfo;
 use std::collections::HashSet;
 use std::io::Write;
@@ -87,8 +87,8 @@ pub struct App {
     search_service: SearchService,
     search_mode_index: usize,
     sort_menu_index: usize,
-    search_backup: Option<Vec<MemoryWithStore>>,
-    pub memories: Vec<MemoryWithStore>,
+    search_backup: Option<Vec<Memory>>,
+    pub memories: Vec<Memory>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
 
@@ -350,17 +350,15 @@ impl App {
 
     pub async fn refresh_current_view(&mut self) -> Result<()> {
         if self.viewing_all_stores {
-            let results = list_all_stores(&self.config, None, 1000).await?;
-            self.memories = results;
+            self.memories = list_all_stores(&self.config, None, 1000).await?;
         } else {
-            let memories = operations::list_memories(self.db.pool(), None, 1000).await?;
-            self.memories = memories
-                .into_iter()
-                .map(|memory| MemoryWithStore {
-                    memory,
-                    store: self.current_store.clone(),
-                })
-                .collect();
+            self.memories = operations::list_memories_lean_scoped(
+                self.db.pool(),
+                Some(&self.current_store),
+                None,
+                1000,
+            )
+            .await?;
         }
         self.sort_state.sort_memories(&mut self.memories);
         self.update_categories_and_tags();
@@ -378,8 +376,8 @@ impl App {
         let mut tags = HashSet::new();
 
         for memory in &self.memories {
-            categories.insert(memory.memory.category.clone());
-            for tag in &memory.memory.tags {
+            categories.insert(memory.category.clone());
+            for tag in &memory.tags {
                 tags.insert(tag.clone());
             }
         }
@@ -391,33 +389,30 @@ impl App {
         self.tags.sort();
     }
 
-    pub fn selected_memory(&self) -> Option<&MemoryWithStore> {
+    pub fn selected_memory(&self) -> Option<&Memory> {
         self.filtered_memories()
             .get(self.middle_selection.index)
             .copied()
     }
 
-    pub fn filtered_memories(&self) -> Vec<&MemoryWithStore> {
+    pub fn filtered_memories(&self) -> Vec<&Memory> {
         self.memories
             .iter()
             .filter(|m| {
                 // Category filter
-                if !self.filter_state.is_category_enabled(&m.memory.category) {
+                if !self.filter_state.is_category_enabled(&m.category) {
                     return false;
                 }
 
                 // Type filter
-                if !self.filter_state.is_type_enabled(&m.memory.memory_type) {
+                if !self.filter_state.is_type_enabled(&m.memory_type) {
                     return false;
                 }
 
                 // Tag filter - if any tags are filtered, at least one of the memory's tags must be enabled
                 if !self.filter_state.enabled_tags.is_empty() {
-                    let has_enabled_tag = m
-                        .memory
-                        .tags
-                        .iter()
-                        .any(|t| self.filter_state.is_tag_enabled(t));
+                    let has_enabled_tag =
+                        m.tags.iter().any(|t| self.filter_state.is_tag_enabled(t));
                     if !has_enabled_tag {
                         return false;
                     }
@@ -426,13 +421,13 @@ impl App {
                 // Recent filter (last 7 days)
                 if self.filter_state.show_recent {
                     let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
-                    if m.memory.created_at < seven_days_ago {
+                    if m.created_at < seven_days_ago {
                         return false;
                     }
                 }
 
                 // Important filter (importance > 7)
-                if self.filter_state.show_important && m.memory.importance <= 7 {
+                if self.filter_state.show_important && m.importance <= 7 {
                     return false;
                 }
 
@@ -597,7 +592,7 @@ impl App {
                         .iter()
                         .filter_map(|&idx| {
                             filtered.get(idx).map(|m| MemoryKey {
-                                id: m.memory.id,
+                                id: m.id,
                                 store: m.store.clone(),
                             })
                         })
@@ -605,7 +600,7 @@ impl App {
                     self.mode = AppMode::DeleteMultiple(keys);
                 } else if let Some(memory) = self.selected_memory() {
                     self.mode = AppMode::Delete(MemoryKey {
-                        id: memory.memory.id,
+                        id: memory.id,
                         store: memory.store.clone(),
                     });
                 }
@@ -647,7 +642,7 @@ impl App {
             KeyAction::Char('e') => {
                 if let Some(memory) = self.selected_memory() {
                     self.edit_memory(MemoryKey {
-                        id: memory.memory.id,
+                        id: memory.id,
                         store: memory.store.clone(),
                     })
                     .await?;
@@ -734,7 +729,7 @@ impl App {
                 } else {
                     // Get memory ID first to avoid borrow issues
                     let memory_key = self.selected_memory().map(|m| MemoryKey {
-                        id: m.memory.id,
+                        id: m.id,
                         store: m.store.clone(),
                     });
                     if let Some(memory_key) = memory_key {
@@ -807,13 +802,7 @@ impl App {
         let results = self
             .search_service
             .search_with_options(query, None, limit, Some(mode), None)
-            .await?
-            .into_iter()
-            .map(|memory| MemoryWithStore {
-                memory,
-                store: self.current_store.clone(),
-            })
-            .collect::<Vec<_>>();
+            .await?;
 
         if results.is_empty() {
             self.status_message = Some(format!("No memories found for \"{query}\""));
@@ -1152,10 +1141,7 @@ impl App {
 
                         // Find the edited memory and move cursor to it
                         self.active_pane = Pane::Middle;
-                        if let Some(pos) = self
-                            .filtered_memories()
-                            .iter()
-                            .position(|m| m.memory.id == id)
+                        if let Some(pos) = self.filtered_memories().iter().position(|m| m.id == id)
                         {
                             self.middle_selection.index = pos;
                             self.middle_selection.offset = pos.saturating_sub(10);
@@ -1205,10 +1191,8 @@ impl App {
 
                         // Find the new memory and move cursor to it
                         self.active_pane = Pane::Middle;
-                        if let Some(pos) = self
-                            .filtered_memories()
-                            .iter()
-                            .position(|m| m.memory.id == new_id)
+                        if let Some(pos) =
+                            self.filtered_memories().iter().position(|m| m.id == new_id)
                         {
                             self.middle_selection.index = pos;
                             self.middle_selection.offset = pos.saturating_sub(10);
@@ -1759,7 +1743,7 @@ impl App {
 
             let store = memory.store.clone();
             let memory_type_label = format!("{memory_type:?}");
-            let mut updated = memory.memory.clone();
+            let mut updated = memory.clone();
             updated.memory_type = memory_type;
             updated.updated_at = chrono::Utc::now();
 
@@ -1785,7 +1769,7 @@ impl App {
             }
 
             let store = memory.store.clone();
-            let mut updated = memory.memory.clone();
+            let mut updated = memory.clone();
             updated.importance = importance;
             updated.updated_at = chrono::Utc::now();
 
@@ -1811,8 +1795,8 @@ impl App {
             }
 
             let store = memory.store.clone();
-            let new_importance = (memory.memory.importance + delta).clamp(0, 9);
-            let mut updated = memory.memory.clone();
+            let new_importance = (memory.importance + delta).clamp(0, 9);
+            let mut updated = memory.clone();
             updated.importance = new_importance;
             updated.updated_at = chrono::Utc::now();
 
@@ -1838,7 +1822,7 @@ impl App {
             }
 
             let store = memory.store.clone();
-            let mut updated = memory.memory.clone();
+            let mut updated = memory.clone();
             updated.category = category.to_string();
             updated.updated_at = chrono::Utc::now();
 
@@ -1933,19 +1917,16 @@ mod tests {
         memory_type: MemoryType,
         importance: i32,
         category: &str,
-    ) -> Result<MemoryWithStore> {
-        let memory = Memory::new(
+    ) -> Result<Memory> {
+        let mut memory = Memory::new(
             memory_type,
             "Test content".to_string(),
             category.to_string(),
         );
-        let mut memory = memory;
         memory.importance = importance;
+        memory.store = app.current_store.clone();
         operations::insert_memory(app.db.pool(), &memory).await?;
-        Ok(MemoryWithStore {
-            memory,
-            store: app.current_store.clone(),
-        })
+        Ok(memory)
     }
 
     #[tokio::test]
@@ -1962,7 +1943,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Episodic);
 
@@ -1983,7 +1964,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Semantic);
 
@@ -2004,7 +1985,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Procedural);
 
@@ -2025,7 +2006,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 7);
 
@@ -2046,7 +2027,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 6);
 
@@ -2067,7 +2048,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 4);
 
@@ -2087,7 +2068,7 @@ mod tests {
 
         assert!(result);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 9);
 
@@ -2107,7 +2088,7 @@ mod tests {
 
         assert!(result);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 0);
 
@@ -2202,7 +2183,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "new_category");
 
@@ -2262,7 +2243,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "cat2");
 
@@ -2293,7 +2274,7 @@ mod tests {
         app.update_selected_memory_type(MemoryType::Semantic)
             .await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Semantic);
 
@@ -2310,7 +2291,7 @@ mod tests {
 
         app.update_selected_memory_importance(8).await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 8);
 
@@ -2327,7 +2308,7 @@ mod tests {
 
         app.change_selected_memory_importance(2).await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 7);
 
@@ -2344,7 +2325,7 @@ mod tests {
 
         app.update_selected_memory_category("new_category").await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "new_category");
 

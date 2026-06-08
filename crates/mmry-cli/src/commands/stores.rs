@@ -234,7 +234,10 @@ async fn handle_info(config: &Config, name: Option<&str>, json: bool) -> anyhow:
         return Ok(());
     }
 
-    let unified_path = config.stores.directory.join(mmry_core::database::UNIFIED_DB_FILENAME);
+    let unified_path = config
+        .stores
+        .directory
+        .join(mmry_core::database::UNIFIED_DB_FILENAME);
 
     if json {
         println!(

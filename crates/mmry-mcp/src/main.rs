@@ -84,7 +84,6 @@ struct MemoryIdArgs {
     store: Option<String>,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct MemoryAddArgs {
     content: String,
@@ -490,7 +489,6 @@ impl MmryMcpRouter {
             }),
         )
     }
-
 }
 
 impl mcp_server::Router for MmryMcpRouter {

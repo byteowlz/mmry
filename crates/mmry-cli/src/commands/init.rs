@@ -6,9 +6,28 @@ use std::path::PathBuf;
 pub struct InitCmd {
     #[arg(long, help = "Force initialization even if config exists")]
     pub force: bool,
+
+    #[arg(long, help = "Initialize .mmry/mmry.jsonl as tracked repo memory")]
+    pub tracked: bool,
+
+    #[arg(long, help = "Initialize the legacy SQLite/indexed config instead")]
+    pub indexed: bool,
 }
 
 pub async fn handle(cmd: InitCmd) -> anyhow::Result<()> {
+    if !cmd.indexed {
+        let memory_file = mmry_core::memory_file::MemoryFile::open_current()?;
+        memory_file.init(cmd.tracked)?;
+        println!("✓ Initialized mmry");
+        println!("  File: {}", memory_file.path().display());
+        if cmd.tracked {
+            println!("  Git: track .mmry/mmry.jsonl (run external secret scanning before commit)");
+        } else {
+            println!("  Git: .mmry/mmry.jsonl added to .gitignore");
+        }
+        return Ok(());
+    }
+
     let config_dir = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .filter(|s| !s.is_empty())

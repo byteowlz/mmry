@@ -97,6 +97,10 @@ pub struct SearchCmd {
 
     #[arg(long, help = "Filter by AGENT_CTX_HARNESS_SESSION_ID")]
     pub harness_session_id: Option<String>,
+
+    /// Use the legacy SQLite/indexed backend instead of .mmry/mmry.jsonl.
+    #[arg(long)]
+    pub indexed: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -135,6 +139,42 @@ fn parse_datetime(s: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
     anyhow::bail!(
         "Invalid date format '{s}'. Use RFC 3339 (e.g. 2024-01-15T00:00:00Z) or YYYY-MM-DD"
     )
+}
+
+pub async fn handle_jsonl(cmd: SearchCmd, config: &Config) -> anyhow::Result<()> {
+    let limit = cmd.limit.unwrap_or(config.search.default_limit as i64) as usize;
+    let memory_file = mmry_core::memory_file::MemoryFile::open_current()?;
+    let mut hits = memory_file.search(&cmd.query, limit)?;
+    if !cmd.tag.is_empty() {
+        hits.retain(|hit| {
+            cmd.tag
+                .iter()
+                .all(|tag| hit.memory.tags.iter().any(|memory_tag| memory_tag == tag))
+        });
+    }
+    if cmd.json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("No memories found");
+        return Ok(());
+    }
+    println!("Found {} memories:\n", hits.len());
+    for (index, hit) in hits.iter().enumerate() {
+        println!(
+            "{}. [{}] score {}",
+            index + 1,
+            hit.memory.memory_id,
+            hit.score
+        );
+        println!("   {}", hit.memory.content);
+        if !hit.memory.tags.is_empty() {
+            println!("   Tags: {}", hit.memory.tags.join(", "));
+        }
+        println!();
+    }
+    Ok(())
 }
 
 pub async fn handle(
@@ -275,7 +315,11 @@ fn render_results(
             results
                 .iter()
                 .map(|memory| {
-                    let store = if show_store { Some(memory.store.as_str()) } else { None };
+                    let store = if show_store {
+                        Some(memory.store.as_str())
+                    } else {
+                        None
+                    };
                     memory_to_standard_json(memory, store)
                 })
                 .collect::<serde_json::Value>()

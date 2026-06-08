@@ -169,31 +169,17 @@ pub fn format_count(count: i64) -> String {
     }
 }
 
-/// A memory with its source store name
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MemoryWithStore {
-    #[serde(flatten)]
-    pub memory: Memory,
-    pub store: String,
-}
-
-/// List memories from every store in the unified DB.
+/// List memories from every store in the unified DB. Each returned
+/// `Memory` already carries its `store` field — no wrapper needed.
 pub async fn list_all_stores(
     config: &Config,
     category: Option<&str>,
     limit: i64,
-) -> crate::Result<Vec<MemoryWithStore>> {
+) -> crate::Result<Vec<Memory>> {
     let db = Database::init_store(config, None).await?;
-    let memories = operations::list_memories(db.pool(), category, limit).await?;
-    let out = memories
-        .into_iter()
-        .map(|memory| {
-            let store = memory.store.clone();
-            MemoryWithStore { memory, store }
-        })
-        .collect();
+    let memories = operations::list_memories_lean(db.pool(), category, limit).await?;
     db.close().await;
-    Ok(out)
+    Ok(memories)
 }
 
 /// Re-tag a single memory with a different store. Replaces the old
@@ -213,9 +199,9 @@ pub async fn move_memory_to_store(
     let db = Database::init_store(config, None).await?;
     let pool = db.pool();
 
-    let mut memory = operations::get_memory(pool, memory_id).await?.ok_or_else(|| {
-        crate::Error::Config(format!("Memory {memory_id} not found"))
-    })?;
+    let mut memory = operations::get_memory(pool, memory_id)
+        .await?
+        .ok_or_else(|| crate::Error::Config(format!("Memory {memory_id} not found")))?;
     if memory.store != from_store {
         db.close().await;
         return Err(crate::Error::Config(format!(
@@ -540,7 +526,8 @@ mod tests {
         operations::insert_memory(&pool, &make_memory_in_store("b", "src")).await?;
         operations::insert_memory(&pool, &make_memory_in_store("kept", "other")).await?;
 
-        let result = transfer_within_pool(&pool, "src", "dst", ConflictStrategy::Skip, true).await?;
+        let result =
+            transfer_within_pool(&pool, "src", "dst", ConflictStrategy::Skip, true).await?;
         assert_eq!(result.memories_transferred, 2);
 
         let dst = operations::list_memories_scoped(&pool, Some("dst"), None, 100).await?;

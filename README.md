@@ -2,84 +2,139 @@
 
 # mmry
 
-A local-first memory system for humans and AI agents. Store any text and find it again with multiple search strategies, pipe it anywhere with JSON. Everything runs locally. No API keys, no cloud services, all data stays on your own machine.
+A tiny local memory file for humans and AI agents. `mmry` records distilled, durable memories in an append-only JSONL file at `.mmry/mmry.jsonl`, then lets you list and search them deterministically. It is intentionally boring: no daemon, no semantic index, no hidden global store in the default CLI.
+
+The legacy indexed SQLite/service backend still exists during migration behind `--indexed`, but the agent-facing CLI now defaults to the workspace memory file.
 
 ## Quick Start
 
-### CLI
-
 ```bash
-# Install (interactive script installs both CLI + TUI and asks for ORT features)
-just install-all
+# Create .mmry/mmry.jsonl and gitignore it by default
+mmry init
 
-# Add memories
-mmry add "I love coding in Rust"
-mmry add "Meeting with Sarah about the new API on Friday"
+# Or make workspace memories tracked by git
+mmry init --tracked
 
-# Search however you want
-mmry search "rust programming"
-mmry search "sara friday" --mode fuzzy  # typo-tolerant
-mmry search "api" --mode semantic       # conceptual similarity
+# Add distilled memories
+mmry add "Decision: keep mmry as an append-only workspace memory file"
+mmry add "Run just fmt after Rust code edits" --memory-type procedural --tags rust,workflow
 
-# Pipe things around
-echo "Important note" | mmry add -
-mmry search "important" --json | jq '.[].content'
+# List and search local memories
+mmry list
+mmry search "rust fmt"
+
+# Script with JSON
+mmry list --json
+mmry search "workspace memory" --json
+
+# Append a removal/deprecation event; does not rewrite history
+mmry rm mem_<id>
 ```
 
-### TUI
+## What belongs in mmry?
 
-```bash
-# Install (already handled by `just install-all`)
+Use `mmry` for concise, reusable takeaways:
 
-# Launch the TUI
-mmry-tui
+- repo-specific decisions
+- user/project preferences
+- gotchas and known failure modes
+- durable workflow rules
+- “when X, do Y” memories
 
-# Use vi keybindings to navigate:
-# - hjkl or arrow keys to navigate
-# - e to edit memory in your $EDITOR
-# - d to delete (with confirmation)
-# - / to search
-# - Tab to cycle search mode
-# - s to sort
-# - ? for help
+Do **not** use it as a transcript store or document index. Full sessions, large documents, semantic search, and cross-workspace retrieval belong in separate search/history tools. `mmry` is the distilled memory substrate.
+
+## File format
+
+Default storage is one workspace-local append-only JSONL file:
+
+```text
+.mmry/mmry.jsonl
 ```
 
-## What It Does
+Each line is a memory event, for example:
 
-**Search modes**: Pick what works for your query
-
-- `hybrid` - Combines everything (default, usually best)
-- `keyword` - Exact matching
-- `fuzzy` - Typo-tolerant
-- `semantic` - Finds similar concepts using embeddings
-- `bm25` - Statistical relevance (like a search engine)
-- `sparse` - Neural sparse embeddings (SPLADE++)
-
-**Memory types**: Three types (auto-guessed or specify with `--memory-type`)
-
-- Episodic (events and experiences) - default
-- Semantic (facts and knowledge) - if it contains "is" or "are"
-- Procedural (how-to and instructions) - if it contains "step" or "how to"
-
-The auto-classification is basic keyword matching, so specify the type explicitly for anything important.
-
-**Categories & Tags**: Organize your memories
-
-Each memory belongs to one category (like a folder) and can have multiple tags:
-
-```bash
-mmry add "Sprint planning notes" --category work --tags "planning,team"
-mmry add "Birthday party ideas" --category personal --tags "family,celebration,todo"
-mmry search "notes" --category work           # filter by category
-mmry ls --category personal                   # list by category
+```json
+{"schema_version":1,"type":"memory.add","memory_id":"mem_...","content":"Run just fmt after Rust code edits","tags":["rust"]}
+{"schema_version":1,"type":"memory.deprecate","memory_id":"mem_...","target_memory_id":"mem_..."}
 ```
 
-**JSON all the way**: Every command supports `--json` for scripting
+The active memory list is produced by replaying the file. This keeps the source of truth simple, inspectable, and rebuildable.
+
+## Core commands
 
 ```bash
-mmry ls --json | jq 'map(select(.importance > 7))'
-echo '{"content": "From JSON"}' | mmry add -
+mmry init [--tracked]          # initialize .mmry/mmry.jsonl
+mmry add <text|->              # add a memory, read stdin with -
+mmry list                      # list active memories; alias: mmry ls
+mmry search <query>            # deterministic lexical search
+mmry rm <memory-id>            # append memory.deprecate
+mmry doctor                    # diagnostics
 ```
+
+Useful flags:
+
+```bash
+mmry add "..." --memory-type episodic|semantic|procedural
+mmry add "..." --tags tag1,tag2
+mmry list --json
+mmry search "..." --limit 20 --json
+```
+
+## Legacy indexed backend
+
+The old SQLite/indexed/service backend remains available for transition and integrations that still rely on it:
+
+```bash
+mmry init --indexed
+mmry add --indexed "legacy indexed memory"
+mmry list --indexed
+mmry search --indexed "semantic query"
+mmry rm --indexed <uuid>
+```
+
+Service mode, embeddings, stores, TUI, and MCP are legacy-indexed features for now. New agent integrations should prefer `mmry-core::MemoryFile` and `.mmry/mmry.jsonl`.
+
+## Embedding mmry-core
+
+Rust integrations can use the memory file directly:
+
+```rust
+use mmry_core::{MemoryEvent, MemoryFile};
+use mmry_core::agent_ctx::AgentCtx;
+use mmry_core::memory::MemoryType;
+
+let memory_file = MemoryFile::open_workspace(workspace_path);
+memory_file.init(false)?;
+
+let event = MemoryEvent::add(
+    "Run just fmt after Rust edits".to_string(),
+    MemoryType::Procedural,
+    vec!["rust".to_string()],
+    &AgentCtx::from_env(),
+);
+memory_file.append(&event)?;
+
+let memories = memory_file.active_memories()?;
+let hits = memory_file.search("rust fmt", 10)?;
+```
+
+## Migrating legacy memories
+
+A standalone migration helper converts legacy SQLite rows to JSONL and filters out bulky session/history imports by default:
+
+```bash
+scripts/migrate_legacy_mmry_to_jsonl.py ~/.local/share/mmry/stores/mmry.db \
+  --store oqto \
+  -o /path/to/workspace/.mmry/mmry.jsonl
+```
+
+Dry run first:
+
+```bash
+scripts/migrate_legacy_mmry_to_jsonl.py ~/.local/share/mmry/stores/mmry.db --dry-run
+```
+
+Use `--include-sessions` only if you intentionally want imported hstry/session records.
 
 ## Service Mode (Fast Embeddings)
 

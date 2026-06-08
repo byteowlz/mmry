@@ -25,7 +25,9 @@ use mmry_core::memory::MemoryType;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
 
 #[derive(Parser)]
-#[command(about = "Ingest a canonical byteowlz conversation JSON as a session header + N message records")]
+#[command(
+    about = "Ingest a canonical byteowlz conversation JSON as a session header + N message records"
+)]
 pub struct AddConversationCmd {
     /// Input: a path to a JSON file, "-" to read JSON from stdin, or omit when
     /// using `--json`.
@@ -298,7 +300,10 @@ fn build_session_memory(
     if let Some(v) = conv.message_count {
         session_meta.insert("message_count".to_string(), v.into());
     } else {
-        session_meta.insert("message_count".to_string(), (conv.messages.len() as i64).into());
+        session_meta.insert(
+            "message_count".to_string(),
+            (conv.messages.len() as i64).into(),
+        );
     }
     if let Some(meta) = conv.metadata.clone() {
         session_meta.insert("conversation_metadata".to_string(), meta);
@@ -388,7 +393,6 @@ fn insert_some_str(
         map.insert(key.to_string(), v.clone().into());
     }
 }
-
 
 async fn insert_with_embedding(
     db: &Database,
@@ -530,7 +534,14 @@ mod tests {
             dry_run: false,
         };
 
-        handle(cmd, &config, &db, Arc::clone(&embeddings), Arc::clone(&sparse)).await?;
+        handle(
+            cmd,
+            &config,
+            &db,
+            Arc::clone(&embeddings),
+            Arc::clone(&sparse),
+        )
+        .await?;
 
         let stored = operations::list_memories(db.pool(), None, 50).await?;
         assert_eq!(stored.len(), 4, "1 session header + 3 messages");
@@ -540,10 +551,7 @@ mod tests {
             .find(|m| m.parent_id.is_none())
             .expect("session header exists");
         assert!(session.tags.iter().any(|t| t == "hstry-session"));
-        assert!(session
-            .tags
-            .iter()
-            .any(|t| t == "conv:conv-abc-123"));
+        assert!(session.tags.iter().any(|t| t == "conv:conv-abc-123"));
         assert_eq!(session.content, "Migrate user service to Postgres");
         assert_eq!(
             session.metadata.get("record_kind").and_then(|v| v.as_str()),
@@ -585,9 +593,7 @@ mod tests {
         // right record.
         let assistant = messages
             .iter()
-            .find(|m| {
-                m.metadata.get("role").and_then(|v| v.as_str()) == Some("assistant")
-            })
+            .find(|m| m.metadata.get("role").and_then(|v| v.as_str()) == Some("assistant"))
             .expect("assistant message");
         assert_eq!(
             assistant.metadata.get("tokens").and_then(|v| v.as_i64()),
@@ -627,21 +633,25 @@ mod tests {
             dry_run: false,
         };
 
-        handle(cmd, &config, &db, Arc::clone(&embeddings), Arc::clone(&sparse)).await?;
+        handle(
+            cmd,
+            &config,
+            &db,
+            Arc::clone(&embeddings),
+            Arc::clone(&sparse),
+        )
+        .await?;
 
         let stored = operations::list_memories(db.pool(), None, 50).await?;
         let session = stored
             .iter()
             .find(|m| {
-                m.metadata.get("record_kind").and_then(|v| v.as_str())
-                    == Some("session_header")
+                m.metadata.get("record_kind").and_then(|v| v.as_str()) == Some("session_header")
             })
             .expect("session header exists");
         let messages: Vec<_> = stored
             .iter()
-            .filter(|m| {
-                m.metadata.get("record_kind").and_then(|v| v.as_str()) == Some("message")
-            })
+            .filter(|m| m.metadata.get("record_kind").and_then(|v| v.as_str()) == Some("message"))
             .collect();
         assert_eq!(messages.len(), 1);
         let message_id = messages[0].id;
@@ -676,9 +686,15 @@ mod tests {
             dry_run: false,
         };
 
-        let err = handle(cmd, &config, &db, Arc::clone(&embeddings), Arc::clone(&sparse))
-            .await
-            .expect_err("empty messages should error");
+        let err = handle(
+            cmd,
+            &config,
+            &db,
+            Arc::clone(&embeddings),
+            Arc::clone(&sparse),
+        )
+        .await
+        .expect_err("empty messages should error");
         assert!(err.to_string().contains("no messages"));
 
         db.close().await;

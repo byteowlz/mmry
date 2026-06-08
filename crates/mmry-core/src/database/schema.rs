@@ -5,7 +5,6 @@ CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     content TEXT NOT NULL,
-    embedding BLOB,
     sparse_embedding BLOB,
     metadata JSON,
     importance INTEGER DEFAULT 5,

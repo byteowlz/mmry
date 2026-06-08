@@ -54,6 +54,7 @@ enum Commands {
     Search(commands::search::SearchCmd),
 
     /// List memories
+    #[command(alias = "list")]
     Ls(commands::ls::LsCmd),
 
     /// Remove a memory
@@ -161,6 +162,14 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await
         }
+        Commands::Add(cmd) if !cmd.indexed => {
+            return commands::add::handle_jsonl(cmd, &config).await
+        }
+        Commands::Ls(cmd) if !cmd.indexed => return commands::ls::handle_jsonl(cmd, &config).await,
+        Commands::Search(cmd) if !cmd.indexed => {
+            return commands::search::handle_jsonl(cmd, &config).await
+        }
+        Commands::Rm(cmd) if !cmd.indexed => return commands::rm::handle_jsonl(cmd).await,
         other => other,
     };
 
@@ -175,9 +184,11 @@ async fn async_main() -> anyhow::Result<()> {
     // Try service-backed search before starting local services
     if config.service.enabled && store_name != Some("all") {
         if let Commands::Search(cmd) = &command {
-            match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
-                Ok(()) => return Ok(()),
-                Err(e) => tracing::warn!("Service search failed, falling back to local: {e}"),
+            if cmd.indexed {
+                match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => tracing::warn!("Service search failed, falling back to local: {e}"),
+                }
             }
         }
     }

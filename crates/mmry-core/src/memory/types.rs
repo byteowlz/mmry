@@ -98,5 +98,4 @@ impl Memory {
             .and_then(|v| v.get("harness_session_id"))
             .and_then(serde_json::Value::as_str)
     }
-
 }
