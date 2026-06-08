@@ -152,24 +152,6 @@ fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow
         chrono::DateTime::parse_from_rfc3339(&exported.created_at)?.with_timezone(&chrono::Utc);
     let updated_at =
         chrono::DateTime::parse_from_rfc3339(&exported.updated_at)?.with_timezone(&chrono::Utc);
-    let expires_at = match exported.expires_at.as_deref() {
-        Some(raw) => Some(chrono::DateTime::parse_from_rfc3339(raw)?.with_timezone(&chrono::Utc)),
-        None => None,
-    };
-    let expired_at = match exported.expired_at.as_deref() {
-        Some(raw) => Some(chrono::DateTime::parse_from_rfc3339(raw)?.with_timezone(&chrono::Utc)),
-        None => None,
-    };
-    let source_attribution = exported.source_attribution.clone();
-    let (trust_level, source_reinforcement_score) = source_attribution
-        .as_ref()
-        .map(mmry_core::memory::SourceAttribution::compute_metrics)
-        .unwrap_or((0.5, 0.0));
-    let trust_level = exported.trust_level.unwrap_or(trust_level);
-    let source_reinforcement_score = exported
-        .source_reinforcement_score
-        .unwrap_or(source_reinforcement_score);
-
     Ok(Memory {
         id,
         memory_type,
@@ -178,11 +160,8 @@ fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow
         sparse_embedding: None,
         metadata: exported.metadata.clone(),
         importance: exported.importance,
-        expires_at,
-        expired_at,
-        source_attribution,
-        trust_level,
-        source_reinforcement_score,
+        helpful_count: 0,
+        harmful_count: 0,
         created_at,
         updated_at,
         category: exported.category.clone(),
@@ -190,7 +169,6 @@ fn parse_exported_memory(exported: &mmry_core::stores::ExportedMemory) -> anyhow
         parent_id: None,
         chunk_index: None,
         total_chunks: None,
-        chunk_method: None,
-        bridge_block_id: None,
+        store: "default".to_string(),
     })
 }

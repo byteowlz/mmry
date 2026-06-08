@@ -223,6 +223,27 @@ pub fn list_models() -> Vec<ModelInfo> {
     ]
 }
 
+/// Resolve a user-supplied model string to a fastembed `EmbeddingModel`.
+///
+/// Accepts either the HuggingFace-style code from `list_models()`
+/// (e.g. `"intfloat/multilingual-e5-small"`) or the fastembed variant
+/// name (e.g. `"MultilingualE5Small"`). Falls back to `AllMiniLML6V2`
+/// with a warning if neither matches.
+fn resolve_embedding_model(name: &str) -> EmbeddingModel {
+    if let Some(info) = list_models().iter().find(|m| m.code == name) {
+        if let Ok(model) = info.variant.parse::<EmbeddingModel>() {
+            return model;
+        }
+    }
+    match name.parse::<EmbeddingModel>() {
+        Ok(model) => model,
+        Err(e) => {
+            tracing::warn!(model = %name, error = %e, "Unknown embedding model, falling back to all-MiniLM-L6-v2");
+            EmbeddingModel::AllMiniLML6V2
+        }
+    }
+}
+
 type SharedModel = Arc<Mutex<TextEmbedding>>;
 
 pub struct EmbeddingService {
@@ -307,13 +328,7 @@ impl EmbeddingService {
             let init = if name.is_empty() {
                 InitOptions::default()
             } else {
-                let parsed = match name.parse::<EmbeddingModel>() {
-                    Ok(model) => model,
-                    Err(e) => {
-                        tracing::warn!(model = %name, error = %e, "Unknown embedding model, falling back to all-MiniLM-L6-v2");
-                        EmbeddingModel::AllMiniLML6V2
-                    }
-                };
+                let parsed = resolve_embedding_model(&name);
                 InitOptions::new(parsed)
             };
 
@@ -366,3 +381,45 @@ pub(crate) fn ensure_fastembed_cache_dir() -> Result<PathBuf> {
 }
 
 // Drop implementation removed - let Arc handle cleanup naturally
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_by_hf_code() {
+        let resolved = resolve_embedding_model("intfloat/multilingual-e5-small");
+        assert!(matches!(resolved, EmbeddingModel::MultilingualE5Small));
+    }
+
+    #[test]
+    fn resolve_by_variant_name() {
+        let resolved = resolve_embedding_model("MultilingualE5Small");
+        assert!(matches!(resolved, EmbeddingModel::MultilingualE5Small));
+    }
+
+    #[test]
+    fn resolve_unknown_falls_back() {
+        let resolved = resolve_embedding_model("not-a-real-model");
+        assert!(matches!(resolved, EmbeddingModel::AllMiniLML6V2));
+    }
+
+    #[test]
+    fn every_catalog_entry_resolves() {
+        for info in list_models() {
+            let resolved = resolve_embedding_model(info.code);
+            // Round-trip: code -> variant -> EmbeddingModel must match the
+            // variant we documented in the catalog.
+            let expected: EmbeddingModel = info
+                .variant
+                .parse()
+                .unwrap_or_else(|_| panic!("variant `{}` unparseable", info.variant));
+            assert_eq!(
+                format!("{resolved:?}"),
+                format!("{expected:?}"),
+                "code `{}` resolved to wrong variant",
+                info.code
+            );
+        }
+    }
+}

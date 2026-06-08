@@ -1,13 +1,23 @@
 use crate::config::ChunkingConfig;
-use crate::memory::ChunkMethod;
 use crate::memory::Memory;
 use crate::Result;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 use unicode_segmentation::UnicodeSegmentation;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChunkMethod {
+    None,
+    Paragraph,
+    Sentence,
+    Word,
+}
 
 pub struct TextChunk {
     pub content: String,
@@ -437,15 +447,9 @@ impl Chunker {
                 memory.parent_id = Some(parent_id);
                 memory.chunk_index = Some(chunk.index as i32);
                 memory.total_chunks = Some(total_chunks);
-                memory.chunk_method = Some(chunk.method);
                 memory.importance = parent.importance;
                 memory.tags = parent.tags.clone();
                 memory.metadata = parent.metadata.clone();
-                memory.expires_at = parent.expires_at;
-                memory.expired_at = parent.expired_at;
-                memory.source_attribution = parent.source_attribution.clone();
-                memory.trust_level = parent.trust_level;
-                memory.source_reinforcement_score = parent.source_reinforcement_score;
                 memory
             })
             .collect()

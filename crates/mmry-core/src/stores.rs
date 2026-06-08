@@ -1,75 +1,67 @@
 // Store management utilities
 
 use crate::config::Config;
-use crate::config::SearchMode;
+use crate::database::operations;
 use crate::database::Database;
-use crate::embeddings::EmbeddingServiceWrapper;
+use crate::database::UNIFIED_DB_FILENAME;
 use crate::memory::Memory;
-use crate::reranker::RerankerService;
-use crate::search::SearchFilters;
-use crate::search::SearchQueryOptions;
-use crate::search::SearchService;
-use crate::sparse_embeddings::SparseEmbeddingService;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::warn;
-
-/// Options for searching across all stores
-pub struct SearchAllStoresOptions<'a> {
-    pub config: &'a Config,
-    pub query: &'a str,
-    pub category: Option<&'a str>,
-    pub limit: i64,
-    pub mode: Option<SearchMode>,
-    pub rerank: Option<bool>,
-    pub include_expired: bool,
-    pub filters: SearchFilters<'a>,
-    pub embeddings: Arc<Mutex<EmbeddingServiceWrapper>>,
-    pub sparse_embeddings: Arc<SparseEmbeddingService>,
-    pub reranker: Arc<RerankerService>,
-}
 
 /// Information about a store
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoreInfo {
     pub name: String,
+    /// Path of the unified DB (same for every store now that all stores
+    /// live in `{stores.directory}/mmry.db`). Kept for callers that
+    /// display where data sits on disk.
     pub path: PathBuf,
-    pub size_bytes: u64,
+    /// Number of memories rows tagged with this store. Replaces the old
+    /// per-file `size_bytes` reading from filesystem metadata.
+    pub memory_count: i64,
     pub is_default: bool,
 }
 
-/// List all available stores
-pub fn list_stores(config: &Config) -> crate::Result<Vec<StoreInfo>> {
-    let stores_dir = &config.stores.directory;
+/// List all stores present in the unified DB. The default store is
+/// always returned, even when empty, so the UI can show it.
+pub async fn list_stores(config: &Config) -> crate::Result<Vec<StoreInfo>> {
+    let unified_path = config.stores.directory.join(UNIFIED_DB_FILENAME);
+    let mut entries: Vec<StoreInfo> = Vec::new();
 
-    if !stores_dir.exists() {
-        return Ok(vec![]);
-    }
-
-    let mut stores = Vec::new();
-
-    for entry in std::fs::read_dir(stores_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().is_some_and(|ext| ext == "db") {
-            if let Some(stem) = path.file_stem() {
-                let name = stem.to_string_lossy().to_string();
-                let metadata = std::fs::metadata(&path)?;
-
-                stores.push(StoreInfo {
-                    is_default: name == config.stores.default,
-                    name,
-                    path,
-                    size_bytes: metadata.len(),
-                });
+    if unified_path.exists() {
+        let db = Database::init_store(config, None).await?;
+        let mut found_default = false;
+        for (name, count) in operations::list_distinct_stores(db.pool()).await? {
+            let is_default = name == config.stores.default;
+            if is_default {
+                found_default = true;
             }
+            entries.push(StoreInfo {
+                name,
+                path: unified_path.clone(),
+                memory_count: count,
+                is_default,
+            });
         }
+        if !found_default {
+            entries.push(StoreInfo {
+                name: config.stores.default.clone(),
+                path: unified_path.clone(),
+                memory_count: 0,
+                is_default: true,
+            });
+        }
+        db.close().await;
+    } else {
+        // No DB yet: the default store is the only thing that exists.
+        entries.push(StoreInfo {
+            name: config.stores.default.clone(),
+            path: unified_path,
+            memory_count: 0,
+            is_default: true,
+        });
     }
 
-    // Sort by name, with default first
-    stores.sort_by(|a, b| {
+    entries.sort_by(|a, b| {
         if a.is_default {
             std::cmp::Ordering::Less
         } else if b.is_default {
@@ -79,43 +71,56 @@ pub fn list_stores(config: &Config) -> crate::Result<Vec<StoreInfo>> {
         }
     });
 
-    Ok(stores)
+    Ok(entries)
 }
 
-/// Check if a store exists
-pub fn store_exists(config: &Config, name: &str) -> bool {
-    config.store_path(name).exists()
-}
-
-/// Delete a store (removes the database file)
-pub fn delete_store(config: &Config, name: &str) -> crate::Result<()> {
-    let path = config.store_path(name);
-
-    if !path.exists() {
-        return Err(crate::Error::Config(format!(
-            "Store '{name}' does not exist"
-        )));
+/// Check if a store has any memories in the unified DB.
+pub async fn store_exists(config: &Config, name: &str) -> crate::Result<bool> {
+    if name == config.stores.default {
+        return Ok(true);
     }
+    let unified_path = config.stores.directory.join(UNIFIED_DB_FILENAME);
+    if !unified_path.exists() {
+        return Ok(false);
+    }
+    let db = Database::init_store(config, None).await?;
+    let count = operations::count_memories_scoped(db.pool(), Some(name)).await?;
+    db.close().await;
+    Ok(count > 0)
+}
 
+/// Delete all memories tagged with the given store.
+pub async fn delete_store(config: &Config, name: &str) -> crate::Result<()> {
     if name == config.stores.default {
         return Err(crate::Error::Config(format!(
             "Cannot delete the default store '{name}'. Change the default store in config first."
         )));
     }
 
-    // Also remove WAL and SHM files if they exist
-    let wal_path = path.with_extension("db-wal");
-    let shm_path = path.with_extension("db-shm");
+    let db = Database::init_store(config, None).await?;
+    let pool = db.pool();
 
-    std::fs::remove_file(&path)?;
+    let deleted = sqlx::query(
+        "DELETE FROM memory_embeddings WHERE memory_id IN (SELECT id FROM memories WHERE store = ?)",
+    )
+    .bind(name)
+    .execute(pool)
+    .await?
+    .rows_affected();
 
-    if wal_path.exists() {
-        let _ = std::fs::remove_file(wal_path);
+    let removed = sqlx::query("DELETE FROM memories WHERE store = ?")
+        .bind(name)
+        .execute(pool)
+        .await?
+        .rows_affected();
+
+    db.close().await;
+
+    if removed == 0 && deleted == 0 {
+        return Err(crate::Error::Config(format!(
+            "Store '{name}' does not exist"
+        )));
     }
-    if shm_path.exists() {
-        let _ = std::fs::remove_file(shm_path);
-    }
-
     Ok(())
 }
 
@@ -154,133 +159,31 @@ pub fn validate_store_name(name: &str) -> crate::Result<()> {
     Ok(())
 }
 
-/// Format bytes as human-readable size
-pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
+/// Format a memory count for display ("123 memories"). Replaces the
+/// old byte-formatter that read per-store file sizes from disk.
+pub fn format_count(count: i64) -> String {
+    if count == 1 {
+        "1 memory".to_string()
     } else {
-        format!("{bytes} B")
+        format!("{count} memories")
     }
 }
 
-/// A memory with its source store name
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MemoryWithStore {
-    #[serde(flatten)]
-    pub memory: Memory,
-    pub store: String,
-}
-
-/// Search across all stores
-pub async fn search_all_stores(
-    opts: SearchAllStoresOptions<'_>,
-) -> crate::Result<Vec<MemoryWithStore>> {
-    let stores = list_stores(opts.config)?;
-
-    if stores.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut all_results = Vec::new();
-
-    for store_info in stores {
-        let db = Database::init_store(opts.config, Some(&store_info.name)).await?;
-        let search_service = SearchService::new(
-            db.pool().clone(),
-            opts.config.search.clone(),
-            Arc::clone(&opts.embeddings),
-            Arc::clone(&opts.sparse_embeddings),
-            Arc::clone(&opts.reranker),
-        );
-
-        let results = search_service
-            .search_with_query_options(SearchQueryOptions {
-                query: opts.query,
-                category: opts.category,
-                limit: opts.limit,
-                mode: opts.mode,
-                rerank: opts.rerank,
-                include_expired: opts.include_expired,
-                filters: SearchFilters {
-                    tags: opts.filters.tags,
-                    memory_type: opts.filters.memory_type.clone(),
-                    min_importance: opts.filters.min_importance,
-                    after: opts.filters.after,
-                    before: opts.filters.before,
-                    workspace_id: opts.filters.workspace_id,
-                    platform_session_id: opts.filters.platform_session_id,
-                    harness_session_id: opts.filters.harness_session_id,
-                },
-            })
-            .await?;
-
-        for memory in results {
-            all_results.push(MemoryWithStore {
-                memory,
-                store: store_info.name.clone(),
-            });
-        }
-
-        db.close().await;
-    }
-
-    // Sort by relevance (assuming search results are already scored, we keep insertion order)
-    // Limit total results
-    all_results.truncate(opts.limit as usize);
-
-    Ok(all_results)
-}
-
-/// List memories from all stores
+/// List memories from every store in the unified DB. Each returned
+/// `Memory` already carries its `store` field — no wrapper needed.
 pub async fn list_all_stores(
     config: &Config,
     category: Option<&str>,
     limit: i64,
-) -> crate::Result<Vec<MemoryWithStore>> {
-    let stores = list_stores(config)?;
-
-    if stores.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut all_results = Vec::new();
-    let per_store_limit = (limit / stores.len() as i64).max(10);
-
-    for store_info in stores {
-        let db = Database::init_store(config, Some(&store_info.name)).await?;
-        let results =
-            crate::database::operations::list_memories(db.pool(), category, per_store_limit)
-                .await?;
-
-        for memory in results {
-            all_results.push(MemoryWithStore {
-                memory,
-                store: store_info.name.clone(),
-            });
-        }
-
-        db.close().await;
-    }
-
-    // Sort by created_at descending
-    all_results.sort_by_key(|b| std::cmp::Reverse(b.memory.created_at));
-
-    // Limit total results
-    all_results.truncate(limit as usize);
-
-    Ok(all_results)
+) -> crate::Result<Vec<Memory>> {
+    let db = Database::init_store(config, None).await?;
+    let memories = operations::list_memories_lean(db.pool(), category, limit).await?;
+    db.close().await;
+    Ok(memories)
 }
 
-/// Move a memory from one store to another
-/// Returns the memory as it exists in the new store
+/// Re-tag a single memory with a different store. Replaces the old
+/// per-file copy+delete dance.
 pub async fn move_memory_to_store(
     config: &Config,
     memory_id: uuid::Uuid,
@@ -293,27 +196,30 @@ pub async fn move_memory_to_store(
         ));
     }
 
-    // Open source store and get the memory
-    let from_db = Database::init_store(config, Some(from_store)).await?;
-    let memory = crate::database::operations::get_memory(from_db.pool(), memory_id)
+    let db = Database::init_store(config, None).await?;
+    let pool = db.pool();
+
+    let mut memory = operations::get_memory(pool, memory_id)
         .await?
-        .ok_or_else(|| {
-            crate::Error::Config(format!(
-                "Memory {memory_id} not found in store '{from_store}'"
-            ))
-        })?;
+        .ok_or_else(|| crate::Error::Config(format!("Memory {memory_id} not found")))?;
+    if memory.store != from_store {
+        db.close().await;
+        return Err(crate::Error::Config(format!(
+            "Memory {memory_id} is not in store '{from_store}' (it is in '{}')",
+            memory.store
+        )));
+    }
 
-    // Open destination store and insert the memory
-    let to_db = Database::init_store(config, Some(to_store)).await?;
-    crate::database::operations::insert_memory(to_db.pool(), &memory).await?;
+    sqlx::query("UPDATE memories SET store = ?, updated_at = ? WHERE id = ?")
+        .bind(to_store)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(memory_id.to_string())
+        .execute(pool)
+        .await?;
+    memory.store = to_store.to_string();
+    memory.updated_at = chrono::Utc::now();
 
-    // Delete from source store
-    crate::database::operations::delete_memory(from_db.pool(), memory_id).await?;
-
-    // Close connections
-    from_db.close().await;
-    to_db.close().await;
-
+    db.close().await;
     Ok(memory)
 }
 
@@ -327,16 +233,6 @@ pub struct ExportedMemory {
     pub category: String,
     pub tags: Vec<String>,
     pub importance: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expired_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_attribution: Option<crate::memory::SourceAttribution>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trust_level: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_reinforcement_score: Option<f32>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -353,11 +249,6 @@ impl From<&Memory> for ExportedMemory {
             category: memory.category.clone(),
             tags: memory.tags.clone(),
             importance: memory.importance,
-            expires_at: memory.expires_at.map(|ts| ts.to_rfc3339()),
-            expired_at: memory.expired_at.map(|ts| ts.to_rfc3339()),
-            source_attribution: memory.source_attribution.clone(),
-            trust_level: Some(memory.trust_level),
-            source_reinforcement_score: Some(memory.source_reinforcement_score),
             created_at: memory.created_at.to_rfc3339(),
             updated_at: memory.updated_at.to_rfc3339(),
             store: None,
@@ -381,13 +272,10 @@ pub async fn export_store_to_json(
     config: &Config,
     store_name: &str,
 ) -> crate::Result<ExportResult> {
-    let db = Database::init_store(config, Some(store_name)).await?;
-    let pool = db.pool();
-
-    // Export memories
-    let memories = crate::database::operations::list_memories(pool, None, i64::MAX).await?;
+    let db = Database::init_store(config, None).await?;
+    let memories =
+        operations::list_memories_scoped(db.pool(), Some(store_name), None, i64::MAX).await?;
     let exported: Vec<ExportedMemory> = memories.iter().map(ExportedMemory::from).collect();
-
     db.close().await;
 
     Ok(ExportResult {
@@ -401,26 +289,18 @@ pub async fn export_store_to_json(
 
 /// Export memories from all stores to JSON
 pub async fn export_all_stores_to_json(config: &Config) -> crate::Result<ExportResult> {
-    let stores = list_stores(config)?;
-    let mut all_memories: Vec<ExportedMemory> = Vec::new();
-
-    for store_info in stores {
-        let db = Database::init_store(config, Some(&store_info.name)).await?;
-        let pool = db.pool();
-
-        let memories = crate::database::operations::list_memories(pool, None, i64::MAX).await?;
-
-        for memory in memories {
-            let mut exported = ExportedMemory::from(&memory);
-            exported.store = Some(store_info.name.clone());
-            all_memories.push(exported);
-        }
-
-        db.close().await;
-    }
-
-    // Sort by created_at descending
+    let db = Database::init_store(config, None).await?;
+    let memories = operations::list_memories(db.pool(), None, i64::MAX).await?;
+    let mut all_memories: Vec<ExportedMemory> = memories
+        .iter()
+        .map(|memory| {
+            let mut exported = ExportedMemory::from(memory);
+            exported.store = Some(memory.store.clone());
+            exported
+        })
+        .collect();
     all_memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    db.close().await;
 
     Ok(ExportResult {
         exported_at: chrono::Utc::now().to_rfc3339(),
@@ -438,7 +318,7 @@ pub fn write_export_to_file(export: &ExportResult, path: &std::path::Path) -> cr
     Ok(())
 }
 
-/// How to handle conflicts when a memory or learning with the same ID
+/// How to handle conflicts when a memory with the same ID
 /// already exists in the destination store.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum ConflictStrategy {
@@ -458,28 +338,20 @@ pub struct TransferResult {
     pub memories_transferred: usize,
     /// Number of memories skipped (already existed in destination).
     pub memories_skipped: usize,
-    /// Number of learnings copied/moved.
-    pub learnings_transferred: usize,
-    /// Number of learnings skipped.
-    pub learnings_skipped: usize,
 }
 
 impl std::fmt::Display for TransferResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} memories transferred, {} skipped; {} learnings transferred, {} skipped",
-            self.memories_transferred,
-            self.memories_skipped,
-            self.learnings_transferred,
-            self.learnings_skipped
+            "{} memories transferred, {} skipped",
+            self.memories_transferred, self.memories_skipped,
         )
     }
 }
 
-/// Copy all content from one store to another.
-///
-/// Both stores must exist. The source store is not modified.
+/// Copy all rows tagged with `from` into the `to` store within the same
+/// unified DB. The source rows are kept; only the destination is changed.
 pub async fn copy_store(
     config: &Config,
     from: &str,
@@ -491,28 +363,19 @@ pub async fn copy_store(
             "Source and destination stores must be different".to_string(),
         ));
     }
-
-    if !store_exists(config, from) {
+    if !store_exists(config, from).await? {
         return Err(crate::Error::Config(format!(
             "Source store '{from}' does not exist"
         )));
     }
-
-    let from_db = Database::init_store(config, Some(from)).await?;
-    let to_db = Database::init_store(config, Some(to)).await?;
-
-    let result = transfer_contents(from_db.pool(), to_db.pool(), strategy).await?;
-
-    from_db.close().await;
-    to_db.close().await;
-
+    let db = Database::init_store(config, None).await?;
+    let result = transfer_within_pool(db.pool(), from, to, strategy, false).await?;
+    db.close().await;
     Ok(result)
 }
 
-/// Move all content from one store to another.
-///
-/// Copies everything to the destination, then deletes all content from
-/// the source. The source store (database file) is kept but will be empty.
+/// Move all rows tagged with `from` to `to` within the same unified DB.
+/// Equivalent to an UPDATE on the store column.
 pub async fn move_store(
     config: &Config,
     from: &str,
@@ -524,43 +387,56 @@ pub async fn move_store(
             "Source and destination stores must be different".to_string(),
         ));
     }
-
-    if !store_exists(config, from) {
+    if !store_exists(config, from).await? {
         return Err(crate::Error::Config(format!(
             "Source store '{from}' does not exist"
         )));
     }
-
-    let from_db = Database::init_store(config, Some(from)).await?;
-    let to_db = Database::init_store(config, Some(to)).await?;
-
-    let result = transfer_contents(from_db.pool(), to_db.pool(), strategy).await?;
-
-    // Clear the source store
-    clear_store_contents(from_db.pool()).await?;
-
-    from_db.close().await;
-    to_db.close().await;
-
+    let db = Database::init_store(config, None).await?;
+    let result = transfer_within_pool(db.pool(), from, to, strategy, true).await?;
+    db.close().await;
     Ok(result)
 }
 
-/// Transfer all memories and learnings from one pool to another.
-async fn transfer_contents(
-    from: &sqlx::SqlitePool,
-    to: &sqlx::SqlitePool,
+/// Shared implementation for `copy_store` / `move_store` operating
+/// against the single unified DB.
+///
+/// - `remove_source = false` → COPY: insert duplicated rows tagged with
+///   `to`, generating new ids so the source rows stay intact.
+/// - `remove_source = true` → MOVE: simply re-tag the source rows via
+///   `UPDATE store = to`, which is one statement and preserves ids.
+async fn transfer_within_pool(
+    pool: &sqlx::SqlitePool,
+    from: &str,
+    to: &str,
     strategy: ConflictStrategy,
+    remove_source: bool,
 ) -> crate::Result<TransferResult> {
     let mut result = TransferResult::default();
 
-    // Transfer memories
-    let memories = crate::database::operations::list_memories(from, None, i64::MAX).await?;
-
-    for memory in &memories {
-        let exists = crate::database::operations::get_memory(to, memory.id)
+    if remove_source {
+        // Move: UPDATE WHERE store=from. Conflict strategy is meaningless
+        // here because ids are globally unique in the table — re-tagging
+        // never produces an id collision.
+        let _ = strategy;
+        let updated = sqlx::query("UPDATE memories SET store = ? WHERE store = ?")
+            .bind(to)
+            .bind(from)
+            .execute(pool)
             .await?
-            .is_some();
+            .rows_affected();
+        result.memories_transferred = updated as usize;
+        return Ok(result);
+    }
 
+    // Copy: the row in `from` already has a uuid stored in `memories.id`,
+    // so copying with the same id would collide with itself. We mint a
+    // fresh id per copy, keeping behavior consistent with the old
+    // per-file copy that used INSERT OR <strategy>.
+    let source = operations::list_memories_scoped(pool, Some(from), None, i64::MAX).await?;
+    for memory in &source {
+        let dest_id = uuid::Uuid::new_v4();
+        let exists = operations::get_memory(pool, dest_id).await?.is_some();
         if exists {
             match strategy {
                 ConflictStrategy::Skip => {
@@ -568,76 +444,22 @@ async fn transfer_contents(
                     continue;
                 }
                 ConflictStrategy::Overwrite => {
-                    crate::database::operations::delete_memory(to, memory.id).await?;
+                    operations::delete_memory(pool, dest_id).await?;
                 }
                 ConflictStrategy::Fail => {
                     return Err(crate::Error::Config(format!(
-                        "Memory {} already exists in destination store",
-                        memory.id
+                        "Memory {dest_id} already exists in destination store"
                     )));
                 }
             }
         }
-
-        if let Err(e) = crate::database::operations::insert_memory(to, memory).await {
-            warn!("Failed to transfer memory {}: {e}", memory.id);
-            continue;
-        }
+        let mut copy = memory.clone();
+        copy.id = dest_id;
+        copy.store = to.to_string();
+        operations::insert_memory(pool, &copy).await?;
         result.memories_transferred += 1;
     }
-
-    // Transfer learnings
-    let learnings = crate::database::operations::list_learnings(from, None, None, i64::MAX).await?;
-
-    for learning in &learnings {
-        let exists = crate::database::operations::get_learning(to, learning.id)
-            .await?
-            .is_some();
-
-        if exists {
-            match strategy {
-                ConflictStrategy::Skip => {
-                    result.learnings_skipped += 1;
-                    continue;
-                }
-                ConflictStrategy::Overwrite => {
-                    // upsert_learning handles ON CONFLICT, so we can just proceed
-                }
-                ConflictStrategy::Fail => {
-                    return Err(crate::Error::Config(format!(
-                        "Learning {} already exists in destination store",
-                        learning.id
-                    )));
-                }
-            }
-        }
-
-        if let Err(e) = crate::database::operations::upsert_learning(to, learning).await {
-            warn!("Failed to transfer learning {}: {e}", learning.id);
-            continue;
-        }
-        result.learnings_transferred += 1;
-    }
-
     Ok(result)
-}
-
-/// Delete all content from a store (memories, embeddings, learnings, feedback).
-async fn clear_store_contents(pool: &sqlx::SqlitePool) -> crate::Result<()> {
-    // Order matters: delete from dependent tables first
-    sqlx::query("DELETE FROM memory_embeddings")
-        .execute(pool)
-        .await?;
-    sqlx::query("DELETE FROM learning_feedback")
-        .execute(pool)
-        .await?;
-    sqlx::query("DELETE FROM agent_events")
-        .execute(pool)
-        .await?;
-    sqlx::query("DELETE FROM learnings").execute(pool).await?;
-    sqlx::query("DELETE FROM agents").execute(pool).await?;
-    sqlx::query("DELETE FROM memories").execute(pool).await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -664,12 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn test_format_size() {
-        assert_eq!(format_size(500), "500 B");
-        assert_eq!(format_size(1024), "1.00 KB");
-        assert_eq!(format_size(1536), "1.50 KB");
-        assert_eq!(format_size(1048576), "1.00 MB");
-        assert_eq!(format_size(1073741824), "1.00 GB");
+    fn test_format_count() {
+        assert_eq!(format_count(0), "0 memories");
+        assert_eq!(format_count(1), "1 memory");
+        assert_eq!(format_count(42), "42 memories");
     }
 
     use crate::database::operations;
@@ -689,123 +509,71 @@ mod tests {
         pool
     }
 
-    fn make_memory(content: &str) -> Memory {
-        Memory::new(
+    fn make_memory_in_store(content: &str, store: &str) -> Memory {
+        let mut m = Memory::new(
             MemoryType::Episodic,
             content.to_string(),
             "default".to_string(),
-        )
+        );
+        m.store = store.to_string();
+        m
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn transfer_copies_memories() -> crate::Result<()> {
-        let src = test_pool().await;
-        let dst = test_pool().await;
+    async fn move_within_pool_retags_rows() -> crate::Result<()> {
+        let pool = test_pool().await;
+        operations::insert_memory(&pool, &make_memory_in_store("a", "src")).await?;
+        operations::insert_memory(&pool, &make_memory_in_store("b", "src")).await?;
+        operations::insert_memory(&pool, &make_memory_in_store("kept", "other")).await?;
 
-        let m1 = make_memory("first memory");
-        let m2 = make_memory("second memory");
-        operations::insert_memory(&src, &m1).await?;
-        operations::insert_memory(&src, &m2).await?;
-
-        let result = transfer_contents(&src, &dst, ConflictStrategy::Skip).await?;
-
+        let result =
+            transfer_within_pool(&pool, "src", "dst", ConflictStrategy::Skip, true).await?;
         assert_eq!(result.memories_transferred, 2);
-        assert_eq!(result.memories_skipped, 0);
 
-        let dst_memories = operations::list_memories(&dst, None, 100).await?;
-        assert_eq!(dst_memories.len(), 2);
+        let dst = operations::list_memories_scoped(&pool, Some("dst"), None, 100).await?;
+        assert_eq!(dst.len(), 2);
+        let src = operations::list_memories_scoped(&pool, Some("src"), None, 100).await?;
+        assert_eq!(src.len(), 0);
+        let other = operations::list_memories_scoped(&pool, Some("other"), None, 100).await?;
+        assert_eq!(other.len(), 1);
 
-        // Source untouched
-        let src_memories = operations::list_memories(&src, None, 100).await?;
-        assert_eq!(src_memories.len(), 2);
-
-        src.close().await;
-        dst.close().await;
+        pool.close().await;
         Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn transfer_skip_duplicates() -> crate::Result<()> {
-        let src = test_pool().await;
-        let dst = test_pool().await;
+    async fn copy_within_pool_preserves_source() -> crate::Result<()> {
+        let pool = test_pool().await;
+        operations::insert_memory(&pool, &make_memory_in_store("a", "src")).await?;
 
-        let m = make_memory("shared memory");
-        operations::insert_memory(&src, &m).await?;
-        operations::insert_memory(&dst, &m).await?;
-
-        let result = transfer_contents(&src, &dst, ConflictStrategy::Skip).await?;
-
-        assert_eq!(result.memories_transferred, 0);
-        assert_eq!(result.memories_skipped, 1);
-
-        src.close().await;
-        dst.close().await;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn transfer_overwrite_replaces() -> crate::Result<()> {
-        let src = test_pool().await;
-        let dst = test_pool().await;
-
-        let mut m = make_memory("original");
-        operations::insert_memory(&dst, &m).await?;
-
-        m.content = "updated content".to_string();
-        operations::insert_memory(&src, &m).await?;
-
-        let result = transfer_contents(&src, &dst, ConflictStrategy::Overwrite).await?;
-
-        assert_eq!(result.memories_transferred, 1);
-        assert_eq!(result.memories_skipped, 0);
-
-        let fetched = operations::get_memory(&dst, m.id).await?.unwrap();
-        assert_eq!(fetched.content, "updated content");
-
-        src.close().await;
-        dst.close().await;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn transfer_fail_on_conflict() -> crate::Result<()> {
-        let src = test_pool().await;
-        let dst = test_pool().await;
-
-        let m = make_memory("conflict");
-        operations::insert_memory(&src, &m).await?;
-        operations::insert_memory(&dst, &m).await?;
-
-        let err = transfer_contents(&src, &dst, ConflictStrategy::Fail).await;
-        assert!(err.is_err());
-
-        src.close().await;
-        dst.close().await;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn move_clears_source() -> crate::Result<()> {
-        let src = test_pool().await;
-        let dst = test_pool().await;
-
-        let m = make_memory("to be moved");
-        operations::insert_memory(&src, &m).await?;
-
-        let result = transfer_contents(&src, &dst, ConflictStrategy::Skip).await?;
+        let result =
+            transfer_within_pool(&pool, "src", "dst", ConflictStrategy::Skip, false).await?;
         assert_eq!(result.memories_transferred, 1);
 
-        clear_store_contents(&src).await?;
+        let src = operations::list_memories_scoped(&pool, Some("src"), None, 100).await?;
+        assert_eq!(src.len(), 1);
+        let dst = operations::list_memories_scoped(&pool, Some("dst"), None, 100).await?;
+        assert_eq!(dst.len(), 1);
+        assert_ne!(src[0].id, dst[0].id);
+        assert_eq!(src[0].content, dst[0].content);
 
-        let remaining = operations::list_memories(&src, None, 100).await?;
-        assert_eq!(remaining.len(), 0);
+        pool.close().await;
+        Ok(())
+    }
 
-        let moved = operations::list_memories(&dst, None, 100).await?;
-        assert_eq!(moved.len(), 1);
-        assert_eq!(moved[0].id, m.id);
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_distinct_stores_aggregates_by_tag() -> crate::Result<()> {
+        let pool = test_pool().await;
+        operations::insert_memory(&pool, &make_memory_in_store("a", "alpha")).await?;
+        operations::insert_memory(&pool, &make_memory_in_store("b", "alpha")).await?;
+        operations::insert_memory(&pool, &make_memory_in_store("c", "beta")).await?;
 
-        src.close().await;
-        dst.close().await;
+        let stores = operations::list_distinct_stores(&pool).await?;
+        assert_eq!(
+            stores,
+            vec![("alpha".to_string(), 2), ("beta".to_string(), 1)]
+        );
+        pool.close().await;
         Ok(())
     }
 }

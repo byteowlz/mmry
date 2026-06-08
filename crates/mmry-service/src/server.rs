@@ -28,7 +28,6 @@ use mmry_core::reranker::RerankScore;
 use mmry_core::search::SearchFilters;
 use mmry_core::search::SearchQueryOptions;
 use mmry_core::search::SearchService;
-use mmry_core::stores::list_stores;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
@@ -472,75 +471,20 @@ impl EmbeddingService for EmbeddingServiceImpl {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
         };
 
-        let results = if store.as_deref() == Some("all") {
-            let mut merged = Vec::new();
-            let store_infos =
-                list_stores(&self.state.config).map_err(|e| Status::internal(e.to_string()))?;
-
-            for store_info in store_infos {
-                let db = Database::init_store(&self.state.config, Some(&store_info.name))
-                    .await
-                    .map_err(|e| Status::internal(format!("Failed to open store: {e}")))?;
-                let search_service = SearchService::new(
-                    db.pool().clone(),
-                    self.state.search_config(),
-                    Arc::clone(&self.state.embeddings_wrapper),
-                    Arc::clone(&self.state.sparse_embeddings),
-                    Arc::clone(&self.state.reranker),
-                );
-
-                let filters = SearchFilters {
-                    tags: if tags.is_empty() { None } else { Some(&tags) },
-                    memory_type: memory_type.clone(),
-                    min_importance,
-                    after,
-                    before,
-                    workspace_id: None,
-                    platform_session_id: None,
-                    harness_session_id: None,
-                };
-
-                let mut results = search_service
-                    .search_with_query_options(SearchQueryOptions {
-                        query: &req.query,
-                        category: category.as_deref(),
-                        limit,
-                        mode: Some(mode),
-                        rerank: Some(req.rerank),
-                        include_expired: req.include_expired,
-                        filters,
-                    })
-                    .await
-                    .map_err(|e| Status::internal(format!("Search failed: {e}")))?;
-
-                merged.append(&mut results);
-                db.close().await;
-            }
-
-            merged.sort_by_key(|memory| std::cmp::Reverse(memory.created_at));
-            merged.truncate(limit.max(1) as usize);
-            merged
-        } else {
-            let (pool, db_guard) = if let Some(store_name) = store.as_deref() {
-                if store_name == self.state.config.stores.default {
-                    (self.state.db.pool().clone(), None)
-                } else {
-                    let db = Database::init_store(&self.state.config, Some(store_name))
-                        .await
-                        .map_err(|e| Status::internal(format!("Failed to open store: {e}")))?;
-                    (db.pool().clone(), Some(db))
-                }
-            } else {
-                (self.state.db.pool().clone(), None)
+        let results = {
+            let store_scope: Option<&str> = match store.as_deref() {
+                Some("all") | None => None,
+                Some(name) => Some(name),
             };
 
-            let search_service = SearchService::new(
-                pool,
+            let mut search_service = SearchService::new(
+                self.state.db.pool().clone(),
                 self.state.search_config(),
                 Arc::clone(&self.state.embeddings_wrapper),
                 Arc::clone(&self.state.sparse_embeddings),
                 Arc::clone(&self.state.reranker),
             );
+            search_service = search_service.with_store(store_scope.map(str::to_string));
 
             let filters = SearchFilters {
                 tags: if tags.is_empty() { None } else { Some(&tags) },
@@ -553,24 +497,17 @@ impl EmbeddingService for EmbeddingServiceImpl {
                 harness_session_id: None,
             };
 
-            let results = search_service
+            search_service
                 .search_with_query_options(SearchQueryOptions {
                     query: &req.query,
                     category: category.as_deref(),
                     limit,
                     mode: Some(mode),
                     rerank: Some(req.rerank),
-                    include_expired: req.include_expired,
                     filters,
                 })
                 .await
-                .map_err(|e| Status::internal(format!("Search failed: {e}")))?;
-
-            if let Some(db) = db_guard {
-                db.close().await;
-            }
-
-            results
+                .map_err(|e| Status::internal(format!("Search failed: {e}")))?
         };
 
         let memories = results
@@ -596,18 +533,6 @@ impl EmbeddingService for EmbeddingServiceImpl {
                         .unwrap_or_default(),
                     chunk_index: memory.chunk_index.unwrap_or_default(),
                     total_chunks: memory.total_chunks.unwrap_or_default(),
-                    chunk_method: memory
-                        .chunk_method
-                        .map(|m| format!("{:?}", m))
-                        .unwrap_or_default(),
-                    expires_at: memory
-                        .expires_at
-                        .map(|t| t.to_rfc3339())
-                        .unwrap_or_default(),
-                    expired_at: memory
-                        .expired_at
-                        .map(|t| t.to_rfc3339())
-                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -862,11 +787,8 @@ async fn memory_create_handler(
         sparse_embedding: None,
         metadata: serde_json::json!({}),
         importance: payload.importance.unwrap_or(5),
-        expires_at: None,
-        expired_at: None,
-        source_attribution: None,
-        trust_level: 1.0,
-        source_reinforcement_score: 0.0,
+        helpful_count: 0,
+        harmful_count: 0,
         created_at: now,
         updated_at: now,
         category: payload.category,
@@ -874,8 +796,7 @@ async fn memory_create_handler(
         parent_id: None,
         chunk_index: None,
         total_chunks: None,
-        chunk_method: None,
-        bridge_block_id: None,
+        store: store.unwrap_or("default").to_string(),
     };
 
     AgentCtx::from_env().merge_into_metadata(&mut memory.metadata);
@@ -1050,6 +971,7 @@ async fn stores_list_handler(
     app_state.state.record_activity().await;
 
     let stores = mmry_core::stores::list_stores(&app_state.state.config)
+        .await
         .map_err(|e| ApiError::internal(format!("Failed to list stores: {e}")))?;
 
     let default_store = app_state.state.config.stores.default.clone();

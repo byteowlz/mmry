@@ -1,5 +1,4 @@
 use crate::config::ExternalApiConfig;
-use crate::memory::ChunkMethod;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
 use crate::service::manager::ServiceManager;
@@ -107,7 +106,6 @@ pub struct DaemonSearchOptions<'a> {
     pub limit: i64,
     pub mode: crate::config::SearchMode,
     pub rerank: bool,
-    pub include_expired: bool,
     pub store: Option<&'a str>,
     /// Filter by tags (memory must contain at least one)
     pub tags: Vec<String>,
@@ -357,7 +355,6 @@ impl DaemonClient {
             mode: search_mode_to_proto(opts.mode) as i32,
             rerank: opts.rerank,
             store: opts.store.unwrap_or_default().to_string(),
-            include_expired: opts.include_expired,
             tags: opts.tags,
             memory_type: opts.memory_type.unwrap_or_default(),
             min_importance: opts.min_importance.unwrap_or(0),
@@ -407,22 +404,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
             })?)
         };
 
-    let chunk_method = if mem.chunk_method.is_empty() {
-        None
-    } else {
-        match mem.chunk_method.as_str() {
-            "none" => Some(ChunkMethod::None),
-            "paragraph" => Some(ChunkMethod::Paragraph),
-            "sentence" => Some(ChunkMethod::Sentence),
-            "word" => Some(ChunkMethod::Word),
-            other => {
-                return Err(crate::Error::Service(format!(
-                    "Unknown chunk_method in response: {other}"
-                )))
-            }
-        }
-    };
-
     let sparse_embedding = mem.sparse_embedding.and_then(|sparse| {
         if sparse.indices.is_empty() {
             None
@@ -433,26 +414,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
             })
         }
     });
-
-    let expires_at = if mem.expires_at.is_empty() {
-        None
-    } else {
-        Some(
-            chrono::DateTime::parse_from_rfc3339(&mem.expires_at)
-                .map_err(|e| crate::Error::Service(format!("Invalid expires_at: {e}")))?
-                .with_timezone(&chrono::Utc),
-        )
-    };
-
-    let expired_at = if mem.expired_at.is_empty() {
-        None
-    } else {
-        Some(
-            chrono::DateTime::parse_from_rfc3339(&mem.expired_at)
-                .map_err(|e| crate::Error::Service(format!("Invalid expired_at: {e}")))?
-                .with_timezone(&chrono::Utc),
-        )
-    };
 
     Ok(Memory {
         id: Uuid::parse_str(&mem.id)
@@ -468,11 +429,8 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         metadata: serde_json::from_str(&mem.metadata_json)
             .unwrap_or_else(|_| serde_json::json!({})),
         importance: mem.importance,
-        expires_at,
-        expired_at,
-        source_attribution: None,
-        trust_level: 0.5,
-        source_reinforcement_score: 0.0,
+        helpful_count: 0,
+        harmful_count: 0,
         created_at: chrono::DateTime::parse_from_rfc3339(&mem.created_at)
             .map_err(|e| crate::Error::Service(format!("Invalid created_at: {e}")))?
             .with_timezone(&chrono::Utc),
@@ -492,7 +450,6 @@ fn memory_from_proto(mem: proto::MemoryResult) -> Result<Memory> {
         } else {
             Some(mem.total_chunks)
         },
-        chunk_method,
-        bridge_block_id: None,
+        store: "default".to_string(),
     })
 }

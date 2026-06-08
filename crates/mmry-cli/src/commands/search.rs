@@ -14,7 +14,6 @@ use mmry_core::search::SearchQueryOptions;
 use mmry_core::search::SearchService;
 use mmry_core::service::client::DaemonClient;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
-use mmry_core::stores;
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum CliSearchMode {
@@ -69,9 +68,6 @@ pub struct SearchCmd {
     #[arg(long, help = "Include full embeddings in JSON output")]
     pub full: bool,
 
-    #[arg(long, help = "Include expired memories in results")]
-    pub include_expired: bool,
-
     #[arg(long, help = "Filter by tag (can be specified multiple times)")]
     pub tag: Vec<String>,
 
@@ -101,6 +97,10 @@ pub struct SearchCmd {
 
     #[arg(long, help = "Filter by AGENT_CTX_HARNESS_SESSION_ID")]
     pub harness_session_id: Option<String>,
+
+    /// Use the legacy SQLite/indexed backend instead of .mmry/mmry.jsonl.
+    #[arg(long)]
+    pub indexed: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -141,6 +141,42 @@ fn parse_datetime(s: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
     )
 }
 
+pub async fn handle_jsonl(cmd: SearchCmd, config: &Config) -> anyhow::Result<()> {
+    let limit = cmd.limit.unwrap_or(config.search.default_limit as i64) as usize;
+    let memory_file = mmry_core::memory_file::MemoryFile::open_current()?;
+    let mut hits = memory_file.search(&cmd.query, limit)?;
+    if !cmd.tag.is_empty() {
+        hits.retain(|hit| {
+            cmd.tag
+                .iter()
+                .all(|tag| hit.memory.tags.iter().any(|memory_tag| memory_tag == tag))
+        });
+    }
+    if cmd.json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("No memories found");
+        return Ok(());
+    }
+    println!("Found {} memories:\n", hits.len());
+    for (index, hit) in hits.iter().enumerate() {
+        println!(
+            "{}. [{}] score {}",
+            index + 1,
+            hit.memory.memory_id,
+            hit.score
+        );
+        println!("   {}", hit.memory.content);
+        if !hit.memory.tags.is_empty() {
+            println!("   Tags: {}", hit.memory.tags.join(", "));
+        }
+        println!();
+    }
+    Ok(())
+}
+
 pub async fn handle(
     cmd: SearchCmd,
     config: &Config,
@@ -153,48 +189,33 @@ pub async fn handle(
     let (resolved_mode, limit, rerank) = resolve_search_opts(&cmd, config);
     let filters = build_filters(&cmd)?;
 
-    if store == Some("all") {
-        let results = stores::search_all_stores(stores::SearchAllStoresOptions {
-            config,
+    let show_store = store == Some("all");
+    let store_scope = match store {
+        Some("all") | None => None,
+        Some(name) => Some(name),
+    };
+
+    let mut search_service = SearchService::new(
+        db.pool().clone(),
+        config.search.clone(),
+        embeddings,
+        sparse_embeddings,
+        reranker,
+    );
+    search_service = search_service.with_store(store_scope.map(str::to_string));
+
+    let results = search_service
+        .search_with_query_options(SearchQueryOptions {
             query: &cmd.query,
             category: cmd.category.as_deref(),
             limit,
             mode: Some(resolved_mode),
             rerank: Some(rerank),
-            include_expired: cmd.include_expired,
             filters,
-            embeddings,
-            sparse_embeddings,
-            reranker,
         })
         .await?;
 
-        render_results_with_store(&results, resolved_mode, &cmd)?;
-        return Ok(());
-    }
-
-    let results = {
-        let search_service = SearchService::new(
-            db.pool().clone(),
-            config.search.clone(),
-            embeddings,
-            sparse_embeddings,
-            reranker,
-        );
-        search_service
-            .search_with_query_options(SearchQueryOptions {
-                query: &cmd.query,
-                category: cmd.category.as_deref(),
-                limit,
-                mode: Some(resolved_mode),
-                rerank: Some(rerank),
-                include_expired: cmd.include_expired,
-                filters,
-            })
-            .await?
-    };
-
-    render_results(&results, resolved_mode, &cmd)?;
+    render_results(&results, resolved_mode, &cmd, show_store)?;
 
     Ok(())
 }
@@ -224,7 +245,6 @@ pub async fn handle_remote(
             limit,
             mode: resolved_mode,
             rerank,
-            include_expired: cmd.include_expired,
             store,
             tags: cmd.tag.clone(),
             memory_type: cmd.r#type.clone().map(|t| format!("{t:?}").to_lowercase()),
@@ -234,7 +254,7 @@ pub async fn handle_remote(
         })
         .await?;
 
-    render_results(&results, resolved_mode, &cmd)?;
+    render_results(&results, resolved_mode, &cmd, store == Some("all"))?;
 
     Ok(())
 }
@@ -282,53 +302,11 @@ fn resolve_search_opts(cmd: &SearchCmd, config: &Config) -> (SearchMode, i64, bo
     (resolved_mode, limit, rerank)
 }
 
-fn render_results(results: &[Memory], mode: SearchMode, cmd: &SearchCmd) -> anyhow::Result<()> {
-    if cmd.json {
-        let memories = if cmd.full {
-            serde_json::to_value(results)?
-        } else {
-            results
-                .iter()
-                .map(|memory| memory_to_standard_json(memory, None))
-                .collect::<serde_json::Value>()
-        };
-
-        let mut output = serde_json::Map::new();
-        output.insert("memories".to_string(), memories);
-        let json = serde_json::to_string_pretty(&output)?;
-        println!("{json}");
-        return Ok(());
-    }
-
-    if results.is_empty() {
-        println!("No memories found matching '{}'", cmd.query);
-        return Ok(());
-    }
-
-    let mode_str = format!("{mode:?}");
-    println!("Found {} memories (mode: {}):\n", results.len(), mode_str);
-
-    for (i, memory) in results.iter().enumerate() {
-        println!("{}. [{}] {:?}", i + 1, memory.id, memory.memory_type);
-        println!("   {}", memory.content);
-        if !memory.tags.is_empty() {
-            println!("   Tags: {}", memory.tags.join(", "));
-        }
-        println!(
-            "   Importance: {} | Created: {}",
-            memory.importance,
-            memory.created_at.format("%Y-%m-%d %H:%M")
-        );
-        println!();
-    }
-
-    Ok(())
-}
-
-fn render_results_with_store(
-    results: &[stores::MemoryWithStore],
+fn render_results(
+    results: &[Memory],
     mode: SearchMode,
     cmd: &SearchCmd,
+    show_store: bool,
 ) -> anyhow::Result<()> {
     if cmd.json {
         let memories = if cmd.full {
@@ -336,7 +314,14 @@ fn render_results_with_store(
         } else {
             results
                 .iter()
-                .map(|result| memory_to_standard_json(&result.memory, Some(&result.store)))
+                .map(|memory| {
+                    let store = if show_store {
+                        Some(memory.store.as_str())
+                    } else {
+                        None
+                    };
+                    memory_to_standard_json(memory, store)
+                })
                 .collect::<serde_json::Value>()
         };
 
@@ -353,21 +338,25 @@ fn render_results_with_store(
     }
 
     let mode_str = format!("{mode:?}");
+    let scope = if show_store { " across all stores" } else { "" };
     println!(
-        "Found {} memories across all stores (mode: {}):\n",
+        "Found {} memories{scope} (mode: {}):\n",
         results.len(),
         mode_str
     );
 
-    for (i, result) in results.iter().enumerate() {
-        let memory = &result.memory;
-        println!(
-            "{}. [{}] {:?} (store: {})",
-            i + 1,
-            memory.id,
-            memory.memory_type,
-            result.store
-        );
+    for (i, memory) in results.iter().enumerate() {
+        if show_store {
+            println!(
+                "{}. [{}] {:?} (store: {})",
+                i + 1,
+                memory.id,
+                memory.memory_type,
+                memory.store
+            );
+        } else {
+            println!("{}. [{}] {:?}", i + 1, memory.id, memory.memory_type);
+        }
         println!("   {}", memory.content);
         if !memory.tags.is_empty() {
             println!("   Tags: {}", memory.tags.join(", "));

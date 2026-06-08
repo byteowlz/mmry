@@ -10,7 +10,6 @@ use mcp_spec::resource::Resource;
 use mcp_spec::tool::Tool;
 use mcp_spec::ResourceContents;
 use mmry_core::agent_ctx::AgentCtx;
-use mmry_core::agents::AgentIdentity;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::operations;
@@ -18,8 +17,6 @@ use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::memory::Memory;
 use mmry_core::memory::MemoryType;
-use mmry_core::memory::SourceEntry;
-use mmry_core::memory::SourceKind;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchFilters;
 use mmry_core::search::SearchQueryOptions;
@@ -88,33 +85,6 @@ struct MemoryIdArgs {
 }
 
 #[derive(Debug, Deserialize)]
-struct MemoryProvenanceArgs {
-    id: String,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MemorySourceArgs {
-    id: String,
-    source: SourceInput,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SourceInput {
-    kind: String,
-    #[serde(default)]
-    label: Option<String>,
-    trust: f32,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    reference: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct MemoryAddArgs {
     content: String,
     #[serde(default)]
@@ -131,12 +101,6 @@ struct MemoryAddArgs {
     sparse_embed: Option<bool>,
     #[serde(default)]
     store: Option<String>,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    agent_kind: Option<String>,
-    #[serde(default)]
-    agent_meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,14 +116,6 @@ struct MemoryUpdateArgs {
     importance: Option<i32>,
     #[serde(default)]
     clear_embeddings: Option<bool>,
-    #[serde(default)]
-    store: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgentEventsListArgs {
-    #[serde(default)]
-    limit: Option<i64>,
     #[serde(default)]
     store: Option<String>,
 }
@@ -274,43 +230,6 @@ impl MmryMcpRouter {
         }
     }
 
-    fn parse_source_entry(input: SourceInput) -> Result<SourceEntry, ToolError> {
-        if !(0.0..=1.0).contains(&input.trust) {
-            return Err(ToolError::InvalidParameters(
-                "trust must be between 0 and 1".to_string(),
-            ));
-        }
-
-        let kind = input.kind.to_lowercase();
-        match kind.as_str() {
-            "user" => Ok(SourceEntry::user(
-                input.label.as_deref().unwrap_or("direct_input"),
-                input.trust,
-            )),
-            "llm" => Ok(SourceEntry::llm(
-                input.label.as_deref().unwrap_or("inference"),
-                input.trust,
-                input.model,
-            )),
-            "external" => {
-                let reference = input.reference.ok_or_else(|| {
-                    ToolError::InvalidParameters("external sources require reference".to_string())
-                })?;
-                Ok(SourceEntry::external(&reference, input.trust))
-            }
-            "system" => Ok(SourceEntry {
-                kind: SourceKind::System,
-                label: input.label,
-                trust: input.trust,
-                model: input.model,
-                reference: input.reference,
-            }),
-            other => Err(ToolError::InvalidParameters(format!(
-                "Invalid source kind '{other}' (expected user|llm|external|system)"
-            ))),
-        }
-    }
-
     fn classify_memory(content: &str) -> MemoryType {
         let content_lower = content.to_lowercase();
         if content_lower.contains("step")
@@ -380,7 +299,6 @@ impl MmryMcpRouter {
                 limit,
                 mode,
                 rerank: args.rerank,
-                include_expired: false,
                 filters,
             })
             .await
@@ -419,33 +337,6 @@ impl MmryMcpRouter {
         )
     }
 
-    async fn tool_memory_provenance(
-        &self,
-        args: MemoryProvenanceArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let id = Self::parse_uuid("id", &args.id)?;
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let memory = operations::get_memory(&pool, id)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?
-            .ok_or_else(|| ToolError::NotFound(format!("Memory {id} not found")))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/memory/provenance",
-            json!({
-                "store": store,
-                "memory_id": id.to_string(),
-                "source_attribution": memory.source_attribution,
-                "trust_level": memory.trust_level,
-                "source_reinforcement_score": memory.source_reinforcement_score,
-            }),
-        )
-    }
-
     async fn tool_memory_add(&self, args: MemoryAddArgs) -> Result<Vec<Content>, ToolError> {
         if args.content.trim().is_empty() {
             return Err(ToolError::InvalidParameters(
@@ -456,21 +347,6 @@ impl MmryMcpRouter {
         let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
 
         let ctx = &self.inner.agent_ctx;
-        let mut agent_meta = args.agent_meta.unwrap_or(Value::Null);
-        ctx.enrich_agent_meta(&mut agent_meta);
-        let agent_identity = AgentIdentity {
-            name: args.agent.or_else(|| ctx.default_agent_name()),
-            kind: args.agent_kind.or_else(|| ctx.default_agent_kind()),
-            meta: if agent_meta.is_null() {
-                None
-            } else {
-                Some(agent_meta)
-            },
-        };
-        let agent = agent_identity
-            .resolve(&pool)
-            .await
-            .map_err(|e| ToolError::ExecutionError(format!("agent resolution failed: {e}")))?;
 
         let category = args
             .category
@@ -524,35 +400,6 @@ impl MmryMcpRouter {
             json!({
                 "store": store,
                 "memory": Self::strip_embeddings(memory),
-                "agent": { "name": agent.name, "kind": agent.kind, "meta": agent.metadata },
-            }),
-        )
-    }
-
-    async fn tool_memory_source_add(
-        &self,
-        args: MemorySourceArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let id = Self::parse_uuid("id", &args.id)?;
-        let source = Self::parse_source_entry(args.source)?;
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-
-        let memory = operations::add_memory_source(&pool, id, source)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/memory/source/add",
-            json!({
-                "store": store,
-                "memory_id": id.to_string(),
-                "source_attribution": memory.source_attribution,
-                "trust_level": memory.trust_level,
-                "source_reinforcement_score": memory.source_reinforcement_score,
             }),
         )
     }
@@ -628,6 +475,7 @@ impl MmryMcpRouter {
 
     async fn tool_stores_list(&self) -> Result<Vec<Content>, ToolError> {
         let stores = mmry_core::stores::list_stores(&self.inner.config)
+            .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
 
         self.json_content(
@@ -636,29 +484,9 @@ impl MmryMcpRouter {
                 "stores": stores.iter().map(|s| json!({
                     "name": s.name,
                     "is_default": s.is_default,
-                    "size_bytes": s.size_bytes,
+                    "memory_count": s.memory_count,
                 })).collect::<Vec<_>>(),
             }),
-        )
-    }
-
-    async fn tool_agent_events_list(
-        &self,
-        args: AgentEventsListArgs,
-    ) -> Result<Vec<Content>, ToolError> {
-        let (pool, db_guard, store) = self.pool_for_store(args.store.as_deref()).await?;
-        let limit = args.limit.unwrap_or(50).max(1);
-        let events = operations::list_agent_events(&pool, limit)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(db) = db_guard {
-            db.close().await;
-        }
-
-        self.json_content(
-            "mmry://tools/agent_events/list",
-            json!({ "store": store, "agent_events": events }),
         )
     }
 }
@@ -724,19 +552,6 @@ impl mcp_server::Router for MmryMcpRouter {
                 }),
             ),
             Tool::new(
-                "mmry.memory.provenance.get",
-                "Fetch provenance and trust metadata for a memory.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "required": ["id"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
                 "mmry.memory.add",
                 "Add a new memory (optionally embedding it).",
                 json!({
@@ -749,37 +564,9 @@ impl mcp_server::Router for MmryMcpRouter {
                         "importance": { "type": ["integer", "null"], "minimum": 1, "maximum": 10 },
                         "embed": { "type": ["boolean", "null"], "default": true },
                         "sparse_embed": { "type": ["boolean", "null"], "default": true },
-                        "store": { "type": ["string", "null"] },
-                        "agent": { "type": ["string", "null"] },
-                        "agent_kind": { "type": ["string", "null"] },
-                        "agent_meta": { "type": ["object", "null"] }
-                    },
-                    "required": ["content"],
-                    "additionalProperties": false
-                }),
-            ),
-            Tool::new(
-                "mmry.memory.source.add",
-                "Add a provenance source to an existing memory.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" },
-                        "source": {
-                            "type": "object",
-                            "properties": {
-                                "kind": { "type": "string", "enum": ["user", "llm", "external", "system"] },
-                                "label": { "type": ["string", "null"] },
-                                "trust": { "type": "number", "minimum": 0, "maximum": 1 },
-                                "model": { "type": ["string", "null"] },
-                                "reference": { "type": ["string", "null"] }
-                            },
-                            "required": ["kind", "trust"],
-                            "additionalProperties": false
-                        },
                         "store": { "type": ["string", "null"] }
                     },
-                    "required": ["id", "source"],
+                    "required": ["content"],
                     "additionalProperties": false
                 }),
             ),
@@ -814,18 +601,6 @@ impl mcp_server::Router for MmryMcpRouter {
                     "additionalProperties": false
                 }),
             ),
-            Tool::new(
-                "mmry.agent_events.list",
-                "List recent agent events.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "limit": { "type": ["integer", "null"], "minimum": 1 },
-                        "store": { "type": ["string", "null"] }
-                    },
-                    "additionalProperties": false
-                }),
-            ),
         ]
     }
 
@@ -851,20 +626,10 @@ impl mcp_server::Router for MmryMcpRouter {
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_memory_get(args).await
                 }
-                "mmry.memory.provenance.get" => {
-                    let args: MemoryProvenanceArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_memory_provenance(args).await
-                }
                 "mmry.memory.add" => {
                     let args: MemoryAddArgs = serde_json::from_value(arguments)
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_memory_add(args).await
-                }
-                "mmry.memory.source.add" => {
-                    let args: MemorySourceArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_memory_source_add(args).await
                 }
                 "mmry.memory.update" => {
                     let args: MemoryUpdateArgs = serde_json::from_value(arguments)
@@ -875,11 +640,6 @@ impl mcp_server::Router for MmryMcpRouter {
                     let args: MemoryIdArgs = serde_json::from_value(arguments)
                         .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                     router.tool_memory_delete(args).await
-                }
-                "mmry.agent_events.list" => {
-                    let args: AgentEventsListArgs = serde_json::from_value(arguments)
-                        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-                    router.tool_agent_events_list(args).await
                 }
                 _ => Err(ToolError::NotFound(tool_name)),
             }
@@ -997,9 +757,6 @@ mod tests {
                 embed: Some(false),
                 sparse_embed: Some(false),
                 store: None,
-                agent: None,
-                agent_kind: None,
-                agent_meta: None,
             })
             .await?;
         let add_json = extract_json(add);

@@ -162,6 +162,7 @@
         "bm25_weight": 0.0,
         "boost_recent": true,
         "default_limit": 10,
+        "feedback_weight": 0.10000000149011612,
         "fuzzy_weight": 0.20000000298023224,
         "importance_weight": 0.05000000074505806,
         "keyword_weight": 0.4000000059604645,
@@ -656,6 +657,12 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        },
+        "feedback_weight": {
+          "description": "Coefficient on `log1p(helpful_count - harmful_count)` added to the final score. Translates cited-search outcomes into a re-ranking prior so the retrieval gateway gets sharper with every closed episode.",
+          "default": 0.10000000149011612,
+          "type": "number",
+          "format": "float"
         },
         "fuzzy_weight": {
           "default": 0.20000000298023224,

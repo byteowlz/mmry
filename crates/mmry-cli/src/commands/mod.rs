@@ -1,4 +1,5 @@
 pub mod add;
+pub mod add_conversation;
 #[cfg(feature = "bench")]
 pub mod bench;
 pub mod context;

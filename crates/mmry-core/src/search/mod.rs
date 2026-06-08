@@ -13,13 +13,17 @@ use strsim::jaro_winkler;
 use uuid::Uuid;
 use zerocopy::IntoBytes;
 
+#[cfg(test)]
+mod episode_benchmark;
+
+use crate::agent_ctx::AgentCtx;
 use crate::config::SearchConfig;
 use crate::config::SearchMode;
 use crate::database::operations;
 use crate::embeddings::EmbeddingServiceWrapper;
+use crate::episodes;
 use crate::memory::Memory;
 use crate::memory::MemoryType;
-use crate::memory::SourceAttribution;
 use crate::reranker::RerankerService;
 use crate::sparse_embeddings::SparseEmbeddingService;
 use crate::sparse_embeddings::StoredSparseEmbedding;
@@ -41,8 +45,6 @@ pub struct ExecuteSearchOptions<'a> {
     pub category: Option<&'a str>,
     /// Maximum number of results
     pub limit: i64,
-    /// Include expired memories in results
-    pub include_expired: bool,
     /// Pre-computed dense embedding for the query
     pub query_embedding: Option<Vec<f32>>,
     /// Pre-computed sparse embedding for the query
@@ -98,7 +100,6 @@ pub struct SearchQueryOptions<'a> {
     pub limit: i64,
     pub mode: Option<SearchMode>,
     pub rerank: Option<bool>,
-    pub include_expired: bool,
     pub filters: SearchFilters<'a>,
 }
 
@@ -108,19 +109,15 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
     let id = Uuid::parse_str(&id_raw)
         .map_err(|e| crate::Error::InvalidInput(format!("Invalid memory id '{id_raw}': {e}")))?;
 
-    let embedding_bytes: Option<Vec<u8>> = row.try_get("embedding").ok();
-    let embedding_vec =
-        embedding_bytes.and_then(|bytes| serde_json::from_slice::<Vec<f32>>(&bytes).ok());
-
+    // Dense embeddings live in the `memory_embeddings` sqlite-vec virtual
+    // table, not on `memories` anymore. Search reads them via vec0 MATCH
+    // queries when it needs them, not by deserializing per-row JSON.
     let sparse_embedding_bytes: Option<Vec<u8>> = row.try_get("sparse_embedding").ok();
     let sparse_embedding_vec = sparse_embedding_bytes
         .and_then(|bytes| serde_json::from_slice::<StoredSparseEmbedding>(&bytes).ok());
 
     let parent_id: Option<String> = row.try_get("parent_id").ok().flatten();
     let parent_id = parent_id.and_then(|s| Uuid::parse_str(&s).ok());
-
-    let chunk_method: Option<String> = row.try_get("chunk_method").ok().flatten();
-    let chunk_method = chunk_method.and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok());
 
     let created_at_raw: String = row.try_get("created_at")?;
     let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_raw)
@@ -139,64 +136,17 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
             ))
         })?
         .with_timezone(&chrono::Utc);
-    let expires_at_raw: Option<String> = row.try_get("expires_at").ok().flatten();
-    let expires_at = match expires_at_raw {
-        Some(raw) => Some(
-            chrono::DateTime::parse_from_rfc3339(&raw)
-                .map_err(|e| {
-                    crate::Error::InvalidInput(format!(
-                        "Invalid expires_at for memory {id} ({raw}): {e}"
-                    ))
-                })?
-                .with_timezone(&chrono::Utc),
-        ),
-        None => None,
-    };
-    let expired_at_raw: Option<String> = row.try_get("expired_at").ok().flatten();
-    let expired_at = match expired_at_raw {
-        Some(raw) => Some(
-            chrono::DateTime::parse_from_rfc3339(&raw)
-                .map_err(|e| {
-                    crate::Error::InvalidInput(format!(
-                        "Invalid expired_at for memory {id} ({raw}): {e}"
-                    ))
-                })?
-                .with_timezone(&chrono::Utc),
-        ),
-        None => None,
-    };
-    let source_attribution_raw: Option<String> = row.try_get("source_attribution").ok().flatten();
-    let source_attribution = match source_attribution_raw {
-        Some(raw) => match serde_json::from_str::<SourceAttribution>(&raw) {
-            Ok(attribution) => Some(attribution),
-            Err(e) => {
-                tracing::warn!(memory_id = %id, error = %e, "Invalid source attribution stored; skipping value");
-                None
-            }
-        },
-        None => None,
-    };
-    let trust_level: Option<f32> = row.try_get("trust_level").ok();
-    let trust_level = trust_level.unwrap_or(0.5);
-    let source_reinforcement_score: Option<f32> = row.try_get("source_reinforcement_score").ok();
-    let source_reinforcement_score = source_reinforcement_score.unwrap_or(0.0);
-
-    let bridge_block_id: Option<String> = row.try_get("bridge_block_id").ok().flatten();
-    let bridge_block_id = bridge_block_id.and_then(|s| Uuid::parse_str(&s).ok());
 
     Ok(Memory {
         id,
         memory_type: serde_json::from_str(row.try_get("type")?)?,
         content: row.try_get("content")?,
-        embedding: embedding_vec,
+        embedding: None,
         sparse_embedding: sparse_embedding_vec,
         metadata: serde_json::from_str(row.try_get("metadata")?)?,
         importance: row.try_get("importance")?,
-        expires_at,
-        expired_at,
-        source_attribution,
-        trust_level,
-        source_reinforcement_score,
+        helpful_count: row.try_get("helpful_count").unwrap_or(0),
+        harmful_count: row.try_get("harmful_count").unwrap_or(0),
         category: row.try_get("category")?,
         tags: serde_json::from_str(row.try_get("tags")?).unwrap_or_default(),
         created_at,
@@ -204,8 +154,9 @@ fn memory_from_row(row: &sqlx::sqlite::SqliteRow) -> crate::Result<Memory> {
         parent_id,
         chunk_index: row.try_get("chunk_index").ok(),
         total_chunks: row.try_get("total_chunks").ok(),
-        chunk_method,
-        bridge_block_id,
+        store: row
+            .try_get::<String, _>("store")
+            .unwrap_or_else(|_| "default".to_string()),
     })
 }
 
@@ -223,6 +174,10 @@ pub struct SearchService {
     embeddings: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
     sparse_embeddings: Arc<SparseEmbeddingService>,
     reranker: Arc<RerankerService>,
+    /// Store-scope filter. When set, search restricts candidates to rows
+    /// in this store. `None` means search across all stores in the
+    /// unified DB.
+    current_store: Option<String>,
 }
 
 impl SearchService {
@@ -239,12 +194,17 @@ impl SearchService {
             embeddings,
             sparse_embeddings,
             reranker,
+            current_store: None,
         }
     }
 
+    /// Scope this search service to a single store. `None` clears the filter.
+    pub fn with_store(mut self, store: Option<String>) -> Self {
+        self.current_store = store;
+        self
+    }
+
     async fn execute_search(&self, opts: ExecuteSearchOptions<'_>) -> Result<Vec<Memory>> {
-        let now = Utc::now();
-        operations::mark_expired_memories(&self.pool, now).await?;
         let mut vector_distance_hint: HashMap<Uuid, f32> = HashMap::new();
         let mut memories = {
             let mut candidate_ids = Vec::new();
@@ -257,7 +217,7 @@ impl SearchService {
                     .min(MAX_CANDIDATE_POOL);
 
                 let vector_candidates = self
-                    .vector_candidates(query_vec, opts.category, vector_limit, opts.include_expired)
+                    .vector_candidates(query_vec, opts.category, vector_limit)
                     .await?;
 
                 for (id, distance) in vector_candidates {
@@ -271,7 +231,7 @@ impl SearchService {
             if candidate_ids.len() < MAX_CANDIDATE_POOL {
                 let fallback_limit = MAX_CANDIDATE_POOL - candidate_ids.len();
                 let recents = self
-                    .recent_candidate_ids(opts.category, fallback_limit, opts.include_expired)
+                    .recent_candidate_ids(opts.category, fallback_limit)
                     .await?;
                 for id in recents {
                     if seen.insert(id) {
@@ -287,13 +247,8 @@ impl SearchService {
                 return Ok(Vec::new());
             }
 
-            self.load_memories_by_ids(&candidate_ids, opts.include_expired)
-                .await?
+            self.load_memories_by_ids(&candidate_ids).await?
         };
-
-        if !opts.include_expired {
-            memories.retain(|memory| memory.expired_at.is_none());
-        }
 
         // Apply additional filters
         if let Some(tags) = opts.tags {
@@ -479,14 +434,14 @@ impl SearchService {
                 0.0
             };
 
-            let importance_boost =
-                (memory.importance.clamp(1, 10) as f32 / 10.0) * self.config.importance_weight;
+            // Episode feedback prior: each closed `search → add --using <id>`
+            // pair bumps `helpful_count`, lifting this memory in future
+            // rankings. log1p keeps the prior bounded and prevents one
+            // popular memory from dominating.
+            let net_feedback = (memory.helpful_count - memory.harmful_count) as f32;
+            let feedback_boost = self.config.feedback_weight * net_feedback.max(0.0).ln_1p();
 
-            let trust_multiplier = 0.7 + 0.3 * memory.trust_level.clamp(0.0, 1.0);
-            let reinforcement_boost = memory.source_reinforcement_score.clamp(0.0, 1.5) * 0.05;
-
-            let score = (base_score + recency_boost + importance_boost) * trust_multiplier
-                + reinforcement_boost;
+            let score = base_score + recency_boost + feedback_boost;
 
             scored_results.push((score, memory));
         }
@@ -623,7 +578,7 @@ impl SearchService {
         category: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Memory>> {
-        self.search_with_options(query, category, limit, None, None, false)
+        self.search_with_options(query, category, limit, None, None)
             .await
     }
 
@@ -657,25 +612,37 @@ impl SearchService {
             None
         };
 
-        self.execute_search(ExecuteSearchOptions {
-            query: opts.query,
-            category: opts.category,
-            limit: opts.limit,
-            include_expired: opts.include_expired,
-            query_embedding,
-            query_sparse_embedding,
-            mode_override: Some(mode),
-            rerank_override: opts.rerank,
-            tags: opts.filters.tags,
-            memory_type: opts.filters.memory_type,
-            min_importance: opts.filters.min_importance,
-            after: opts.filters.after,
-            before: opts.filters.before,
-            workspace_id: opts.filters.workspace_id,
-            platform_session_id: opts.filters.platform_session_id,
-            harness_session_id: opts.filters.harness_session_id,
-        })
-        .await
+        let results = self
+            .execute_search(ExecuteSearchOptions {
+                query: opts.query,
+                category: opts.category,
+                limit: opts.limit,
+                query_embedding,
+                query_sparse_embedding,
+                mode_override: Some(mode),
+                rerank_override: opts.rerank,
+                tags: opts.filters.tags,
+                memory_type: opts.filters.memory_type,
+                min_importance: opts.filters.min_importance,
+                after: opts.filters.after,
+                before: opts.filters.before,
+                workspace_id: opts.filters.workspace_id,
+                platform_session_id: opts.filters.platform_session_id,
+                harness_session_id: opts.filters.harness_session_id,
+            })
+            .await?;
+
+        // Append to the episode log so feedback signals can be derived later.
+        // Best-effort: never fail a search because recording failed.
+        let ctx = AgentCtx::from_env();
+        let returned_ids: Vec<Uuid> = results.iter().map(|m| m.id).collect();
+        if let Err(e) =
+            episodes::record_episode(&self.pool, opts.query, &returned_ids, ctx.index_keys()).await
+        {
+            tracing::warn!(error = %e, "failed to record search episode");
+        }
+
+        Ok(results)
     }
 
     pub async fn search_with_options(
@@ -685,7 +652,6 @@ impl SearchService {
         limit: i64,
         mode: Option<SearchMode>,
         rerank: Option<bool>,
-        include_expired: bool,
     ) -> Result<Vec<Memory>> {
         self.search_with_query_options(SearchQueryOptions {
             query,
@@ -693,7 +659,6 @@ impl SearchService {
             limit,
             mode,
             rerank,
-            include_expired,
             filters: SearchFilters::default(),
         })
         .await
@@ -704,23 +669,27 @@ impl SearchService {
         query_embedding: &[f32],
         category: Option<&str>,
         limit: usize,
-        include_expired: bool,
     ) -> Result<Vec<(Uuid, f32)>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
+        let store = self.current_store.as_deref();
+        let mut sub_clauses: Vec<&str> = Vec::new();
+        if category.is_some() {
+            sub_clauses.push("category = ?");
+        }
+        if store.is_some() {
+            sub_clauses.push("store = ?");
+        }
+
         let mut sql = String::from(
             "SELECT memory_id, distance FROM memory_embeddings WHERE embedding MATCH ? AND k = ?",
         );
-        if category.is_some() {
-            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE category = ?");
-            if !include_expired {
-                sql.push_str(" AND expired_at IS NULL");
-            }
+        if !sub_clauses.is_empty() {
+            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE ");
+            sql.push_str(&sub_clauses.join(" AND "));
             sql.push(')');
-        } else if !include_expired {
-            sql.push_str(" AND memory_id IN (SELECT id FROM memories WHERE expired_at IS NULL)");
         }
         sql.push_str(" ORDER BY distance");
 
@@ -729,6 +698,9 @@ impl SearchService {
         query = query.bind(limit as i64);
         if let Some(cat) = category {
             query = query.bind(cat);
+        }
+        if let Some(s) = store {
+            query = query.bind(s);
         }
 
         let rows = query.fetch_all(&self.pool).await?;
@@ -749,30 +721,32 @@ impl SearchService {
         &self,
         category: Option<&str>,
         limit: usize,
-        include_expired: bool,
     ) -> Result<Vec<Uuid>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
+        let store = self.current_store.as_deref();
         let mut sql = String::from("SELECT id FROM memories");
-        if category.is_some() || !include_expired {
-            sql.push_str(" WHERE");
-        }
+        let mut clauses: Vec<&str> = Vec::new();
         if category.is_some() {
-            sql.push_str(" category = ?");
+            clauses.push("category = ?");
         }
-        if !include_expired {
-            if category.is_some() {
-                sql.push_str(" AND");
-            }
-            sql.push_str(" expired_at IS NULL");
+        if store.is_some() {
+            clauses.push("store = ?");
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
 
         let mut query = sqlx::query(&sql);
         if let Some(cat) = category {
             query = query.bind(cat);
+        }
+        if let Some(s) = store {
+            query = query.bind(s);
         }
         query = query.bind(limit as i64);
 
@@ -788,11 +762,7 @@ impl SearchService {
         Ok(ids)
     }
 
-    async fn load_memories_by_ids(
-        &self,
-        ids: &[Uuid],
-        include_expired: bool,
-    ) -> Result<Vec<Memory>> {
+    async fn load_memories_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Memory>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -805,7 +775,7 @@ impl SearchService {
         let mut memories = Vec::new();
         for chunk in ids.chunks(SQLITE_MAX_BIND_PARAMS) {
             let mut builder = QueryBuilder::new(
-                "SELECT id, type, content, embedding, sparse_embedding, metadata, importance, expires_at, expired_at, source_attribution, trust_level, source_reinforcement_score, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, chunk_method, bridge_block_id FROM memories WHERE id IN (",
+                "SELECT id, type, content, sparse_embedding, metadata, importance, helpful_count, harmful_count, category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks, store FROM memories WHERE id IN (",
             );
             {
                 let mut separated = builder.separated(", ");
@@ -814,9 +784,6 @@ impl SearchService {
                 }
             }
             builder.push(")");
-            if !include_expired {
-                builder.push(" AND expired_at IS NULL");
-            }
 
             let rows = builder.build().fetch_all(&self.pool).await?;
             for row in rows {
@@ -1178,127 +1145,18 @@ mod tests {
         // With embeddings disabled, semantic mode returns no results (no query vector).
         // Use keyword mode to verify the memory is stored and searchable.
         let results = service
-            .search_with_options("sudo", None, 10, Some(SearchMode::Keyword), None, false)
+            .search_with_options("sudo", None, 10, Some(SearchMode::Keyword), None)
             .await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, memory.id);
 
         // Unrelated keyword should return nothing
         let unrelated = service
-            .search_with_options(
-                "vogelfutter",
-                None,
-                10,
-                Some(SearchMode::Keyword),
-                None,
-                false,
-            )
+            .search_with_options("vogelfutter", None, 10, Some(SearchMode::Keyword), None)
             .await?;
         assert!(unrelated.is_empty());
 
         pool.close().await;
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn expired_memories_are_excluded_by_default() -> Result<()> {
-        crate::database::ensure_sqlite_vec_loaded()?;
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        sqlx::query(schema::INIT_SQL).execute(&pool).await?;
-        Database::ensure_vector_table(&pool, TEST_DIMENSION).await?;
-
-        let mut memory = Memory::new(
-            MemoryType::Episodic,
-            "temporary note".to_string(),
-            "default".to_string(),
-        );
-        memory.expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
-        operations::insert_memory(&pool, &memory).await?;
-
-        let embeddings = disabled_embeddings();
-        let sparse_embeddings = disabled_sparse_embeddings();
-        let mut search_config = base_search_config();
-        search_config.mode = SearchMode::Keyword;
-        let reranker = Arc::new(RerankerService::from_config(&search_config)?);
-
-        let service = SearchService::new(
-            pool.clone(),
-            search_config,
-            Arc::clone(&embeddings),
-            Arc::clone(&sparse_embeddings),
-            Arc::clone(&reranker),
-        );
-
-        let results = service.search("temporary", None, 10).await?;
-        assert!(results.is_empty());
-
-        let results = service
-            .search_with_options("temporary", None, 10, None, None, true)
-            .await?;
-        assert_eq!(results.len(), 1);
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn trust_weighting_prefers_higher_trust() -> Result<()> {
-        crate::database::ensure_sqlite_vec_loaded()?;
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        sqlx::query(schema::INIT_SQL).execute(&pool).await?;
-        Database::ensure_vector_table(&pool, TEST_DIMENSION).await?;
-
-        let now = chrono::Utc::now();
-        let mut low_trust = Memory::new(
-            MemoryType::Episodic,
-            "trust me on this".to_string(),
-            "default".to_string(),
-        );
-        low_trust.source_attribution = None;
-        low_trust.trust_level = 0.2;
-        low_trust.source_reinforcement_score = 0.0;
-        low_trust.created_at = now;
-        low_trust.updated_at = now;
-
-        let mut high_trust = Memory::new(
-            MemoryType::Episodic,
-            "trust me on this".to_string(),
-            "default".to_string(),
-        );
-        high_trust.source_attribution = None;
-        high_trust.trust_level = 0.9;
-        high_trust.source_reinforcement_score = 0.0;
-        high_trust.created_at = now;
-        high_trust.updated_at = now;
-
-        operations::insert_memory(&pool, &low_trust).await?;
-        operations::insert_memory(&pool, &high_trust).await?;
-
-        let embeddings = disabled_embeddings();
-        let sparse_embeddings = disabled_sparse_embeddings();
-        let mut search_config = base_search_config();
-        search_config.mode = SearchMode::Keyword;
-        let reranker = Arc::new(RerankerService::from_config(&search_config)?);
-
-        let service = SearchService::new(
-            pool.clone(),
-            search_config,
-            Arc::clone(&embeddings),
-            Arc::clone(&sparse_embeddings),
-            Arc::clone(&reranker),
-        );
-
-        let results = service.search("trust", None, 2).await?;
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].trust_level, 0.9);
 
         Ok(())
     }

@@ -47,10 +47,14 @@ enum Commands {
     /// Add a new memory
     Add(commands::add::AddCmd),
 
+    /// Ingest a canonical conversation JSON as a session header + N message records
+    AddConversation(commands::add_conversation::AddConversationCmd),
+
     /// Search memories
     Search(commands::search::SearchCmd),
 
     /// List memories
+    #[command(alias = "list")]
     Ls(commands::ls::LsCmd),
 
     /// Remove a memory
@@ -158,6 +162,14 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await
         }
+        Commands::Add(cmd) if !cmd.indexed => {
+            return commands::add::handle_jsonl(cmd, &config).await
+        }
+        Commands::Ls(cmd) if !cmd.indexed => return commands::ls::handle_jsonl(cmd, &config).await,
+        Commands::Search(cmd) if !cmd.indexed => {
+            return commands::search::handle_jsonl(cmd, &config).await
+        }
+        Commands::Rm(cmd) if !cmd.indexed => return commands::rm::handle_jsonl(cmd).await,
         other => other,
     };
 
@@ -172,15 +184,17 @@ async fn async_main() -> anyhow::Result<()> {
     // Try service-backed search before starting local services
     if config.service.enabled && store_name != Some("all") {
         if let Commands::Search(cmd) = &command {
-            match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
-                Ok(()) => return Ok(()),
-                Err(e) => tracing::warn!("Service search failed, falling back to local: {e}"),
+            if cmd.indexed {
+                match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => tracing::warn!("Service search failed, falling back to local: {e}"),
+                }
             }
         }
     }
 
-    // Initialize database for the specified store
-    // When store is "all", use the default store for initial DB; commands handle multi-store iteration
+    // Initialize the unified DB. "all" is a special keyword meaning
+    // "no store filter"; otherwise the store name scopes reads/writes.
     let db_store = if store_name == Some("all") {
         None
     } else {
@@ -205,6 +219,16 @@ async fn async_main() -> anyhow::Result<()> {
     let result = match command {
         Commands::Add(cmd) => {
             commands::add::handle(
+                cmd,
+                &config,
+                &db,
+                Arc::clone(&embeddings),
+                Arc::clone(&sparse_embeddings),
+            )
+            .await
+        }
+        Commands::AddConversation(cmd) => {
+            commands::add_conversation::handle(
                 cmd,
                 &config,
                 &db,

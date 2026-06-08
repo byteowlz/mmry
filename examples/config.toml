@@ -95,6 +95,10 @@ vector_weight = 0.35          # Dense embeddings similarity
 bm25_weight = 0.0             # BM25 statistical scoring (set to 0.2-0.3 to enable)
 sparse_embedding_weight = 0.0 # SPLADE++ sparse embeddings (set to 0.2-0.3 to enable)
 importance_weight = 0.05      # Memory importance boost
+# Episode-feedback prior: adds `feedback_weight * log1p(max(0, helpful - harmful))`
+# to the final score. Memories cited via `mmry add --using <ids>` accumulate
+# helpful_count and rise in future searches. Set to 0.0 to disable the loop.
+feedback_weight = 0.1
 # BM25 parameters (for bm25 search mode or hybrid with bm25_weight > 0)
 bm25_k1 = 1.2 # Term frequency saturation (1.2-2.0 typical)
 bm25_b = 0.75 # Length normalization (0.0-1.0, 0.75 typical)

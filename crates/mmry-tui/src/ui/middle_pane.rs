@@ -12,17 +12,12 @@ use ratatui::widgets::ListState;
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::state::MiddleView;
 use crate::state::Pane;
 use mmry_core::memory::MemoryType;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Middle;
-
-    match app.middle_view {
-        MiddleView::Memories => draw_memories(f, app, area, is_active),
-        MiddleView::AgentEvents => draw_agent_events(f, app, area, is_active),
-    }
+    draw_memories(f, app, area, is_active);
 }
 
 fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
@@ -33,24 +28,25 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
         .enumerate()
         .map(|(idx, memory)| {
             let is_selected = app.middle_selection.is_selected(idx);
-            let type_str = match memory.memory.memory_type {
+            let type_str = match memory.memory_type {
                 MemoryType::Episodic => "E",
                 MemoryType::Semantic => "S",
                 MemoryType::Procedural => "P",
             };
 
-            let type_color = match memory.memory.memory_type {
+            let type_color = match memory.memory_type {
                 MemoryType::Episodic => Color::Cyan,
                 MemoryType::Semantic => Color::Green,
                 MemoryType::Procedural => Color::Yellow,
             };
 
-            let date_str = memory.memory.created_at.format("%Y-%m-%d").to_string();
+            let date_str = memory.created_at.format("%Y-%m-%d").to_string();
 
-            let content_preview_full = if memory.memory.content.len() > 60 {
-                format!("{}...", &memory.memory.content[..60])
+            let content_preview_full = if memory.content.chars().count() > 60 {
+                let truncated: String = memory.content.chars().take(60).collect();
+                format!("{truncated}...")
             } else {
-                memory.memory.content.clone()
+                memory.content.clone()
             };
             let content_preview = content_preview_full
                 .lines()
@@ -58,8 +54,8 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
                 .unwrap_or("")
                 .to_string();
 
-            let tags_str = if !memory.memory.tags.is_empty() {
-                format!(" [{}]", memory.memory.tags.join(", "))
+            let tags_str = if !memory.tags.is_empty() {
+                format!(" [{}]", memory.tags.join(", "))
             } else {
                 String::new()
             };
@@ -97,12 +93,12 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
 
             line1_spans.push(Span::raw(" | "));
             line1_spans.push(Span::styled(
-                &memory.memory.category,
+                &memory.category,
                 Style::default().fg(Color::Green),
             ));
             line1_spans.push(Span::raw(" | "));
             line1_spans.push(Span::styled(
-                format!("★{}", memory.memory.importance),
+                format!("★{}", memory.importance),
                 Style::default().fg(Color::Yellow),
             ));
 
@@ -150,82 +146,6 @@ fn draw_memories(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
         format!(" Memories ({total}) ")
     };
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(if is_active {
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    f.render_stateful_widget(list, area, &mut state);
-}
-
-fn draw_agent_events(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
-    let items: Vec<ListItem> = app
-        .agent_events
-        .iter()
-        .enumerate()
-        .map(|(idx, event)| {
-            let selection_marker = if app.middle_selection.is_selected(idx) {
-                Span::styled(
-                    "◉ ",
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw("  ")
-            };
-
-            let short_id: String = event.id.to_string().chars().take(8).collect();
-
-            let line1 = Line::from(vec![
-                selection_marker,
-                Span::styled(short_id, Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::styled(&event.event_type, Style::default().fg(Color::Green)),
-                Span::raw(" "),
-                Span::raw(event.status.as_deref().unwrap_or("")),
-            ]);
-
-            let line2 = Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    format!(
-                        "agent={} | span={} | created={}",
-                        event.agent_id,
-                        event.span_id.as_deref().unwrap_or("-"),
-                        event.created_at.format("%Y-%m-%d %H:%M")
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-
-            ListItem::new(vec![line1, line2])
-        })
-        .collect();
-
-    let mut state = ListState::default();
-    state.select(Some(
-        app.middle_selection
-            .index
-            .min(items.len().saturating_sub(1)),
-    ));
-
-    let title = format!(" Agent Events ({}) ", app.agent_events.len());
     let list = List::new(items)
         .block(
             Block::default()

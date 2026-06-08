@@ -1,4 +1,4 @@
-use mmry_core::stores::MemoryWithStore;
+use mmry_core::memory::Memory;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortMode {
@@ -26,25 +26,25 @@ impl SortState {
         self.mode = mode;
     }
 
-    pub fn sort_memories(&self, memories: &mut [MemoryWithStore]) {
+    pub fn sort_memories(&self, memories: &mut [Memory]) {
         match self.mode {
             SortMode::DateNewest => {
-                memories.sort_by_key(|b| std::cmp::Reverse(b.memory.created_at));
+                memories.sort_by_key(|b| std::cmp::Reverse(b.created_at));
             }
             SortMode::DateOldest => {
-                memories.sort_by_key(|a| a.memory.created_at);
+                memories.sort_by_key(|a| a.created_at);
             }
             SortMode::ImportanceHigh => {
-                memories.sort_by_key(|b| std::cmp::Reverse(b.memory.importance));
+                memories.sort_by_key(|b| std::cmp::Reverse(b.importance));
             }
             SortMode::ImportanceLow => {
-                memories.sort_by_key(|a| a.memory.importance);
+                memories.sort_by_key(|a| a.importance);
             }
             SortMode::Category => {
-                memories.sort_by_key(|a| a.memory.category.clone());
+                memories.sort_by_key(|a| a.category.clone());
             }
             SortMode::Type => {
-                memories.sort_by_key(|a| match a.memory.memory_type {
+                memories.sort_by_key(|a| match a.memory_type {
                     mmry_core::memory::MemoryType::Episodic => 0,
                     mmry_core::memory::MemoryType::Semantic => 1,
                     mmry_core::memory::MemoryType::Procedural => 2,

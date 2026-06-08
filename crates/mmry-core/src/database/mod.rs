@@ -2,270 +2,260 @@ pub mod operations;
 pub mod schema;
 
 use sqlite_vec::sqlite3_vec_init;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqliteJournalMode;
 use sqlx::sqlite::SqlitePool;
+use sqlx::sqlite::SqliteSynchronous;
 use sqlx::Row;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
 use zerocopy::IntoBytes;
 
+pub const UNIFIED_DB_FILENAME: &str = "mmry.db";
+
 pub struct Database {
     pool: SqlitePool,
+    /// The store the caller asked for when opening this Database. Used to
+    /// scope reads/writes when the single unified DB holds rows from many
+    /// stores. `None` means "no scope filter" — all stores visible.
+    current_store: Option<String>,
 }
 
 impl Database {
     pub async fn init(path: &Path, embedding_dim: usize) -> crate::Result<Self> {
         ensure_sqlite_vec_loaded()?;
-        // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let database_url = format!("sqlite://{}?mode=rwc", path.display());
-        let pool = SqlitePool::connect(&database_url).await?;
+        // WAL + busy_timeout: readers and writers don't block each other,
+        // and the pool waits a few seconds on transient locks instead of
+        // failing immediately with SQLITE_BUSY. `synchronous=NORMAL` is the
+        // documented safe pairing with WAL and is dramatically faster than
+        // FULL on writes.
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePool::connect_with(opts).await?;
 
-        // Initialize schema
         sqlx::query(schema::INIT_SQL).execute(&pool).await?;
 
-        // Apply schema migrations
         Self::apply_schema_updates(&pool).await?;
         Self::ensure_vector_table(&pool, embedding_dim).await?;
-        Self::backfill_vector_table(&pool, embedding_dim).await?;
+        // NB: vector backfill is intentionally NOT run here. `insert_memory`
+        // upserts the vector entry inline, so the only case that needs
+        // backfill is post-migration. `init_store` runs it once *after* a
+        // migration actually imports rows; the steady-state hot path stays
+        // pure schema + open and returns in milliseconds even on a multi-GB
+        // DB.
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            current_store: None,
+        })
     }
 
-    /// Initialize a database for a specific store
+    /// Open the unified database, optionally scoped to a specific store name.
     ///
-    /// If initializing the default store, this will automatically migrate
-    /// the legacy database (database.path) if present - either by copying
-    /// (if store doesn't exist) or by merging (if store already exists).
+    /// The unified path is `{stores.directory}/mmry.db`. On first open, any
+    /// legacy per-store `*.db` files in `{stores.directory}` and the older
+    /// `config.database.path` single-file install are imported with their
+    /// rows tagged by store, then renamed to `*.db.migrated` so they stay on
+    /// disk for safety. `store_name` is recorded as the active scope; pass
+    /// `None` to operate across all stores.
     pub async fn init_store(
         config: &crate::config::Config,
         store_name: Option<&str>,
     ) -> crate::Result<Self> {
-        let store = store_name.unwrap_or(&config.stores.default);
-        let store_path = config.store_path(store);
+        let unified_path = config.stores.directory.join(UNIFIED_DB_FILENAME);
+        std::fs::create_dir_all(&config.stores.directory)?;
 
-        // Check if we need to migrate the legacy database (only for default store)
-        // We need to check BOTH conditions upfront before any modifications
-        let legacy_has_data = store == config.stores.default
-            && Self::check_legacy_migration_needed(config, &store_path);
-        let store_already_exists = store_path.exists();
-
-        // Determine what action to take:
-        // - If store doesn't exist but legacy does: copy legacy to store
-        // - If both exist: merge legacy into store after init
-        let needs_merge = legacy_has_data && store_already_exists;
-
-        // If store doesn't exist but legacy does, copy it first
-        if legacy_has_data && !store_already_exists {
-            Self::copy_legacy_database_if_exists(config, &store_path)?;
-        }
-
-        // Initialize the database
-        let db = Self::init(&store_path, config.embeddings.dimension).await?;
-
-        // If both databases existed at the start, merge the legacy data and remove the legacy db
-        if needs_merge {
-            Self::merge_and_remove_legacy_database(config, db.pool()).await?;
-        }
-
-        Ok(db)
-    }
-
-    /// Check if legacy database exists and has data that needs migration
-    fn check_legacy_migration_needed(
-        config: &crate::config::Config,
-        default_store_path: &Path,
-    ) -> bool {
-        let legacy_path = &config.database.path;
-
-        // No migration needed if legacy doesn't exist or is same as store path
-        if !legacy_path.exists() || legacy_path == default_store_path {
-            return false;
-        }
-
-        // Check if legacy database has any data
-        if let Ok(metadata) = std::fs::metadata(legacy_path) {
-            metadata.len() > 0
-        } else {
-            false
-        }
-    }
-
-    /// Copy legacy database to store path if legacy exists and store doesn't
-    fn copy_legacy_database_if_exists(
-        config: &crate::config::Config,
-        default_store_path: &Path,
-    ) -> crate::Result<()> {
-        let legacy_path = &config.database.path;
-
-        if !legacy_path.exists() || legacy_path == default_store_path {
-            return Ok(());
-        }
-
-        if let Ok(metadata) = std::fs::metadata(legacy_path) {
-            if metadata.len() == 0 {
-                return Ok(());
+        // Step 1: if unified DB does not yet exist but the very-old
+        // `database.path` single-file install does, seed unified by copying
+        // it directly — its rows pick up store='default' via the column
+        // default. Per-store files are still migrated in Step 2.
+        if !unified_path.exists() {
+            let legacy_path = &config.database.path;
+            let legacy_outside_stores_dir =
+                legacy_path != &unified_path && !legacy_path.starts_with(&config.stores.directory);
+            if legacy_outside_stores_dir && legacy_path.exists() {
+                if let Ok(metadata) = std::fs::metadata(legacy_path) {
+                    if metadata.len() > 0 {
+                        tracing::info!(
+                            "Seeding unified DB {} from legacy {}",
+                            unified_path.display(),
+                            legacy_path.display()
+                        );
+                        std::fs::copy(legacy_path, &unified_path)?;
+                        Self::rename_to_migrated(legacy_path);
+                    }
+                }
             }
         }
 
-        tracing::info!(
-            "Copying legacy database from {} to {}",
-            legacy_path.display(),
-            default_store_path.display()
-        );
+        let db = Self::init(&unified_path, config.embeddings.dimension).await?;
 
-        // Ensure stores directory exists
-        if let Some(parent) = default_store_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Step 2: import any per-store legacy files sitting next to the
+        // unified DB and tag their rows with the file-stem as `store`.
+        // Imported rows carry no `embedding` BLOB anymore (the column was
+        // dropped during cleanup), so the only thing missing post-import
+        // is their entry in the sqlite-vec virtual table — that gets
+        // rebuilt the next time those rows are embedded.
+        Self::migrate_per_store_files(&config.stores.directory, db.pool()).await?;
+
+        Ok(Self {
+            pool: db.pool,
+            current_store: store_name.map(str::to_string),
+        })
+    }
+
+    /// Scan `{stores.directory}` for legacy per-store `*.db` files and
+    /// import their `memories` rows into the unified DB, tagging each row
+    /// with the file stem as `store`. Renames each migrated file to
+    /// `<stem>.db.migrated` so it is safe to keep on disk.
+    async fn migrate_per_store_files(
+        stores_dir: &Path,
+        unified_pool: &SqlitePool,
+    ) -> crate::Result<()> {
+        let entries = match std::fs::read_dir(stores_dir) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(()),
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("db") {
+                continue;
+            }
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            if file_name == UNIFIED_DB_FILENAME {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => continue,
+            };
+
+            if let Err(e) = Self::import_per_store_file(unified_pool, &path, &stem).await {
+                tracing::warn!(
+                    error = %e,
+                    file = %path.display(),
+                    "failed to import legacy per-store DB; leaving on disk",
+                );
+                continue;
+            }
+
+            Self::rename_to_migrated(&path);
         }
-
-        // Copy the legacy database to the new location
-        std::fs::copy(legacy_path, default_store_path)?;
-
-        // Also copy WAL and SHM files if they exist
-        let legacy_wal = legacy_path.with_extension("db-wal");
-        let legacy_shm = legacy_path.with_extension("db-shm");
-        let store_wal = default_store_path.with_extension("db-wal");
-        let store_shm = default_store_path.with_extension("db-shm");
-
-        if legacy_wal.exists() {
-            let _ = std::fs::copy(&legacy_wal, &store_wal);
-        }
-        if legacy_shm.exists() {
-            let _ = std::fs::copy(&legacy_shm, &store_shm);
-        }
-
-        // Remove the legacy database after successful copy
-        Self::remove_legacy_database(config);
-
-        tracing::info!(
-            "Successfully migrated legacy database to default store '{}'",
-            config.stores.default
-        );
 
         Ok(())
     }
 
-    /// Merge memories from legacy database into the store, then remove legacy db
-    async fn merge_and_remove_legacy_database(
-        config: &crate::config::Config,
-        store_pool: &SqlitePool,
+    /// Attach a legacy per-store DB and copy its `memories` rows into the
+    /// unified DB, stamping each row with `store = <store_name>`. Best-
+    /// effort: if the legacy file has no `memories` table (e.g., it is a
+    /// stray file), the import is a no-op.
+    async fn import_per_store_file(
+        unified_pool: &SqlitePool,
+        legacy_path: &Path,
+        store_name: &str,
     ) -> crate::Result<()> {
-        let legacy_path = &config.database.path;
-
-        if !legacy_path.exists() {
-            return Ok(());
-        }
-
-        tracing::info!(
-            "Merging legacy database {} into default store",
-            legacy_path.display()
-        );
-
-        // IMPORTANT: ATTACH is connection-specific in SQLite, so we need to use
-        // a single connection for all operations (not the pool which may use different connections)
-        let mut conn = store_pool.acquire().await?;
-
-        // Attach the legacy database and merge memories
-        // Need to escape the path for SQLite
-        let legacy_path_str = legacy_path.to_string_lossy().replace('\'', "''");
-        let attach_sql = format!("ATTACH DATABASE '{legacy_path_str}' AS legacy");
-        sqlx::query(&attach_sql).execute(&mut *conn).await?;
-
-        // Count memories before merge
-        let legacy_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM legacy.memories")
-            .fetch_one(&mut *conn)
-            .await
-            .unwrap_or(0);
-
-        tracing::info!("Found {} memories in legacy database", legacy_count);
-
-        if legacy_count > 0 {
-            // Insert memories that don't already exist (by id)
-            let result = sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO memories 
-                    (id, type, content, embedding, sparse_embedding, metadata, importance, 
-                     category, tags, created_at, updated_at, parent_id, chunk_index, 
-                     total_chunks, chunk_method)
-                SELECT 
-                    id, type, content, embedding, sparse_embedding, metadata, importance,
-                    category, tags, created_at, updated_at, parent_id, chunk_index,
-                    total_chunks, chunk_method
-                FROM legacy.memories
-                WHERE id NOT IN (SELECT id FROM memories)
-                "#,
-            )
+        let mut conn = unified_pool.acquire().await?;
+        let legacy_str = legacy_path.to_string_lossy().replace('\'', "''");
+        sqlx::query(&format!("ATTACH DATABASE '{legacy_str}' AS legacy"))
             .execute(&mut *conn)
             .await?;
 
-            let merged_count = result.rows_affected();
+        let has_memories: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM legacy.sqlite_master WHERE type='table' AND name='memories'",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or(false);
+
+        if has_memories {
+            let legacy_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM legacy.memories")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap_or(0);
+
+            // INSERT OR IGNORE on id keeps the merge idempotent if a row
+            // with the same id already exists in the unified DB.
+            let result = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO main.memories (
+                    id, type, content, sparse_embedding, metadata, importance,
+                    category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks,
+                    store
+                )
+                SELECT
+                    id, type, content, sparse_embedding, metadata, importance,
+                    category, tags, created_at, updated_at, parent_id, chunk_index, total_chunks,
+                    ?
+                FROM legacy.memories
+                "#,
+            )
+            .bind(store_name)
+            .execute(&mut *conn)
+            .await?;
+
             tracing::info!(
-                "Merged {} memories from legacy database ({} already existed)",
-                merged_count,
-                legacy_count as u64 - merged_count
+                "Imported {} of {} memories from {} (store='{}')",
+                result.rows_affected(),
+                legacy_count,
+                legacy_path.display(),
+                store_name,
             );
         }
 
-        // Detach the legacy database
         sqlx::query("DETACH DATABASE legacy")
             .execute(&mut *conn)
             .await?;
-
-        // Drop the connection before doing other pool operations
-        drop(conn);
-
-        // Backfill vector embeddings for any newly merged memories
-        Self::backfill_vector_table(store_pool, config.embeddings.dimension).await?;
-
-        // Remove the legacy database files
-        Self::remove_legacy_database(config);
-
-        tracing::info!("Legacy database migration complete");
-
         Ok(())
     }
 
-    /// Remove the legacy database and its WAL/SHM files
-    fn remove_legacy_database(config: &crate::config::Config) {
-        let legacy_path = &config.database.path;
-        let legacy_wal = legacy_path.with_extension("db-wal");
-        let legacy_shm = legacy_path.with_extension("db-shm");
-
-        if let Err(e) = std::fs::remove_file(legacy_path) {
-            tracing::warn!("Failed to remove legacy database: {}", e);
-        } else {
-            tracing::info!("Removed legacy database: {}", legacy_path.display());
+    /// Rename `<file>.db` and any sibling `-wal`/`-shm` files to a
+    /// `.migrated` suffix so the originals stay on disk for recovery but
+    /// won't be picked up by future migration scans.
+    fn rename_to_migrated(path: &Path) {
+        let migrated = path.with_extension("db.migrated");
+        if let Err(e) = std::fs::rename(path, &migrated) {
+            tracing::warn!("Failed to rename {} to .migrated: {}", path.display(), e);
+            return;
         }
-
-        if legacy_wal.exists() {
-            let _ = std::fs::remove_file(&legacy_wal);
-        }
-        if legacy_shm.exists() {
-            let _ = std::fs::remove_file(&legacy_shm);
+        for suffix in ["db-wal", "db-shm"] {
+            let sidecar = path.with_extension(suffix);
+            if sidecar.exists() {
+                let _ = std::fs::rename(
+                    &sidecar,
+                    sidecar.with_extension(format!("{suffix}.migrated")),
+                );
+            }
         }
     }
 
+    /// The store this Database is scoped to, if any. Used by callers to
+    /// add `store = ?` filters to their queries.
+    pub fn current_store(&self) -> Option<&str> {
+        self.current_store.as_deref()
+    }
+
+    /// Replace the active store scope. Used by the TUI when the user
+    /// switches stores without re-opening the DB file.
+    pub fn set_current_store(&mut self, store: Option<String>) {
+        self.current_store = store;
+    }
+
     async fn apply_schema_updates(pool: &SqlitePool) -> crate::Result<()> {
-        // Ensure embedding column exists (older installs may have been initialized without it)
-        let embedding_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='embedding'",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if !embedding_exists {
-            tracing::info!("Adding embedding column to memories table...");
-            sqlx::query("ALTER TABLE memories ADD COLUMN embedding BLOB")
-                .execute(pool)
-                .await?;
-            tracing::info!("embedding column added");
-        }
-
         // Check if sparse_embedding column exists, add if not
         let sparse_column_exists: bool = sqlx::query_scalar(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='sparse_embedding'",
@@ -343,9 +333,6 @@ impl Database {
             sqlx::query("ALTER TABLE memories ADD COLUMN total_chunks INTEGER")
                 .execute(pool)
                 .await?;
-            sqlx::query("ALTER TABLE memories ADD COLUMN chunk_method TEXT")
-                .execute(pool)
-                .await?;
 
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_id)")
                 .execute(pool)
@@ -357,193 +344,41 @@ impl Database {
             tracing::info!("Chunking columns and indices added");
         }
 
-        let expires_at_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='expires_at'",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if !expires_at_exists {
-            tracing::info!("Adding expiration columns to memories table...");
-            sqlx::query("ALTER TABLE memories ADD COLUMN expires_at DATETIME")
-                .execute(pool)
-                .await?;
-            sqlx::query("ALTER TABLE memories ADD COLUMN expired_at DATETIME")
-                .execute(pool)
-                .await?;
-            tracing::info!("Expiration columns added");
-        }
-
-        let provenance_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='source_attribution'",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if !provenance_exists {
-            tracing::info!("Adding provenance columns to memories table...");
-            sqlx::query("ALTER TABLE memories ADD COLUMN source_attribution JSON")
-                .execute(pool)
-                .await?;
-            sqlx::query("ALTER TABLE memories ADD COLUMN trust_level REAL DEFAULT 0.5")
-                .execute(pool)
-                .await?;
-            sqlx::query(
-                "ALTER TABLE memories ADD COLUMN source_reinforcement_score REAL DEFAULT 0.0",
-            )
-            .execute(pool)
-            .await?;
-            tracing::info!("Provenance columns added");
-        }
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_expired_at ON memories(expired_at)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_trust_level ON memories(trust_level)")
-            .execute(pool)
-            .await?;
-
-        // Ensure agent tables exist
+        // Episodes: append-only log of (query, returned_ids, used_ids, agent_ctx, ts).
+        // Substrate for derived feedback signals — no separate counter tables.
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS agents (
+            CREATE TABLE IF NOT EXISTS episodes (
                 id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                description TEXT,
-                metadata JSON DEFAULT '{}',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                query TEXT NOT NULL,
+                returned_ids JSON NOT NULL DEFAULT '[]',
+                used_ids JSON,
+                result TEXT,
+                workspace_id TEXT,
+                platform_session_id TEXT,
+                harness_session_id TEXT,
+                ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                closed_at DATETIME
             )
             "#,
         )
         .execute(pool)
         .await?;
 
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS agent_events (
-                id TEXT PRIMARY KEY,
-                agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-                event_type TEXT NOT NULL,
-                status TEXT,
-                payload JSON,
-                span_id TEXT,
-                memory_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts DESC)")
             .execute(pool)
             .await?;
-
-        // Learnings table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS learnings (
-                id TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                kind TEXT NOT NULL DEFAULT 'guiding',
-                category TEXT NOT NULL DEFAULT 'general',
-                scope TEXT NOT NULL DEFAULT 'global',
-                scope_key TEXT,
-                maturity TEXT NOT NULL DEFAULT 'candidate',
-                pinned BOOLEAN NOT NULL DEFAULT 0,
-                helpful_count INTEGER NOT NULL DEFAULT 0,
-                harmful_count INTEGER NOT NULL DEFAULT 0,
-                effective_score REAL NOT NULL DEFAULT 0.0,
-                agent_id TEXT REFERENCES agents(id),
-                source_sessions JSON DEFAULT '[]',
-                reasoning TEXT,
-                tags JSON DEFAULT '[]',
-                metadata JSON DEFAULT '{}',
-                embedding BLOB,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings(category)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_kind ON learnings(kind)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_maturity ON learnings(maturity)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_episodes_workspace ON episodes(workspace_id)")
             .execute(pool)
             .await?;
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_learnings_score ON learnings(effective_score DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_platform_session ON episodes(platform_session_id)",
         )
         .execute(pool)
         .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_episodes_closed_at ON episodes(closed_at)")
             .execute(pool)
             .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_learnings_scope ON learnings(scope, scope_key)",
-        )
-        .execute(pool)
-        .await?;
-
-        // Learning feedback events
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS learning_feedback (
-                id TEXT PRIMARY KEY,
-                learning_id TEXT NOT NULL REFERENCES learnings(id) ON DELETE CASCADE,
-                feedback_type TEXT NOT NULL CHECK(feedback_type IN ('helpful', 'harmful')),
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                session_path TEXT,
-                reason TEXT,
-                agent_id TEXT REFERENCES agents(id)
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_learning_feedback_learning ON learning_feedback(learning_id)",
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_learning_feedback_timestamp ON learning_feedback(timestamp)",
-        )
-        .execute(pool)
-        .await?;
-
-        // Check if bridge_block_id column exists, add if not (for HMLR feature)
-        let bridge_block_id_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='bridge_block_id'",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if !bridge_block_id_exists {
-            tracing::info!("Adding bridge_block_id column to memories table...");
-            sqlx::query("ALTER TABLE memories ADD COLUMN bridge_block_id TEXT")
-                .execute(pool)
-                .await?;
-            sqlx::query(
-                "CREATE INDEX IF NOT EXISTS idx_memories_bridge_block ON memories(bridge_block_id)",
-            )
-            .execute(pool)
-            .await?;
-            tracing::info!("bridge_block_id column added");
-        }
 
         // AGENT_CTX columns: stable IDs denormalized from metadata.agent_ctx
         // for index-backed filtering by workspace / session.
@@ -571,6 +406,217 @@ impl Database {
             .await?;
         }
 
+        // `store` column: replaces the legacy "one file per store" layout with
+        // a single DB keyed by store name. Backfills existing rows to 'default'.
+        let store_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='store'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if !store_exists {
+            tracing::info!("Adding store column to memories table...");
+            sqlx::query("ALTER TABLE memories ADD COLUMN store TEXT NOT NULL DEFAULT 'default'")
+                .execute(pool)
+                .await?;
+        }
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_store ON memories(store)")
+            .execute(pool)
+            .await?;
+
+        // Feedback counters on memories — bumped by `close_episode` when an
+        // agent's follow-up `mmry add --using <ids>` cites a returned memory.
+        for column in ["helpful_count", "harmful_count"] {
+            let exists: bool = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='{column}'"
+            ))
+            .fetch_one(pool)
+            .await?;
+            if !exists {
+                tracing::info!("Adding {column} column to memories table...");
+                sqlx::query(&format!(
+                    "ALTER TABLE memories ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                ))
+                .execute(pool)
+                .await?;
+            }
+        }
+
+        Self::cleanup_legacy_artifacts(pool).await?;
+
+        Ok(())
+    }
+
+    /// One-shot cleanup that drops the carcass of features mmry used to
+    /// have: dead tables (bridge_blocks, agents, entities, learnings, …),
+    /// dead columns (`embedding` BLOB now lives only in sqlite-vec, plus
+    /// expires_at/trust_level/source_attribution/etc.), dead indexes, and
+    /// fat keys inside `metadata` (parts_json, attachments, tool_calls)
+    /// that legacy hstry-import paths shoved into rows.
+    ///
+    /// Gated on `PRAGMA user_version` so we pay this once. The migration
+    /// is intentionally additive-by-omission: if a column or table is
+    /// missing, the corresponding DROP just no-ops via IF EXISTS.
+    async fn cleanup_legacy_artifacts(pool: &SqlitePool) -> crate::Result<()> {
+        let current_version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(pool)
+            .await?;
+        if current_version >= 1 {
+            return Ok(());
+        }
+
+        tracing::info!("Running one-shot legacy cleanup (user_version 0 → 1)...");
+
+        // Disable FK enforcement for the duration of this migration. The
+        // pool is opened with `foreign_keys = ON`, which makes SQLite reject
+        // DROP TABLE on a parent if any sibling table still has REFERENCES
+        // to it. Children below get dropped too — we just need to do it in
+        // any order without tripping that check.
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(pool)
+            .await?;
+
+        // Order children before parents anyway so re-runs against a partial
+        // cleanup don't leave dangling FK references in sqlite_master.
+        for table in [
+            "learning_feedback",
+            "learning_feedback_events",
+            "learnings",
+            "memory_entities",
+            "relationships",
+            "entities",
+            "facts",
+            "user_profiles",
+            "agent_events",
+            "agents",
+            "bridge_blocks",
+        ] {
+            sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+                .execute(pool)
+                .await?;
+        }
+
+        for index in [
+            "idx_memories_expires_at",
+            "idx_memories_expired_at",
+            "idx_memories_trust_level",
+            "idx_memories_bridge_block",
+            "idx_memories_bridge_block_created",
+        ] {
+            sqlx::query(&format!("DROP INDEX IF EXISTS {index}"))
+                .execute(pool)
+                .await?;
+        }
+
+        // Before dropping the legacy `embedding` BLOB column, copy anything
+        // it holds that isn't already in the sqlite-vec virtual table.
+        // sqlite-vec is the new canonical home for dense vectors; the BLOB
+        // is just a 2x duplicate sitting in the row.
+        let embedding_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='embedding'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if embedding_exists {
+            let rows = sqlx::query(
+                r#"
+                SELECT id, embedding FROM memories
+                WHERE embedding IS NOT NULL
+                  AND id NOT IN (SELECT memory_id FROM memory_embeddings)
+                "#,
+            )
+            .fetch_all(pool)
+            .await?;
+            if !rows.is_empty() {
+                tracing::info!(
+                    "Backfilling {} dense vectors from memories.embedding into sqlite-vec...",
+                    rows.len()
+                );
+            }
+            for row in rows {
+                let id: String = row.try_get("id")?;
+                let raw: Vec<u8> = row.try_get("embedding")?;
+                if raw.is_empty() {
+                    continue;
+                }
+                match serde_json::from_slice::<Vec<f32>>(&raw) {
+                    Ok(vec) => {
+                        if let Ok(uuid) = Uuid::parse_str(&id) {
+                            if let Err(e) = upsert_vector_embedding(pool, &uuid, &vec).await {
+                                warn!(memory_id = %id, error = %e, "Failed to backfill vector");
+                            }
+                        }
+                    }
+                    Err(err) => warn!(
+                        error = %err,
+                        memory_id = %id,
+                        "Skipping malformed legacy embedding blob"
+                    ),
+                }
+            }
+        }
+
+        // SQLite ≥ 3.35 supports DROP COLUMN. We only drop the *heavy*
+        // `embedding` BLOB column — that one carries ~2GB of duplicated
+        // dense vectors. The other historical columns (expires_at,
+        // trust_level, …) are tiny ints/text and not worth the WAL pressure
+        // of rewriting the whole memories table for. Checkpoint TRUNCATE
+        // after the drop so the giant WAL doesn't sit on disk while VACUUM
+        // tries to allocate its own scratch.
+        let embedding_col_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='embedding'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if embedding_col_exists {
+            if let Err(e) = sqlx::query("ALTER TABLE memories DROP COLUMN embedding")
+                .execute(pool)
+                .await
+            {
+                tracing::warn!("Could not drop column embedding: {e}");
+            }
+            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                .execute(pool)
+                .await;
+        }
+
+        // Strip the conversation-payload bloat that legacy hstry imports
+        // wrote into `metadata`. We keep `record_kind`, `role`, `tokens`,
+        // `workspace`, `agent_ctx`, etc. — anything still consumed by the
+        // codepaths. Doing it as one big UPDATE means a single table scan.
+        let stripped = sqlx::query(
+            r#"
+            UPDATE memories
+            SET metadata = json_remove(metadata, '$.parts_json', '$.attachments', '$.tool_calls')
+            WHERE json_extract(metadata, '$.parts_json') IS NOT NULL
+               OR json_extract(metadata, '$.attachments') IS NOT NULL
+               OR json_extract(metadata, '$.tool_calls') IS NOT NULL
+            "#,
+        )
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if stripped > 0 {
+            tracing::info!("Stripped conversation-payload bloat from {stripped} rows");
+        }
+
+        // Force the WAL to flush back into the main DB before VACUUM, then
+        // truncate so the WAL file doesn't keep gigabytes of stale frames
+        // around competing for disk with the VACUUM scratch file.
+        let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(pool)
+            .await;
+
+        // VACUUM cannot run inside a transaction. On a multi-GB DB this
+        // rewrites the file end-to-end and may take a few minutes —
+        // acceptable price for reclaiming the space.
+        tracing::info!("Running VACUUM to reclaim freed pages...");
+        sqlx::query("VACUUM").execute(pool).await?;
+
+        sqlx::query("PRAGMA user_version = 1").execute(pool).await?;
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(pool)
+            .await?;
+        tracing::info!("Legacy cleanup complete.");
         Ok(())
     }
 
@@ -613,65 +659,6 @@ impl Database {
         );
 
         sqlx::query(&create_sql).execute(pool).await?;
-        Ok(())
-    }
-
-    pub(crate) async fn backfill_vector_table(
-        pool: &SqlitePool,
-        dimension: usize,
-    ) -> crate::Result<()> {
-        let missing: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) FROM memories
-            WHERE embedding IS NOT NULL
-              AND id NOT IN (SELECT memory_id FROM memory_embeddings)
-            "#,
-        )
-        .fetch_one(pool)
-        .await?;
-
-        if missing == 0 {
-            return Ok(());
-        }
-
-        let rows = sqlx::query(
-            r#"
-            SELECT id, embedding FROM memories
-            WHERE embedding IS NOT NULL
-              AND id NOT IN (SELECT memory_id FROM memory_embeddings)
-            "#,
-        )
-        .fetch_all(pool)
-        .await?;
-
-        for row in rows {
-            let id: String = row.try_get("id")?;
-            let raw: Vec<u8> = row.try_get("embedding")?;
-            if raw.is_empty() {
-                continue;
-            }
-
-            match serde_json::from_slice::<Vec<f32>>(&raw) {
-                Ok(vec) if vec.len() == dimension => {
-                    let uuid = Uuid::parse_str(&id).map_err(|e| {
-                        crate::Error::Config(format!("Invalid UUID {id} in memories table: {e}"))
-                    })?;
-                    upsert_vector_embedding(pool, &uuid, &vec).await?;
-                }
-                Ok(vec) => warn!(
-                    expected = dimension,
-                    actual = vec.len(),
-                    memory_id = %id,
-                    "Skipping vector backfill due to length mismatch"
-                ),
-                Err(err) => warn!(
-                    error = %err,
-                    memory_id = %id,
-                    "Skipping vector backfill due to malformed embedding"
-                ),
-            }
-        }
-
         Ok(())
     }
 
@@ -752,7 +739,6 @@ mod tests {
     use crate::memory::MemoryType;
     use chrono::Utc;
     use serde_json::json;
-    use sqlx::sqlite::SqlitePoolOptions;
     use tempfile::tempdir;
 
     const TEST_DIM: usize = 3;
@@ -827,58 +813,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backfill_populates_virtual_table_for_existing_rows() -> crate::Result<()> {
-        ensure_sqlite_vec_loaded()?;
-        let temp = tempdir().expect("create temp dir");
-        let db_path = temp.path().join("preexisting.db");
-        let url = format!("sqlite://{}?mode=rwc", db_path.display());
-
-        let pool = SqlitePoolOptions::new().connect(&url).await?;
-        sqlx::query(schema::INIT_SQL).execute(&pool).await?;
-
-        let memory_id = Uuid::new_v4();
-        let embedding_blob = serde_json::to_vec(&vec![0.9, 0.1, 0.0]).unwrap();
-        let now = Utc::now().to_rfc3339();
-
-        sqlx::query(
-            r#"
-            INSERT INTO memories
-            (id, type, content, embedding, sparse_embedding, metadata, importance, category, tags, created_at, updated_at)
-            VALUES (?, ?, ?, ?, NULL, '{}', 5, 'default', '[]', ?, ?)
-            "#,
-        )
-        .bind(memory_id.to_string())
-        .bind(serde_json::to_string(&MemoryType::Episodic)?)
-        .bind("legacy row with embedding")
-        .bind(embedding_blob)
-        .bind(&now)
-        .bind(&now)
-        .execute(&pool)
-        .await?;
-
-        Database::ensure_vector_table(&pool, TEST_DIM).await?;
-        Database::backfill_vector_table(&pool, TEST_DIM).await?;
-
-        let exists: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM memory_embeddings WHERE memory_id = ? LIMIT 1")
-                .bind(memory_id.to_string())
-                .fetch_optional(&pool)
-                .await?;
-
-        assert_eq!(exists, Some(1));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn init_store_migrates_legacy_database() -> crate::Result<()> {
+    async fn init_store_seeds_unified_from_old_single_file() -> crate::Result<()> {
         use crate::config::Config;
 
         let temp = tempdir().expect("create temp dir");
 
-        // Create a legacy database with some data
+        // Pre-unification: single-file `database.path` install.
         let legacy_path = temp.path().join("memories.db");
         let legacy_db = Database::init(&legacy_path, TEST_DIM).await?;
-
         let memory = Memory::new(
             MemoryType::Episodic,
             "legacy memory content".to_string(),
@@ -887,24 +829,23 @@ mod tests {
         operations::insert_memory(legacy_db.pool(), &memory).await?;
         legacy_db.close().await;
 
-        // Create config pointing to our temp directories
         let mut config = Config::default();
         config.database.path = legacy_path.clone();
         config.stores.directory = temp.path().join("stores");
         config.stores.default = "default".to_string();
         config.embeddings.dimension = TEST_DIM;
 
-        // The stores directory and default store should not exist yet
-        let store_path = config.store_path("default");
-        assert!(!store_path.exists());
+        let unified_path = config.stores.directory.join(UNIFIED_DB_FILENAME);
+        assert!(!unified_path.exists());
 
-        // Initialize the default store - this should trigger migration
         let db = Database::init_store(&config, None).await?;
 
-        // Verify the store database now exists
-        assert!(store_path.exists());
+        // Unified DB now exists and contains the legacy row, and the
+        // legacy file has been renamed out of the way.
+        assert!(unified_path.exists());
+        assert!(!legacy_path.exists());
+        assert!(legacy_path.with_extension("db.migrated").exists());
 
-        // Verify the memory was migrated
         let memories = operations::list_memories(db.pool(), None, 100).await?;
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].content, "legacy memory content");
@@ -914,81 +855,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_store_merges_legacy_into_existing_store() -> crate::Result<()> {
+    async fn init_store_imports_per_store_files_with_tag() -> crate::Result<()> {
         use crate::config::Config;
 
         let temp = tempdir().expect("create temp dir");
+        let stores_dir = temp.path().join("stores");
+        std::fs::create_dir_all(&stores_dir)?;
 
-        // Create a legacy database with some data
-        let legacy_path = temp.path().join("memories.db");
-        let legacy_db = Database::init(&legacy_path, TEST_DIM).await?;
-        let legacy_memory = Memory::new(
-            MemoryType::Episodic,
-            "legacy memory".to_string(),
-            "default".to_string(),
-        );
-        operations::insert_memory(legacy_db.pool(), &legacy_memory).await?;
-        legacy_db.close().await;
+        // Two pre-existing per-store files; their rows should be tagged
+        // with the file stem as `store` when imported into the unified DB.
+        let work_path = stores_dir.join("work.db");
+        let personal_path = stores_dir.join("personal.db");
+        {
+            let work = Database::init(&work_path, TEST_DIM).await?;
+            operations::insert_memory(
+                work.pool(),
+                &Memory::new(MemoryType::Episodic, "work note".into(), "default".into()),
+            )
+            .await?;
+            work.close().await;
 
-        // Create config
+            let personal = Database::init(&personal_path, TEST_DIM).await?;
+            operations::insert_memory(
+                personal.pool(),
+                &Memory::new(
+                    MemoryType::Episodic,
+                    "personal note".into(),
+                    "default".into(),
+                ),
+            )
+            .await?;
+            personal.close().await;
+        }
+
         let mut config = Config::default();
-        config.database.path = legacy_path.clone();
-        config.stores.directory = temp.path().join("stores");
+        config.database.path = temp.path().join("nonexistent.db");
+        config.stores.directory = stores_dir.clone();
         config.stores.default = "default".to_string();
         config.embeddings.dimension = TEST_DIM;
 
-        // Pre-create the store with different data
-        std::fs::create_dir_all(&config.stores.directory)?;
-        let store_path = config.store_path("default");
-        let store_db = Database::init(&store_path, TEST_DIM).await?;
-        let store_memory = Memory::new(
-            MemoryType::Semantic,
-            "store memory".to_string(),
-            "default".to_string(),
-        );
-        operations::insert_memory(store_db.pool(), &store_memory).await?;
-        store_db.close().await;
-
-        // Initialize - should merge legacy memories into existing store
         let db = Database::init_store(&config, None).await?;
 
-        // Verify both memories exist (merged)
+        // Both per-store files were imported and renamed.
+        assert!(!work_path.exists());
+        assert!(!personal_path.exists());
+        assert!(work_path.with_extension("db.migrated").exists());
+        assert!(personal_path.with_extension("db.migrated").exists());
+
         let memories = operations::list_memories(db.pool(), None, 100).await?;
         assert_eq!(memories.len(), 2);
-
-        let contents: Vec<&str> = memories.iter().map(|m| m.content.as_str()).collect();
-        assert!(contents.contains(&"legacy memory"));
-        assert!(contents.contains(&"store memory"));
-
-        // Verify legacy database was removed
-        assert!(!legacy_path.exists());
+        let by_store: std::collections::HashMap<&str, &str> = memories
+            .iter()
+            .map(|m| (m.store.as_str(), m.content.as_str()))
+            .collect();
+        assert_eq!(by_store.get("work").copied(), Some("work note"));
+        assert_eq!(by_store.get("personal").copied(), Some("personal note"));
 
         db.close().await;
         Ok(())
     }
 
     #[tokio::test]
-    async fn agent_and_events_roundtrip() -> crate::Result<()> {
-        use crate::agents::AgentEvent;
-        use crate::agents::AgentRecord;
+    async fn init_store_is_idempotent_on_second_open() -> crate::Result<()> {
+        use crate::config::Config;
 
         let temp = tempdir().expect("create temp dir");
-        let db_path = temp.path().join("agent.db");
+        let stores_dir = temp.path().join("stores");
+        std::fs::create_dir_all(&stores_dir)?;
 
-        let db = Database::init(&db_path, TEST_DIM).await?;
+        let mut config = Config::default();
+        config.database.path = temp.path().join("nonexistent.db");
+        config.stores.directory = stores_dir;
+        config.stores.default = "default".to_string();
+        config.embeddings.dimension = TEST_DIM;
 
-        let mut agent = AgentRecord::new("tester", "sidecar");
-        agent.description = Some("integration test agent".to_string());
-        operations::upsert_agent(db.pool(), &agent).await?;
+        let db = Database::init_store(&config, None).await?;
+        operations::insert_memory(
+            db.pool(),
+            &Memory::new(MemoryType::Episodic, "row".into(), "default".into()),
+        )
+        .await?;
+        db.close().await;
 
-        let mut event = AgentEvent::new(agent.id, "route");
-        event.payload = json!({ "query": "hello" });
-        operations::record_agent_event(db.pool(), &event).await?;
-
-        let listed_events = operations::list_agent_events(db.pool(), 5).await?;
-        assert_eq!(listed_events.len(), 1);
-        assert_eq!(listed_events[0].agent_id, agent.id);
-
+        // Reopening should not duplicate or destroy data.
+        let db = Database::init_store(&config, None).await?;
+        let memories = operations::list_memories(db.pool(), None, 100).await?;
+        assert_eq!(memories.len(), 1);
         db.close().await;
         Ok(())
     }
@@ -1023,14 +975,11 @@ mod tests {
         // Initialize should add missing columns and new tables without failing if re-run.
         let db = Database::init(&db_path, TEST_DIM).await?;
 
-        // Verify new columns were added
+        // Verify new columns were added (note: `embedding` BLOB is no longer
+        // expected — cleanup_legacy_artifacts drops it now that dense vectors
+        // live in the sqlite-vec virtual table).
         let has_tags: bool = sqlx::query_scalar(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='tags'",
-        )
-        .fetch_one(db.pool())
-        .await?;
-        let has_embedding: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name='embedding'",
         )
         .fetch_one(db.pool())
         .await?;
@@ -1046,17 +995,8 @@ mod tests {
         .await?;
 
         assert!(has_tags);
-        assert!(has_embedding);
         assert!(has_sparse);
         assert!(has_chunk_index);
-
-        // Verify learnings table exists
-        let learnings_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='learnings'",
-        )
-        .fetch_one(db.pool())
-        .await?;
-        assert!(learnings_exists);
 
         // Second init should be idempotent
         let _ = Database::init(&db_path, TEST_DIM).await?;

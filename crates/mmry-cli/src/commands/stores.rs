@@ -4,7 +4,7 @@ use clap::ValueEnum;
 use mmry_core::config::Config;
 use mmry_core::database::Database;
 use mmry_core::stores::delete_store;
-use mmry_core::stores::format_size;
+use mmry_core::stores::format_count;
 use mmry_core::stores::list_stores;
 use mmry_core::stores::store_exists;
 use mmry_core::stores::validate_store_name;
@@ -123,7 +123,7 @@ pub async fn handle(cmd: StoresCmd, config: &Config) -> anyhow::Result<()> {
 }
 
 async fn handle_list(config: &Config, json: bool) -> anyhow::Result<()> {
-    let stores = list_stores(config)?;
+    let stores = list_stores(config).await?;
 
     if json {
         let output: Vec<_> = stores
@@ -132,8 +132,7 @@ async fn handle_list(config: &Config, json: bool) -> anyhow::Result<()> {
                 serde_json::json!({
                     "name": s.name,
                     "path": s.path,
-                    "size_bytes": s.size_bytes,
-                    "size": format_size(s.size_bytes),
+                    "memory_count": s.memory_count,
                     "is_default": s.is_default,
                 })
             })
@@ -153,7 +152,7 @@ async fn handle_list(config: &Config, json: bool) -> anyhow::Result<()> {
                 "  {}{} - {}",
                 store.name,
                 default_marker,
-                format_size(store.size_bytes)
+                format_count(store.memory_count)
             );
         }
         println!();
@@ -167,22 +166,23 @@ async fn handle_list(config: &Config, json: bool) -> anyhow::Result<()> {
 async fn handle_create(config: &Config, name: &str) -> anyhow::Result<()> {
     validate_store_name(name)?;
 
-    if store_exists(config, name) {
+    if store_exists(config, name).await? {
         anyhow::bail!("Store '{name}' already exists");
     }
 
-    // Create the store by initializing its database
+    // Stores no longer have their own DB file — they're just a tag on
+    // memories. Opening the unified DB once ensures schema is current
+    // and confirms the tag will be writable.
     let db = Database::init_store(config, Some(name)).await?;
     db.close().await;
 
-    println!("Created store '{name}'");
-    println!("Path: {}", config.store_path(name).display());
+    println!("Created store '{name}' (tag in unified DB)");
 
     Ok(())
 }
 
 async fn handle_delete(config: &Config, name: &str, yes: bool) -> anyhow::Result<()> {
-    if !store_exists(config, name) {
+    if !store_exists(config, name).await? {
         anyhow::bail!("Store '{name}' does not exist");
     }
 
@@ -203,7 +203,7 @@ async fn handle_delete(config: &Config, name: &str, yes: bool) -> anyhow::Result
         }
     }
 
-    delete_store(config, name)?;
+    delete_store(config, name).await?;
     println!("Deleted store '{name}'");
 
     Ok(())
@@ -211,9 +211,14 @@ async fn handle_delete(config: &Config, name: &str, yes: bool) -> anyhow::Result
 
 async fn handle_info(config: &Config, name: Option<&str>, json: bool) -> anyhow::Result<()> {
     let store_name = name.unwrap_or(&config.stores.default);
-    let path = config.store_path(store_name);
+    let is_default = store_name == config.stores.default;
 
-    if !path.exists() {
+    let db = Database::init_store(config, Some(store_name)).await?;
+    let memory_count: i64 =
+        mmry_core::database::operations::count_memories_scoped(db.pool(), Some(store_name)).await?;
+    db.close().await;
+
+    if memory_count == 0 && !is_default {
         if json {
             println!(
                 "{}",
@@ -224,35 +229,24 @@ async fn handle_info(config: &Config, name: Option<&str>, json: bool) -> anyhow:
         } else {
             println!("Store '{store_name}' does not exist.");
             println!();
-            println!("Create it with: mmry stores create {store_name}");
+            println!("Create it by adding a memory with --store {store_name}");
         }
         return Ok(());
     }
 
-    let metadata = std::fs::metadata(&path)?;
-    let is_default = store_name == config.stores.default;
-
-    // Get memory count
-    let db = Database::init_store(config, Some(store_name)).await?;
-    let memory_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories")
-        .fetch_one(db.pool())
-        .await?;
-    let entity_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entities")
-        .fetch_one(db.pool())
-        .await?;
-    db.close().await;
+    let unified_path = config
+        .stores
+        .directory
+        .join(mmry_core::database::UNIFIED_DB_FILENAME);
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "name": store_name,
-                "path": path,
-                "size_bytes": metadata.len(),
-                "size": format_size(metadata.len()),
-                "is_default": is_default,
+                "path": unified_path,
                 "memory_count": memory_count,
-                "entity_count": entity_count,
+                "is_default": is_default,
             }))?
         );
     } else {
@@ -261,10 +255,8 @@ async fn handle_info(config: &Config, name: Option<&str>, json: bool) -> anyhow:
             println!("       (default)");
         }
         println!();
-        println!("  Path: {}", path.display());
-        println!("  Size: {}", format_size(metadata.len()));
+        println!("  Path: {}", unified_path.display());
         println!("  Memories: {memory_count}");
-        println!("  Entities: {entity_count}");
     }
 
     Ok(())
@@ -280,14 +272,8 @@ async fn handle_copy(
     validate_store_name(from)?;
     validate_store_name(to)?;
 
-    if !store_exists(config, from) {
+    if !store_exists(config, from).await? {
         anyhow::bail!("Source store '{from}' does not exist");
-    }
-
-    if !store_exists(config, to) {
-        // Auto-create destination
-        let db = Database::init_store(config, Some(to)).await?;
-        db.close().await;
     }
 
     let result = mmry_core::stores::copy_store(config, from, to, strategy).await?;
@@ -312,7 +298,7 @@ async fn handle_move(
     validate_store_name(from)?;
     validate_store_name(to)?;
 
-    if !store_exists(config, from) {
+    if !store_exists(config, from).await? {
         anyhow::bail!("Source store '{from}' does not exist");
     }
 
@@ -332,11 +318,6 @@ async fn handle_move(
             println!("Aborted.");
             return Ok(());
         }
-    }
-
-    if !store_exists(config, to) {
-        let db = Database::init_store(config, Some(to)).await?;
-        db.close().await;
     }
 
     let result = mmry_core::stores::move_store(config, from, to, strategy).await?;

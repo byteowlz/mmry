@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.12.0
+
+### Changed
+
+- Default CLI storage is now the lean workspace-local append-only memory file at `.mmry/mmry.jsonl`.
+- `mmry init` now initializes the JSONL memory file and gitignores it by default; use `mmry init --tracked` to track it.
+- Legacy SQLite/indexed behavior moved behind `--indexed` for `init`, `add`, `list`/`ls`, `search`, and `rm`.
+- Renamed the new core JSONL API to `MemoryFile`, `MemoryEntry`, `MemoryEvent`, and `MemoryEventType`.
+- `mmry rm` now appends a `memory.deprecate` event in default mode instead of physically deleting data.
+
+### Added
+
+- `mmry-core::MemoryFile::open_workspace` for embedding workspace-local memory directly in tools such as oqto runner.
+- Standalone migration script: `scripts/migrate_legacy_mmry_to_jsonl.py`.
+- Migration filtering for bulky hstry/session/chunk imports by default.
+- `list` alias for `ls` in the lean CLI.
+
+### Notes
+
+Release notes are generated from this changelog section. For GitHub releases, use the `0.12.0` section as the release body after pushing tag `v0.12.0`.
+
 ## 0.10.2
 
 ### Added

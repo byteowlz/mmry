@@ -92,7 +92,6 @@ message SearchRequest {
   SearchMode mode = 4;
   bool rerank = 5;
   string store = 6;
-  bool include_expired = 7;
   // Filter fields
   repeated string tags = 8;
   string memory_type = 9;
@@ -121,9 +120,6 @@ message MemoryResult {
   string parent_id = 12;
   int32 chunk_index = 13;
   int32 total_chunks = 14;
-  string chunk_method = 15;
-  string expires_at = 16;
-  string expired_at = 17;
 }
 
 message SearchResponse {

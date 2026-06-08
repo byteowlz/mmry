@@ -12,17 +12,11 @@ use ratatui::widgets::ListState;
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::state::MiddleView;
 use crate::state::Pane;
 use mmry_core::memory::MemoryType;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Left;
-
-    if app.middle_view != MiddleView::Memories {
-        draw_hmlr_nav(f, app, area, is_active);
-        return;
-    }
 
     let mut items = Vec::new();
 
@@ -193,57 +187,4 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         );
 
     f.render_stateful_widget(list, area, &mut state);
-}
-
-fn draw_hmlr_nav(f: &mut Frame, app: &App, area: Rect, is_active: bool) {
-    let current = app.middle_view;
-    let items = vec![
-        ListItem::new(Line::from(" DATA VIEWS")).style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        view_item("Memories", current == MiddleView::Memories, None),
-        view_item(
-            "Agent Events",
-            current == MiddleView::AgentEvents,
-            Some(app.agent_events.len()),
-        ),
-    ];
-
-    let mut state = ListState::default();
-    state.select(Some(
-        app.left_selection.index.min(items.len().saturating_sub(1)),
-    ));
-
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Navigation ")
-            .borders(Borders::ALL)
-            .border_style(if is_active {
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            }),
-    );
-
-    f.render_stateful_widget(list, area, &mut state);
-}
-
-fn view_item(label: &str, active: bool, count: Option<usize>) -> ListItem<'static> {
-    let text = if let Some(c) = count {
-        format!("{label} ({c})")
-    } else {
-        label.to_string()
-    };
-    let style = if active {
-        Style::default()
-            .fg(Color::Blue)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    ListItem::new(Line::from(vec![Span::raw("  "), Span::styled(text, style)]))
 }

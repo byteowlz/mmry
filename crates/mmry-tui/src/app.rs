@@ -7,7 +7,6 @@ use crate::state::sort::SortMode;
 use crate::state::AppMode;
 use crate::state::FilterState;
 use crate::state::MemoryKey;
-use crate::state::MiddleView;
 use crate::state::Pane;
 use crate::state::RightPaneView;
 use crate::state::Selection;
@@ -20,13 +19,12 @@ use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
-use mmry_core::agents::AgentEvent;
 use mmry_core::config::Config;
 use mmry_core::config::SearchMode;
 use mmry_core::database::operations;
 use mmry_core::database::Database;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
-use mmry_core::memory::SourceAttribution;
+use mmry_core::memory::Memory;
 use mmry_core::reranker::RerankerService;
 use mmry_core::search::SearchService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
@@ -38,7 +36,6 @@ use mmry_core::stores::move_memory_to_store;
 use mmry_core::stores::store_exists;
 use mmry_core::stores::validate_store_name;
 use mmry_core::stores::write_export_to_file;
-use mmry_core::stores::MemoryWithStore;
 use mmry_core::stores::StoreInfo;
 use std::collections::HashSet;
 use std::io::Write;
@@ -90,15 +87,13 @@ pub struct App {
     search_service: SearchService,
     search_mode_index: usize,
     sort_menu_index: usize,
-    search_backup: Option<Vec<MemoryWithStore>>,
-    pub memories: Vec<MemoryWithStore>,
-    pub agent_events: Vec<AgentEvent>,
+    search_backup: Option<Vec<Memory>>,
+    pub memories: Vec<Memory>,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
 
     pub mode: AppMode,
     pub active_pane: Pane,
-    pub middle_view: MiddleView,
     pub right_pane_view: RightPaneView,
 
     pub left_selection: Selection,
@@ -145,7 +140,7 @@ impl App {
         );
 
         // Get available stores
-        let available_stores = list_stores(&config).unwrap_or_default();
+        let available_stores = list_stores(&config).await.unwrap_or_default();
 
         let mut app = Self {
             config,
@@ -155,12 +150,10 @@ impl App {
             sort_menu_index: 0,
             search_backup: None,
             memories: Vec::new(),
-            agent_events: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
             mode: AppMode::Normal,
             active_pane: Pane::Middle,
-            middle_view: MiddleView::Memories,
             right_pane_view: RightPaneView::default(),
             left_selection: Selection::new(),
             middle_selection: Selection::new(),
@@ -212,7 +205,7 @@ impl App {
         self.middle_selection.reset();
         self.filter_state.clear();
         self.search_backup = None; // Refresh available stores list
-        self.available_stores = list_stores(&self.config).unwrap_or_default();
+        self.available_stores = list_stores(&self.config).await.unwrap_or_default();
 
         self.status_message = Some(format!("Switched to store: {store_name}"));
 
@@ -232,7 +225,7 @@ impl App {
         self.middle_selection.reset();
         self.filter_state.clear();
         self.search_backup = None; // Refresh available stores list
-        self.available_stores = list_stores(&self.config).unwrap_or_default();
+        self.available_stores = list_stores(&self.config).await.unwrap_or_default();
 
         self.status_message = Some("Viewing all stores".to_string());
 
@@ -270,7 +263,7 @@ impl App {
     pub async fn create_store(&mut self, name: &str) -> Result<()> {
         validate_store_name(name)?;
 
-        if store_exists(&self.config, name) {
+        if store_exists(&self.config, name).await.unwrap_or(false) {
             self.status_message = Some(format!("Store '{name}' already exists"));
             return Ok(());
         }
@@ -280,7 +273,7 @@ impl App {
         db.close().await;
 
         // Refresh available stores list
-        self.available_stores = list_stores(&self.config).unwrap_or_default();
+        self.available_stores = list_stores(&self.config).await.unwrap_or_default();
 
         self.status_message = Some(format!("Created store '{name}'"));
 
@@ -327,7 +320,7 @@ impl App {
             items.push(StoreSelectItem {
                 id: store.name.clone(),
                 title: store.name.clone(),
-                detail: Some(mmry_core::stores::format_size(store.size_bytes)),
+                detail: Some(mmry_core::stores::format_count(store.memory_count)),
             });
         }
 
@@ -356,37 +349,24 @@ impl App {
     }
 
     pub async fn refresh_current_view(&mut self) -> Result<()> {
-        match self.middle_view {
-            MiddleView::Memories => {
-                if self.viewing_all_stores {
-                    let results = list_all_stores(&self.config, None, 1000).await?;
-                    self.memories = results;
-                } else {
-                    let memories = operations::list_memories(self.db.pool(), None, 1000).await?;
-                    self.memories = memories
-                        .into_iter()
-                        .map(|memory| MemoryWithStore {
-                            memory,
-                            store: self.current_store.clone(),
-                        })
-                        .collect();
-                }
-                self.sort_state.sort_memories(&mut self.memories);
-                self.update_categories_and_tags();
-                self.search_backup = None;
-                self.middle_selection.index = self
-                    .middle_selection
-                    .index
-                    .min(self.filtered_memories().len().saturating_sub(1));
-            }
-            MiddleView::AgentEvents => {
-                self.agent_events = operations::list_agent_events(self.db.pool(), 200).await?;
-                self.middle_selection.index = self
-                    .middle_selection
-                    .index
-                    .min(self.agent_events.len().saturating_sub(1));
-            }
+        if self.viewing_all_stores {
+            self.memories = list_all_stores(&self.config, None, 1000).await?;
+        } else {
+            self.memories = operations::list_memories_lean_scoped(
+                self.db.pool(),
+                Some(&self.current_store),
+                None,
+                1000,
+            )
+            .await?;
         }
+        self.sort_state.sort_memories(&mut self.memories);
+        self.update_categories_and_tags();
+        self.search_backup = None;
+        self.middle_selection.index = self
+            .middle_selection
+            .index
+            .min(self.filtered_memories().len().saturating_sub(1));
 
         Ok(())
     }
@@ -396,8 +376,8 @@ impl App {
         let mut tags = HashSet::new();
 
         for memory in &self.memories {
-            categories.insert(memory.memory.category.clone());
-            for tag in &memory.memory.tags {
+            categories.insert(memory.category.clone());
+            for tag in &memory.tags {
                 tags.insert(tag.clone());
             }
         }
@@ -409,43 +389,30 @@ impl App {
         self.tags.sort();
     }
 
-    pub fn selected_memory(&self) -> Option<&MemoryWithStore> {
-        if self.middle_view != MiddleView::Memories {
-            return None;
-        }
+    pub fn selected_memory(&self) -> Option<&Memory> {
         self.filtered_memories()
             .get(self.middle_selection.index)
             .copied()
     }
 
-    pub fn selected_agent_event(&self) -> Option<&AgentEvent> {
-        if self.middle_view != MiddleView::AgentEvents {
-            return None;
-        }
-        self.agent_events.get(self.middle_selection.index)
-    }
-
-    pub fn filtered_memories(&self) -> Vec<&MemoryWithStore> {
+    pub fn filtered_memories(&self) -> Vec<&Memory> {
         self.memories
             .iter()
             .filter(|m| {
                 // Category filter
-                if !self.filter_state.is_category_enabled(&m.memory.category) {
+                if !self.filter_state.is_category_enabled(&m.category) {
                     return false;
                 }
 
                 // Type filter
-                if !self.filter_state.is_type_enabled(&m.memory.memory_type) {
+                if !self.filter_state.is_type_enabled(&m.memory_type) {
                     return false;
                 }
 
                 // Tag filter - if any tags are filtered, at least one of the memory's tags must be enabled
                 if !self.filter_state.enabled_tags.is_empty() {
-                    let has_enabled_tag = m
-                        .memory
-                        .tags
-                        .iter()
-                        .any(|t| self.filter_state.is_tag_enabled(t));
+                    let has_enabled_tag =
+                        m.tags.iter().any(|t| self.filter_state.is_tag_enabled(t));
                     if !has_enabled_tag {
                         return false;
                     }
@@ -454,13 +421,13 @@ impl App {
                 // Recent filter (last 7 days)
                 if self.filter_state.show_recent {
                     let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
-                    if m.memory.created_at < seven_days_ago {
+                    if m.created_at < seven_days_ago {
                         return false;
                     }
                 }
 
                 // Important filter (importance > 7)
-                if self.filter_state.show_important && m.memory.importance <= 7 {
+                if self.filter_state.show_important && m.importance <= 7 {
                     return false;
                 }
 
@@ -470,9 +437,6 @@ impl App {
     }
 
     pub fn get_left_pane_item_count(&self) -> usize {
-        if self.middle_view != MiddleView::Memories {
-            return 3;
-        }
         // FILTERS header (1) + All/Recent/Important (3) + separator (1)
         // + MEMORY TYPES header (1) + Episodic/Semantic/Procedural (3) + separator (1)
         // + CATEGORIES header (1) + categories (N) + separator (1)
@@ -482,13 +446,6 @@ impl App {
     }
 
     pub fn get_selected_left_item(&self) -> Option<LeftPaneItem> {
-        if self.middle_view != MiddleView::Memories {
-            return match self.left_selection.index {
-                1 => Some(LeftPaneItem::Category("Memories".to_string())),
-                2 => Some(LeftPaneItem::Category("Agent Events".to_string())),
-                _ => Some(LeftPaneItem::Separator),
-            };
-        }
         let idx = self.left_selection.index;
         let mut current = 0;
 
@@ -627,9 +584,7 @@ impl App {
             KeyAction::PageUp => self.page_up(),
 
             KeyAction::Char('d') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message = Some("Delete works only in Memories view".to_string());
-                } else if self.middle_selection.has_selections() {
+                if self.middle_selection.has_selections() {
                     let filtered = self.filtered_memories();
                     let keys: Vec<MemoryKey> = self
                         .middle_selection
@@ -637,7 +592,7 @@ impl App {
                         .iter()
                         .filter_map(|&idx| {
                             filtered.get(idx).map(|m| MemoryKey {
-                                id: m.memory.id,
+                                id: m.id,
                                 store: m.store.clone(),
                             })
                         })
@@ -645,7 +600,7 @@ impl App {
                     self.mode = AppMode::DeleteMultiple(keys);
                 } else if let Some(memory) = self.selected_memory() {
                     self.mode = AppMode::Delete(MemoryKey {
-                        id: memory.memory.id,
+                        id: memory.id,
                         store: memory.store.clone(),
                     });
                 }
@@ -653,38 +608,27 @@ impl App {
 
             KeyAction::ToggleSelect => {
                 if self.active_pane == Pane::Middle {
-                    if self.middle_view != MiddleView::Memories {
-                        self.status_message =
-                            Some("Selection is only available in Memories view".to_string());
+                    self.middle_selection.toggle_selection();
+                    let count = self.filtered_memories().len();
+                    self.middle_selection.next(count, 20);
+                    self.status_message = if self.middle_selection.has_selections() {
+                        Some(format!(
+                            "{} selected",
+                            self.middle_selection.selection_count()
+                        ))
                     } else {
-                        self.middle_selection.toggle_selection();
-                        let count = self.filtered_memories().len();
-                        self.middle_selection.next(count, 20);
-                        self.status_message = if self.middle_selection.has_selections() {
-                            Some(format!(
-                                "{} selected",
-                                self.middle_selection.selection_count()
-                            ))
-                        } else {
-                            None
-                        };
-                    }
-                } else if self.active_pane == Pane::Left && self.middle_view == MiddleView::Memories
-                {
+                        None
+                    };
+                } else if self.active_pane == Pane::Left {
                     self.toggle_filter_item();
                 }
             }
 
             KeyAction::SelectAll => {
                 if self.active_pane == Pane::Middle {
-                    if self.middle_view != MiddleView::Memories {
-                        self.status_message =
-                            Some("Selection is only available in Memories view".to_string());
-                    } else {
-                        let count = self.filtered_memories().len();
-                        self.middle_selection.select_all(count);
-                        self.status_message = Some(format!("Selected all {count} memories"));
-                    }
+                    let count = self.filtered_memories().len();
+                    self.middle_selection.select_all(count);
+                    self.status_message = Some(format!("Selected all {count} memories"));
                 }
             }
 
@@ -696,12 +640,9 @@ impl App {
             }
 
             KeyAction::Char('e') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Editing is only available in Memories view".to_string());
-                } else if let Some(memory) = self.selected_memory() {
+                if let Some(memory) = self.selected_memory() {
                     self.edit_memory(MemoryKey {
-                        id: memory.memory.id,
+                        id: memory.id,
                         store: memory.store.clone(),
                     })
                     .await?;
@@ -709,12 +650,7 @@ impl App {
             }
 
             KeyAction::Char('a') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Add is only available in Memories view".to_string());
-                } else {
-                    self.add_memory().await?;
-                }
+                self.add_memory().await?;
             }
 
             KeyAction::Char('r') => {
@@ -723,13 +659,8 @@ impl App {
             }
 
             KeyAction::Char('/') | KeyAction::Char(':') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Search is only available in Memories view".to_string());
-                } else {
-                    self.mode = AppMode::Search(String::new());
-                    self.search_mode_index = self.index_for_mode(self.config.search.mode);
-                }
+                self.mode = AppMode::Search(String::new());
+                self.search_mode_index = self.index_for_mode(self.config.search.mode);
             }
 
             KeyAction::Escape => {
@@ -739,29 +670,17 @@ impl App {
             }
 
             KeyAction::Char('s') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message = Some("Sorting applies only in Memories view".to_string());
-                } else {
-                    self.sort_menu_index = self.index_for_sort_mode(self.sort_state.mode);
-                    self.mode = AppMode::Sort;
-                }
+                self.sort_menu_index = self.index_for_sort_mode(self.sort_state.mode);
+                self.mode = AppMode::Sort;
             }
 
             KeyAction::Char('t') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Type quick-change only in Memories view".to_string());
-                } else {
-                    use crate::state::WhichKeyContext;
-                    self.mode = AppMode::WhichKey(WhichKeyContext::Type);
-                }
+                use crate::state::WhichKeyContext;
+                self.mode = AppMode::WhichKey(WhichKeyContext::Type);
             }
 
             KeyAction::Char('i') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Importance change only in Memories view".to_string());
-                } else if self.active_pane == Pane::Left {
+                if self.active_pane == Pane::Left {
                     self.isolate_filter_item();
                 } else {
                     use crate::state::WhichKeyContext;
@@ -770,12 +689,8 @@ impl App {
             }
 
             KeyAction::Char('c') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message = Some("Category change only in Memories view".to_string());
-                } else {
-                    use crate::state::WhichKeyContext;
-                    self.mode = AppMode::WhichKey(WhichKeyContext::Category);
-                }
+                use crate::state::WhichKeyContext;
+                self.mode = AppMode::WhichKey(WhichKeyContext::Category);
             }
 
             KeyAction::Char('v') => {
@@ -783,67 +698,42 @@ impl App {
                 self.status_message = Some("View: Preview".to_string());
             }
 
-            KeyAction::Char('b') => {
-                self.middle_view = match self.middle_view {
-                    MiddleView::Memories => MiddleView::AgentEvents,
-                    MiddleView::AgentEvents => MiddleView::Memories,
-                };
-                self.left_selection.index = 0;
-                self.middle_selection.index = 0;
-                self.refresh_current_view().await?;
-                self.status_message = Some(match self.middle_view {
-                    MiddleView::Memories => "View: Memories".to_string(),
-                    MiddleView::AgentEvents => "View: Agent Events".to_string(),
-                });
-            }
-
             KeyAction::Char('S') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Store switching applies only in Memories view".to_string());
+                self.available_stores = list_stores(&self.config).await.unwrap_or_default();
+                if self.available_stores.is_empty() {
+                    self.status_message = Some(
+                        "No stores available. Create one with: mmry stores create <name>"
+                            .to_string(),
+                    );
                 } else {
-                    self.available_stores = list_stores(&self.config).unwrap_or_default();
-                    if self.available_stores.is_empty() {
-                        self.status_message = Some(
-                            "No stores available. Create one with: mmry stores create <name>"
-                                .to_string(),
-                        );
+                    let current_idx = self.current_store_index();
+                    let mut selected = std::collections::BTreeSet::new();
+                    if self.viewing_all_stores {
+                        selected.insert(ALL_LOCAL_STORES_ID.to_string());
                     } else {
-                        let current_idx = self.current_store_index();
-                        let mut selected = std::collections::BTreeSet::new();
-                        if self.viewing_all_stores {
-                            selected.insert(ALL_LOCAL_STORES_ID.to_string());
-                        } else {
-                            selected.insert(self.current_store.clone());
-                        }
-
-                        self.mode = AppMode::StoreSelect(StoreSelectState {
-                            query: String::new(),
-                            cursor: current_idx,
-                            selected,
-                        });
+                        selected.insert(self.current_store.clone());
                     }
+
+                    self.mode = AppMode::StoreSelect(StoreSelectState {
+                        query: String::new(),
+                        cursor: current_idx,
+                        selected,
+                    });
                 }
             }
 
             KeyAction::Char('m') => {
-                if self.middle_view != MiddleView::Memories {
-                    self.status_message =
-                        Some("Move is only available in Memories view".to_string());
-                    return Ok(true);
-                }
-                // Move memory to another store
                 if self.viewing_all_stores {
                     self.status_message =
                         Some("Cannot move memories while viewing all stores".to_string());
                 } else {
                     // Get memory ID first to avoid borrow issues
                     let memory_key = self.selected_memory().map(|m| MemoryKey {
-                        id: m.memory.id,
+                        id: m.id,
                         store: m.store.clone(),
                     });
                     if let Some(memory_key) = memory_key {
-                        self.available_stores = list_stores(&self.config).unwrap_or_default();
+                        self.available_stores = list_stores(&self.config).await.unwrap_or_default();
                         if self.available_stores.len() < 2 {
                             self.status_message =
                                 Some("Need at least 2 stores to move memories".to_string());
@@ -911,14 +801,8 @@ impl App {
 
         let results = self
             .search_service
-            .search_with_options(query, None, limit, Some(mode), None, false)
-            .await?
-            .into_iter()
-            .map(|memory| MemoryWithStore {
-                memory,
-                store: self.current_store.clone(),
-            })
-            .collect::<Vec<_>>();
+            .search_with_options(query, None, limit, Some(mode), None)
+            .await?;
 
         if results.is_empty() {
             self.status_message = Some(format!("No memories found for \"{query}\""));
@@ -1238,19 +1122,6 @@ impl App {
                     Ok(mut updated_memory) => {
                         updated_memory.created_at = memory.created_at;
                         updated_memory.updated_at = chrono::Utc::now();
-                        updated_memory.source_attribution = memory.source_attribution.clone();
-                        updated_memory.trust_level = memory.trust_level;
-                        updated_memory.source_reinforcement_score =
-                            memory.source_reinforcement_score;
-                        updated_memory.recompute_trust_metrics();
-                        let now = chrono::Utc::now();
-                        updated_memory.expired_at = match updated_memory.expires_at {
-                            Some(expiration) if expiration <= now => {
-                                Some(memory.expired_at.unwrap_or(now))
-                            }
-                            Some(_) => None,
-                            None => None,
-                        };
 
                         let clear_embeddings = updated_memory.content != memory.content;
                         self.with_store_db(&store, move |db| {
@@ -1270,10 +1141,7 @@ impl App {
 
                         // Find the edited memory and move cursor to it
                         self.active_pane = Pane::Middle;
-                        if let Some(pos) = self
-                            .filtered_memories()
-                            .iter()
-                            .position(|m| m.memory.id == id)
+                        if let Some(pos) = self.filtered_memories().iter().position(|m| m.id == id)
                         {
                             self.middle_selection.index = pos;
                             self.middle_selection.offset = pos.saturating_sub(10);
@@ -1315,12 +1183,7 @@ impl App {
         match edited_result {
             Ok(edited) => {
                 match editor::parse_edited_memory(&edited, None) {
-                    Ok(mut new_memory) => {
-                        if new_memory.source_attribution.is_none() {
-                            new_memory.source_attribution = Some(SourceAttribution::default_user());
-                            new_memory.recompute_trust_metrics();
-                        }
-
+                    Ok(new_memory) => {
                         let new_id = new_memory.id;
                         operations::insert_memory(self.db.pool(), &new_memory).await?;
 
@@ -1328,10 +1191,8 @@ impl App {
 
                         // Find the new memory and move cursor to it
                         self.active_pane = Pane::Middle;
-                        if let Some(pos) = self
-                            .filtered_memories()
-                            .iter()
-                            .position(|m| m.memory.id == new_id)
+                        if let Some(pos) =
+                            self.filtered_memories().iter().position(|m| m.id == new_id)
                         {
                             self.middle_selection.index = pos;
                             self.middle_selection.offset = pos.saturating_sub(10);
@@ -1882,7 +1743,7 @@ impl App {
 
             let store = memory.store.clone();
             let memory_type_label = format!("{memory_type:?}");
-            let mut updated = memory.memory.clone();
+            let mut updated = memory.clone();
             updated.memory_type = memory_type;
             updated.updated_at = chrono::Utc::now();
 
@@ -1908,7 +1769,7 @@ impl App {
             }
 
             let store = memory.store.clone();
-            let mut updated = memory.memory.clone();
+            let mut updated = memory.clone();
             updated.importance = importance;
             updated.updated_at = chrono::Utc::now();
 
@@ -1934,8 +1795,8 @@ impl App {
             }
 
             let store = memory.store.clone();
-            let new_importance = (memory.memory.importance + delta).clamp(0, 9);
-            let mut updated = memory.memory.clone();
+            let new_importance = (memory.importance + delta).clamp(0, 9);
+            let mut updated = memory.clone();
             updated.importance = new_importance;
             updated.updated_at = chrono::Utc::now();
 
@@ -1961,7 +1822,7 @@ impl App {
             }
 
             let store = memory.store.clone();
-            let mut updated = memory.memory.clone();
+            let mut updated = memory.clone();
             updated.category = category.to_string();
             updated.updated_at = chrono::Utc::now();
 
@@ -2012,7 +1873,7 @@ mod tests {
             Arc::clone(&reranker),
         );
 
-        let available_stores = list_stores(&config).unwrap_or_default();
+        let available_stores = list_stores(&config).await.unwrap_or_default();
 
         let app = App {
             config,
@@ -2022,12 +1883,10 @@ mod tests {
             sort_menu_index: 0,
             search_backup: None,
             memories: Vec::new(),
-            agent_events: Vec::new(),
             categories: Vec::new(),
             tags: Vec::new(),
             mode: AppMode::Normal,
             active_pane: Pane::Middle,
-            middle_view: MiddleView::Memories,
             right_pane_view: RightPaneView::default(),
             left_selection: Selection::new(),
             middle_selection: Selection::new(),
@@ -2058,19 +1917,16 @@ mod tests {
         memory_type: MemoryType,
         importance: i32,
         category: &str,
-    ) -> Result<MemoryWithStore> {
-        let memory = Memory::new(
+    ) -> Result<Memory> {
+        let mut memory = Memory::new(
             memory_type,
             "Test content".to_string(),
             category.to_string(),
         );
-        let mut memory = memory;
         memory.importance = importance;
+        memory.store = app.current_store.clone();
         operations::insert_memory(app.db.pool(), &memory).await?;
-        Ok(MemoryWithStore {
-            memory,
-            store: app.current_store.clone(),
-        })
+        Ok(memory)
     }
 
     #[tokio::test]
@@ -2087,7 +1943,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Episodic);
 
@@ -2108,7 +1964,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Semantic);
 
@@ -2129,7 +1985,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Procedural);
 
@@ -2150,7 +2006,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 7);
 
@@ -2171,7 +2027,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 6);
 
@@ -2192,7 +2048,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 4);
 
@@ -2212,7 +2068,7 @@ mod tests {
 
         assert!(result);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 9);
 
@@ -2232,7 +2088,7 @@ mod tests {
 
         assert!(result);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 0);
 
@@ -2327,7 +2183,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "new_category");
 
@@ -2387,7 +2243,7 @@ mod tests {
         assert!(result);
         assert_eq!(app.mode, AppMode::Normal);
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "cat2");
 
@@ -2418,7 +2274,7 @@ mod tests {
         app.update_selected_memory_type(MemoryType::Semantic)
             .await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().memory_type, MemoryType::Semantic);
 
@@ -2435,7 +2291,7 @@ mod tests {
 
         app.update_selected_memory_importance(8).await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 8);
 
@@ -2452,7 +2308,7 @@ mod tests {
 
         app.change_selected_memory_importance(2).await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().importance, 7);
 
@@ -2469,7 +2325,7 @@ mod tests {
 
         app.update_selected_memory_category("new_category").await?;
 
-        let updated = operations::get_memory(app.db.pool(), memory.memory.id).await?;
+        let updated = operations::get_memory(app.db.pool(), memory.id).await?;
         assert!(updated.is_some());
         assert_eq!(updated.unwrap().category, "new_category");
 
