@@ -114,7 +114,7 @@ impl MemoryFile {
     }
 
     pub fn open_current() -> crate::Result<Self> {
-        Ok(Self::open_at(std::env::current_dir()?))
+        Ok(Self::open_at(find_workspace_root(&std::env::current_dir()?)))
     }
 
     pub fn open_workspace(workspace_path: impl Into<PathBuf>) -> Self {
@@ -278,6 +278,22 @@ pub struct ScoredMemory {
     pub score: usize,
 }
 
+/// Resolve the workspace root for a starting directory.
+///
+/// Prefers the nearest ancestor that already holds a `.mmry` store, so an
+/// existing store is reused no matter which subdirectory a command runs from.
+/// Otherwise falls back to the enclosing git repository root, so memories are
+/// shared across the whole repo. With neither, the starting directory is used.
+fn find_workspace_root(start: &Path) -> PathBuf {
+    if let Some(dir) = start.ancestors().find(|dir| dir.join(MMRY_DIR).is_dir()) {
+        return dir.to_path_buf();
+    }
+    if let Some(dir) = start.ancestors().find(|dir| dir.join(".git").exists()) {
+        return dir.to_path_buf();
+    }
+    start.to_path_buf()
+}
+
 fn ensure_file(path: &Path) -> crate::Result<()> {
     if !path.exists() {
         OpenOptions::new().create_new(true).write(true).open(path)?;
@@ -329,6 +345,39 @@ mod tests {
         let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(gitignore.contains(".mmry/mmry.jsonl"));
         assert!(gitignore.contains(".mmry/index/"));
+    }
+
+    #[test]
+    fn workspace_root_prefers_existing_mmry_from_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(MMRY_DIR)).unwrap();
+        let sub = root.join("a").join("b");
+        fs::create_dir_all(&sub).unwrap();
+
+        assert_eq!(find_workspace_root(&sub), root);
+        // From inside the store dir itself, walk up to its owning workspace.
+        assert_eq!(find_workspace_root(&root.join(MMRY_DIR)), root);
+    }
+
+    #[test]
+    fn workspace_root_falls_back_to_git_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let sub = root.join("crates").join("x");
+        fs::create_dir_all(&sub).unwrap();
+
+        assert_eq!(find_workspace_root(&sub), root);
+    }
+
+    #[test]
+    fn workspace_root_defaults_to_start_without_repo_or_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("plain");
+        fs::create_dir_all(&sub).unwrap();
+
+        assert_eq!(find_workspace_root(&sub), sub);
     }
 
     #[test]
