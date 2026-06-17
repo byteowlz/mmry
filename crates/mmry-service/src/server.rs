@@ -293,14 +293,9 @@ impl EmbeddingService for EmbeddingServiceImpl {
         self.state.record_activity().await;
 
         let text = request.into_inner().text;
-        let service_arc = self.state.get_embedding_service().await;
-        let service_guard = service_arc.lock().await;
-        let service = service_guard
-            .as_ref()
-            .ok_or_else(|| Status::internal("Embedding service not available"))?;
-
-        let embedding = service
-            .embed(&text)
+        let embedding = self
+            .state
+            .embed_text(&text)
             .await
             .map_err(|e| Status::internal(format!("Embedding failed: {e}")))?;
 
@@ -315,16 +310,11 @@ impl EmbeddingService for EmbeddingServiceImpl {
         self.state.record_activity().await;
 
         let texts = request.into_inner().texts;
-        let service_arc = self.state.get_embedding_service().await;
-        let service_guard = service_arc.lock().await;
-        let service = service_guard
-            .as_ref()
-            .ok_or_else(|| Status::internal("Embedding service not available"))?;
-
         let mut embeddings = Vec::new();
         for text in texts {
-            let embedding = service
-                .embed(&text)
+            let embedding = self
+                .state
+                .embed_text(&text)
                 .await
                 .map_err(|e| Status::internal(format!("Embedding failed: {e}")))?;
 
@@ -343,24 +333,9 @@ impl EmbeddingService for EmbeddingServiceImpl {
         self.state.record_activity().await;
 
         let text = request.into_inner().text;
-        let service_arc = self.state.get_embedding_service().await;
-        let service_guard = service_arc.lock().await;
-        let service = service_guard
-            .as_ref()
-            .ok_or_else(|| Status::internal("Embedding service not available"))?;
-
-        let tokenizer = service
-            .get_tokenizer()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to get tokenizer: {e}")))?;
-
-        let encoding = tokenizer
-            .encode(text.as_str(), false)
-            .map_err(|e| Status::internal(format!("Tokenization failed: {e}")))?;
-
-        Ok(Response::new(TokenCountResponse {
-            token_count: encoding.len() as u32,
-        }))
+        // No in-process tokenizer; approximate the token count from whitespace words.
+        let token_count = text.split_whitespace().count() as u32;
+        Ok(Response::new(TokenCountResponse { token_count }))
     }
 
     async fn health(
@@ -589,17 +564,11 @@ async fn embeddings_handler(
 
     validate_batch(&inputs, &app_state.api_config, "input")?;
 
-    let service_arc = app_state.state.get_embedding_service().await;
-    let service_guard = service_arc.lock().await;
-    let service = service_guard
-        .as_ref()
-        .ok_or_else(|| ApiError::service_unavailable("Embedding service not available"))?;
-
     let timeout_duration = Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
 
     let mut data = Vec::with_capacity(inputs.len());
     for (idx, text) in inputs.into_iter().enumerate() {
-        let embedding = timeout(timeout_duration, service.embed(&text))
+        let embedding = timeout(timeout_duration, app_state.state.embed_text(&text))
             .await
             .map_err(|_| ApiError::timeout("Embedding request timed out"))?
             .map_err(|e| ApiError::internal(format!("Embedding failed: {e}")))?;
@@ -801,20 +770,14 @@ async fn memory_create_handler(
 
     AgentCtx::from_env().merge_into_metadata(&mut memory.metadata);
 
-    // Generate embedding if embeddings service available
-    {
-        let svc_arc = app_state.state.get_embedding_service().await;
-        let mut guard = svc_arc.lock().await;
-        if let Some(embed_svc) = guard.as_mut() {
-            match embed_svc.embed(&memory.content).await {
-                Ok(Some(embedding)) => {
-                    memory.embedding = Some(embedding);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!("Failed to generate embedding for new memory: {e}");
-                }
-            }
+    // Generate embedding if an embedding backend is configured
+    match app_state.state.embed_text(&memory.content).await {
+        Ok(Some(embedding)) => {
+            memory.embedding = Some(embedding);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("Failed to generate embedding for new memory: {e}");
         }
     }
 
@@ -892,16 +855,12 @@ async fn memory_update_handler(
     }
 
     if needs_reembed {
-        let service_arc = app_state.state.get_embedding_service().await;
-        let service_guard = service_arc.lock().await;
-        if let Some(service) = service_guard.as_ref() {
-            let timeout_duration =
-                Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
-            if let Ok(Ok(Some(vector))) =
-                timeout(timeout_duration, service.embed(&memory.content)).await
-            {
-                memory.embedding = Some(vector);
-            }
+        let timeout_duration =
+            Duration::from_secs(app_state.api_config.request_timeout_seconds.max(1));
+        if let Ok(Ok(Some(vector))) =
+            timeout(timeout_duration, app_state.state.embed_text(&memory.content)).await
+        {
+            memory.embedding = Some(vector);
         }
         if let Ok(Some(sparse_vec)) = app_state
             .state

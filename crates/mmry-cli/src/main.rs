@@ -81,10 +81,6 @@ enum Commands {
     /// Initialize mmry (create config and database)
     Init(commands::init::InitCmd),
 
-    /// Run benchmark suite
-    #[cfg(feature = "bench")]
-    Bench(commands::bench::BenchCmd),
-
     /// Manage mmry service (daemon)
     Service(commands::service::ServiceCmd),
 
@@ -144,8 +140,6 @@ async fn async_main() -> anyhow::Result<()> {
     // Handle commands that don't need database initialization
     command = match command {
         Commands::Init(cmd) => return commands::init::handle(cmd).await,
-        #[cfg(feature = "bench")]
-        Commands::Bench(cmd) => return commands::bench::handle(cmd, &config).await,
         Commands::Models(cmd) => return commands::models::handle(cmd).await,
         Commands::Rerankers(cmd) => return commands::rerankers::handle(cmd).await,
         Commands::Service(cmd) => return commands::service::handle(cmd, cli.config.clone()).await,
@@ -291,10 +285,6 @@ async fn async_main() -> anyhow::Result<()> {
         | Commands::Stores(_)
         | Commands::Export(_)
         | Commands::Context(_) => {
-            unreachable!()
-        }
-        #[cfg(feature = "bench")]
-        Commands::Bench(_) => {
             unreachable!()
         }
     };

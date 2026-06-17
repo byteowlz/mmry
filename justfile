@@ -28,11 +28,3 @@ install-all:
 # Run `cargo install cargo-nextest` if you don't have it installed.
 test:
     cargo nextest run --no-fail-fast
-
-# Run HMLR benchmark tests (RAGAS-style quality tests)
-bench-hmlr:
-    cargo test -p mmry-core --features bench hmlr::benchmarks --release -- --nocapture
-
-# Run all benchmark tests with verbose output
-bench-all:
-    cargo test -p mmry-core --features bench benchmarks --release -- --nocapture

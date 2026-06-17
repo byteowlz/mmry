@@ -1051,6 +1051,7 @@ mod tests {
         let config = SparseEmbeddingsConfig {
             enabled: false,
             model: String::new(),
+            remote: None,
         };
         Arc::new(SparseEmbeddingService::new(&config).expect("create sparse embeddings"))
     }

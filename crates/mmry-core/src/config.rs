@@ -161,6 +161,8 @@ impl Default for StoresConfig {
 pub struct SparseEmbeddingsConfig {
     pub enabled: bool,
     pub model: String,
+    /// Remote sparse-embedding backend (vqtrs-api `/embeddings/sparse`).
+    pub remote: Option<RemoteBackendConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -311,10 +313,15 @@ impl Default for EmbeddingsConfig {
         Self {
             enabled: true,
             model: "Xenova/all-MiniLM-L6-v2".to_string(),
-            backend: "fastembed".to_string(),
+            backend: "remote".to_string(),
             dimension: 384,
             batch_size: 32,
-            remote: None,
+            // Point at a local vqtrs-api by default; `required = false` means
+            // search degrades to lexical when the service isn't running.
+            remote: Some(RemoteBackendConfig {
+                base_url: "http://127.0.0.1:8430".to_string(),
+                ..RemoteBackendConfig::default()
+            }),
         }
     }
 }
@@ -336,6 +343,11 @@ impl Default for SparseEmbeddingsConfig {
         Self {
             enabled: false,
             model: "Qdrant/Splade_PP_en_v1".to_string(),
+            // Same local vqtrs-api; only used when `enabled = true`.
+            remote: Some(RemoteBackendConfig {
+                base_url: "http://127.0.0.1:8430".to_string(),
+                ..RemoteBackendConfig::default()
+            }),
         }
     }
 }

@@ -1,13 +1,22 @@
+//! Sparse-embedding catalog and service.
+//!
+//! In-process sparse embedding has been removed. When `enabled` and a remote
+//! backend is configured, sparse vectors are fetched from an external service
+//! (vqtrs-api `/embeddings/sparse`); otherwise the service is disabled and
+//! returns `None`.
+
 use crate::config::SparseEmbeddingsConfig;
-use crate::Error;
 use crate::Result;
-use fastembed::SparseEmbedding;
-use fastembed::SparseInitOptions;
-use fastembed::SparseModel;
-use fastembed::SparseTextEmbedding;
-use once_cell::sync::OnceCell;
+
+#[cfg(feature = "remote-http")]
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
+#[cfg(feature = "remote-http")]
+use crate::config::RemoteBackendConfig;
+#[cfg(feature = "remote-http")]
+use crate::http_json::JsonHttpClient;
+#[cfg(feature = "remote-http")]
+use crate::http_json::ReqwestJsonHttpClient;
 
 #[derive(Debug, Clone)]
 pub struct SparseModelInfo {
@@ -31,111 +40,120 @@ pub fn list_sparse_models() -> Vec<SparseModelInfo> {
     ]
 }
 
-type SharedModel = Arc<Mutex<SparseTextEmbedding>>;
-
+/// Sparse embedding service backed by a remote HTTP endpoint. Disabled (always
+/// `None`) unless `enabled` and a remote backend are configured.
 pub struct SparseEmbeddingService {
     enabled: bool,
-    model_name: String,
-    model: OnceCell<SharedModel>,
+    #[cfg(feature = "remote-http")]
+    remote: Option<RemoteBackendConfig>,
+    #[cfg(feature = "remote-http")]
+    http: Arc<dyn JsonHttpClient>,
 }
 
 impl SparseEmbeddingService {
     pub fn new(config: &SparseEmbeddingsConfig) -> Result<Self> {
-        crate::embeddings::ensure_fastembed_cache_dir()?;
-
-        if !config.enabled {
-            return Ok(Self {
-                enabled: false,
-                model_name: String::new(),
-                model: OnceCell::new(),
-            });
-        }
-
         Ok(Self {
-            enabled: true,
-            model_name: config.model.clone(),
-            model: OnceCell::new(),
+            enabled: config.enabled,
+            #[cfg(feature = "remote-http")]
+            remote: config
+                .remote
+                .clone()
+                .filter(|c| !c.base_url.trim().is_empty()),
+            #[cfg(feature = "remote-http")]
+            http: Arc::new(ReqwestJsonHttpClient::default()),
         })
+    }
+
+    #[cfg(feature = "remote-http")]
+    pub fn with_http(mut self, http: Arc<dyn JsonHttpClient>) -> Self {
+        self.http = http;
+        self
     }
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    async fn ensure_model(&self) -> Result<SharedModel> {
-        if !self.enabled {
-            return Err(Error::Embedding("Sparse embedding service disabled".into()));
-        }
-
-        let name = self.model_name.clone();
-
-        let model_ref = self.model.get_or_try_init(|| {
-            let parsed = if name.is_empty() {
-                SparseModel::default()
-            } else {
-                match name.parse::<SparseModel>() {
-                    Ok(model) => model,
-                    Err(e) => {
-                        tracing::warn!(model = %name, error = %e, "Unknown sparse embedding model, falling back to SPLADE++");
-                        SparseModel::SPLADEPPV1
-                    }
-                }
-            };
-
-            let init = SparseInitOptions::new(parsed);
-
-            SparseTextEmbedding::try_new(init)
-                .map(|model| Arc::new(Mutex::new(model)))
-                .map_err(|e| Error::Embedding(format!("Failed to initialize sparse embedding model: {e}")))
-        })?;
-
-        Ok(Arc::clone(model_ref))
-    }
-
-    pub async fn embed(&self, text: &str) -> Result<Option<SparseEmbedding>> {
+    pub async fn embed(&self, text: &str) -> Result<Option<StoredSparseEmbedding>> {
         if !self.enabled {
             return Ok(None);
         }
 
-        let model = self.ensure_model().await?;
-        let embedding = {
-            let mut guard = model.lock().await;
+        #[cfg(feature = "remote-http")]
+        if let Some(remote) = self.remote.as_ref() {
+            match self.remote_embed(remote, text).await {
+                Ok(sparse) => return Ok(Some(sparse)),
+                Err(e) => {
+                    if remote.required {
+                        return Err(e);
+                    }
+                    tracing::debug!("Remote sparse embedding failed: {e}");
+                    return Ok(None);
+                }
+            }
+        }
 
-            let mut embeddings = guard
-                .embed(vec![text.to_owned()], None)
-                .map_err(|e| Error::Embedding(format!("Sparse embedding inference failed: {e}")))?;
+        Ok(None)
+    }
 
-            embeddings
-                .pop()
-                .ok_or_else(|| Error::Embedding("Sparse embedding returned empty result".into()))?
-        };
+    #[cfg(feature = "remote-http")]
+    async fn remote_embed(
+        &self,
+        remote: &RemoteBackendConfig,
+        text: &str,
+    ) -> Result<StoredSparseEmbedding> {
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            input: &'a str,
+        }
 
-        Ok(Some(embedding))
+        #[derive(serde::Deserialize)]
+        struct Response {
+            data: Vec<Item>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Item {
+            indices: Vec<usize>,
+            values: Vec<f32>,
+        }
+
+        let base = remote.base_url.trim_end_matches('/');
+        let url = format!("{base}/embeddings/sparse");
+        let timeout = std::time::Duration::from_secs(remote.request_timeout_seconds.max(1));
+        let (status, value) = self
+            .http
+            .post_json(
+                url,
+                remote.api_key.clone(),
+                timeout,
+                serde_json::to_value(Request { input: text })?,
+            )
+            .await?;
+
+        if !status.is_success() {
+            return Err(crate::Error::Service(format!(
+                "Remote sparse embeddings request failed ({status}): {value}"
+            )));
+        }
+
+        let parsed: Response =
+            serde_json::from_value(value).map_err(|e| crate::Error::Service(e.to_string()))?;
+        let item = parsed
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| crate::Error::Service("Remote sparse response was empty".into()))?;
+
+        Ok(StoredSparseEmbedding {
+            indices: item.indices,
+            values: item.values,
+        })
     }
 }
-
-// Drop implementation removed - let Arc handle cleanup naturally
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredSparseEmbedding {
     pub indices: Vec<usize>,
     pub values: Vec<f32>,
-}
-
-impl From<SparseEmbedding> for StoredSparseEmbedding {
-    fn from(embedding: SparseEmbedding) -> Self {
-        Self {
-            indices: embedding.indices,
-            values: embedding.values,
-        }
-    }
-}
-
-impl From<StoredSparseEmbedding> for SparseEmbedding {
-    fn from(stored: StoredSparseEmbedding) -> Self {
-        Self {
-            indices: stored.indices,
-            values: stored.values,
-        }
-    }
 }

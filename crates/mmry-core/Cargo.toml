@@ -17,8 +17,6 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-fastembed = { workspace = true }
-ort = { workspace = true }
 strsim = { workspace = true }
 once_cell = { workspace = true }
 regex = { workspace = true }
@@ -45,12 +43,6 @@ default = ["service", "remote-http"]
 remote-http = ["dep:reqwest"]
 service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "remote-http", "dep:rig-core"]
 federation = ["remote-http"]
-bench = []
-
-# Hardware acceleration
-coreml = ["ort/coreml"]  # Apple Silicon (macOS/iOS)
-cuda = ["ort/cuda"]       # NVIDIA GPUs
-directml = ["ort/directml"] # Windows DirectX
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

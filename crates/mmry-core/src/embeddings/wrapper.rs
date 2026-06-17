@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::embeddings::EmbeddingService;
 use crate::Result;
 
 #[cfg(feature = "remote-http")]
@@ -44,10 +43,11 @@ struct RemoteEmbeddingData {
     index: usize,
 }
 
-/// Wrapper that can use either daemon or direct embedding service
+/// Wrapper that produces embeddings via a remote HTTP backend (or a daemon),
+/// returning `None` when no backend is configured. In-process embedding has been
+/// removed.
 pub struct EmbeddingServiceWrapper {
     config: Config,
-    direct: Option<EmbeddingService>,
     #[cfg(feature = "service")]
     daemon: Option<DaemonClient>,
     #[cfg(feature = "remote-http")]
@@ -58,7 +58,6 @@ impl EmbeddingServiceWrapper {
     pub fn new(config: &Config) -> Result<Self> {
         Ok(Self {
             config: config.clone(),
-            direct: None,
             #[cfg(feature = "service")]
             daemon: None,
             #[cfg(feature = "remote-http")]
@@ -73,7 +72,6 @@ impl EmbeddingServiceWrapper {
     ) -> Result<Self> {
         Ok(Self {
             config: config.clone(),
-            direct: None,
             #[cfg(feature = "service")]
             daemon: None,
             http,
@@ -138,17 +136,10 @@ impl EmbeddingServiceWrapper {
         Ok(out)
     }
 
-    async fn direct_embed(&mut self, text: &str) -> Result<Option<Vec<f32>>> {
-        if self.direct.is_none() {
-            tracing::debug!("Initializing direct embedding service");
-            self.direct = Some(EmbeddingService::new(&self.config.embeddings)?);
-        }
-
-        if let Some(ref service) = self.direct {
-            service.embed(text).await
-        } else {
-            Ok(None)
-        }
+    /// In-process embedding has been removed. Without a remote/daemon backend,
+    /// embeddings are unavailable and search degrades to lexical scoring.
+    async fn direct_embed(&self, _text: &str) -> Result<Option<Vec<f32>>> {
+        Ok(None)
     }
 
     #[cfg(feature = "remote-http")]
@@ -279,7 +270,6 @@ impl Clone for EmbeddingServiceWrapper {
         // Create a new instance with the same config
         Self {
             config: self.config.clone(),
-            direct: None,
             #[cfg(feature = "service")]
             daemon: None,
             #[cfg(feature = "remote-http")]

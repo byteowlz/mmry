@@ -1,6 +1,5 @@
 use mmry_core::config::Config;
 use mmry_core::database::Database;
-use mmry_core::embeddings::EmbeddingService;
 use mmry_core::embeddings::EmbeddingServiceWrapper;
 use mmry_core::reranker::RerankerService;
 use mmry_core::sparse_embeddings::SparseEmbeddingService;
@@ -10,7 +9,6 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 pub struct ServiceState {
-    pub embedding_service: Arc<Mutex<Option<EmbeddingService>>>,
     pub config: Config,
     pub db: Arc<Database>,
     pub embeddings_wrapper: Arc<tokio::sync::Mutex<EmbeddingServiceWrapper>>,
@@ -35,7 +33,6 @@ impl ServiceState {
         let reranker = RerankerService::from_config(&config.search)?;
 
         Ok(Self {
-            embedding_service: Arc::new(Mutex::new(None)),
             config,
             db: Arc::new(db),
             embeddings_wrapper: Arc::new(tokio::sync::Mutex::new(embeddings_wrapper)),
@@ -47,29 +44,15 @@ impl ServiceState {
         })
     }
 
-    pub async fn get_embedding_service(&self) -> Arc<Mutex<Option<EmbeddingService>>> {
-        // Ensure service is loaded
-        let mut service_guard = self.embedding_service.lock().await;
-
-        if service_guard.is_none() {
-            tracing::info!("Loading embedding model...");
-            match EmbeddingService::new(&self.config.embeddings) {
-                Ok(service) => {
-                    *service_guard = Some(service);
-                    tracing::info!("Embedding model loaded successfully");
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load embedding model: {}", e);
-                }
-            }
-        }
-
-        drop(service_guard);
-        Arc::clone(&self.embedding_service)
+    /// Embed `text` via the remote-backed wrapper, returning `None` when no
+    /// embedding backend is configured. In-process embedding has been removed.
+    pub async fn embed_text(&self, text: &str) -> mmry_core::Result<Option<Vec<f32>>> {
+        let mut wrapper = self.embeddings_wrapper.lock().await;
+        wrapper.embed(text).await
     }
 
     pub async fn is_model_loaded(&self) -> bool {
-        self.embedding_service.lock().await.is_some()
+        self.embeddings_wrapper.lock().await.is_enabled()
     }
 
     pub async fn record_activity(&self) {

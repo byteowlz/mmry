@@ -29,3 +29,5 @@ docs/
 # bv (beads viewer) local config and caches
 .bv/
 .pi/todos/
+.mmry/mmry.jsonl
+.mmry/index/
