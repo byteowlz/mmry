@@ -138,7 +138,7 @@ Use `--include-sessions` only if you intentionally want imported hstry/session r
 
 ## Service Mode (Fast Embeddings)
 
-mmry includes an optional background service that keeps the embedding model loaded in memory for near-instant embeddings:
+mmry includes an optional background service that holds the warm DB/index and a pooled connection to vqtrs-api, so searches skip per-invocation startup:
 
 ```bash
 # Start the service
@@ -165,9 +165,8 @@ mmry service run
 
 **Why use service mode?**
 
-- First embedding: ~2-3 seconds (cold start, loading model)
-- With service: ~10-50 milliseconds (model stays loaded)
-- Automatically unloads after 5 minutes of inactivity to save memory
+- Cold CLI invocation pays DB open + connection setup each time
+- With service: the DB/index stay warm and vqtrs-api keeps models loaded, so searches return in ~10-50 milliseconds
 - Works on Windows, macOS, and Linux (uses TCP localhost)
 
 Enable in `~/.config/mmry/config.toml`:
@@ -182,7 +181,7 @@ idle_timeout_seconds = 300  # Unload models after 5 minutes idle
 Reranking now only runs by default for semantic or hybrid searches; use `--rerank` to force reranking for other modes if you need it.
 When service mode is enabled, `mmry search` now delegates the entire search (DB + embeddings + sparse + rerank) to the daemon for fast, warm runs; the CLI falls back to local search if the daemon is unavailable.
 
-The CLI exits directly once a command finishes to sidestep an upstream fastembed/ONNX shutdown bug; the OS reclaims any leaked service resources.
+Embeddings, sparse vectors, and reranking are served by a local [vqtrs-api](https://github.com/byteowlz/vqtrs) instance (default `http://127.0.0.1:8430`); mmry-service holds the warm DB/index and delegates model work to it.
 
 ### gRPC API (EmbeddingService)
 
@@ -222,7 +221,7 @@ If the analyzer is disabled or no endpoint is configured, mmry falls back to heu
 
 ## How It Works
 
-mmry stores everything in SQLite with vector extensions for similarity search. It uses [fastembed](https://github.com/Anush008/fastembed-rs) to run embedding models locally via ONNX Runtime - no external APIs needed.
+mmry stores everything in SQLite with vector extensions for similarity search. Embeddings, sparse vectors, and reranking are served out-of-process by [vqtrs-api](https://github.com/byteowlz/vqtrs) over its local HTTP/Unix-socket API (default `http://127.0.0.1:8430`); mmry itself no longer loads any model. When the service isn't reachable, semantic search degrades gracefully to lexical (keyword/fuzzy/BM25) results.
 
 Search combines multiple strategies:
 
@@ -244,7 +243,6 @@ brew install byteowlz/tap/mmry
 
 # Arch Linux (AUR)
 yay -S mmry          # Pre-built binary
-yay -S mmry-cuda     # Build from source with CUDA support
 ```
 
 ### From Source
@@ -271,20 +269,11 @@ cargo install --git https://github.com/byteowlz/mmry mmry-cli
 cargo build --release
 ```
 
-The install script builds and installs mmry-cli, mmry-tui, and mmry-service with your choice of ONNX Runtime acceleration:
-
-- none (default) - CPU-only, works everywhere
-- ort-coreml - Apple Neural Engine acceleration (macOS)
-- ort-cuda - NVIDIA GPU acceleration
-- ort-directml - DirectML acceleration (Windows)
-- ort-openvino - Intel OpenVINO
-- ort-tensorrt - NVIDIA TensorRT
-- ort-rocm - AMD ROCm
-- ort-nnapi - Android Neural Networks API
-- ort-xnnpack - XNNPACK acceleration
-- ort-load-dynamic - Dynamic loading
-
-The script will prompt you to select an option, then build and install both binaries to `~/.cargo/bin`.
+The install script builds and installs mmry-cli, mmry-tui, and mmry-service to
+`~/.cargo/bin`. It runs non-interactively — there are no acceleration options to
+pick, since embeddings and reranking run out-of-process in
+[vqtrs-api](https://github.com/byteowlz/vqtrs), which owns the GPU/ONNX backends.
+Install and run vqtrs separately for semantic search.
 
 Binary releases coming soon.
 
@@ -302,14 +291,18 @@ mode = "hybrid"
 similarity_threshold = 0.7
 
 [embeddings]
-model = "Xenova/all-MiniLM-L6-v2"  # Fast and local
+model = "Xenova/all-MiniLM-L6-v2"  # must match what vqtrs-api serves
+backend = "remote"                  # embeddings come from vqtrs-api
+[embeddings.remote]
+base_url = "http://127.0.0.1:8430"  # local vqtrs-api
+required = false                    # false = degrade to lexical if unreachable
 
 [service]
-enabled = false         # Background service for fast embeddings
+enabled = false         # Background service: warm DB/index + pooled vqtrs connection
 auto_start = true
 
 [external_api]
-enabled = false         # HTTP API for embeddings/reranking
+enabled = false         # mmry's own HTTP API (separate from vqtrs)
 host = "127.0.0.1"
 port = 8081
 
@@ -428,7 +421,7 @@ Other:
 - Adapts to terminal color scheme
 - Status bar with helpful hints
 
-Built with Rust using sqlx, fastembed, and tokio. Check `AGENTS.md` if you're an AI agent working on this codebase.
+Built with Rust using sqlx, tokio, and [vqtrs](https://github.com/byteowlz/vqtrs) for embeddings/reranking. Check `AGENTS.md` if you're an AI agent working on this codebase.
 
 ## Credits
 

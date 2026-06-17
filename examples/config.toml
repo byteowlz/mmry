@@ -30,35 +30,38 @@ default = "default"
 [embeddings]
 # Enable embeddings for semantic search
 enabled = true
-# Embedding model to use (fastembed model codes)
-# Popular options:
+# Embedding model to request from vqtrs-api. Must match a model the server
+# serves (run `vqtrs models`). Common options:
 #   - "Xenova/all-MiniLM-L6-v2" (default, fast, 384 dimensions)
 #   - "Xenova/bge-small-en-v1.5" (better quality, 384 dimensions)
 #   - "Xenova/bge-base-en-v1.5" (even better quality, 768 dimensions)
 #   - "nomic-ai/nomic-embed-text-v1.5" (high quality, 768 dimensions)
 model = "Xenova/all-MiniLM-L6-v2"
-# Backend to use (currently only "fastembed" is supported)
-backend = "fastembed"
+# Backend: embeddings are served out-of-process by vqtrs-api ("remote").
+backend = "remote"
 # Dimension of embeddings (must match model)
 dimension = 384
 # Batch size for embedding generation
 batch_size = 32
 
-# Optional: delegate embedding to a remote mmry-service HTTP API
-# This avoids loading the model locally. Useful when a central mmry-service
-# is running (e.g., via oqto multi-user setup).
-# [embeddings.remote]
-# base_url = "http://127.0.0.1:8081"
+# vqtrs-api endpoint that serves dense embeddings (and reranking). mmry no
+# longer loads any model itself. Defaults to a local vqtrs-api on port 8430.
+[embeddings.remote]
+base_url = "http://127.0.0.1:8430"
 # api_key = ""
-# request_timeout_seconds = 30
-# max_batch_size = 64
-# required = false  # if true, fail hard on remote errors; if false, fall back to local
+request_timeout_seconds = 30
+max_batch_size = 64
+required = false  # if true, fail hard on remote errors; if false, degrade to lexical
 
 [sparse_embeddings]
 # Enable sparse embeddings (SPLADE++) for neural sparse retrieval
 enabled = false
-# Sparse embedding model (currently only SPLADE++ is supported)
+# Sparse embedding model served by vqtrs-api
 model = "Qdrant/Splade_PP_en_v1"
+# vqtrs-api endpoint for sparse embeddings (defaults to the local vqtrs-api).
+[sparse_embeddings.remote]
+base_url = "http://127.0.0.1:8430"
+required = false
 
 [search]
 # Default number of results to return

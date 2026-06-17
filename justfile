@@ -18,7 +18,7 @@ install:
     rustup show active-toolchain
     cargo fetch
 
-# Install CLI and TUI with an optional shared ORT feature
+# Build and install mmry-cli, mmry-tui, and mmry-service (non-interactive)
 install-all:
     ./scripts/install-mmry.sh
 
