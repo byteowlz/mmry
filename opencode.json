@@ -1,6 +1,0 @@
-{
-  "permission": {
-    "external_directory": "allow"
-  },
-  "$schema": "https://opencode.ai/config.json"
-}
