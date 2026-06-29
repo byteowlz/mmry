@@ -75,12 +75,6 @@ async fn main() -> Result<()> {
 }
 
 fn get_state_dir() -> Result<PathBuf> {
-    let base = std::env::var("XDG_STATE_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))
-        .ok_or_else(|| anyhow::anyhow!("Could not determine state directory"))?;
-
+    let base = mmry_core::paths::state_base()?;
     Ok(base.join("mmry"))
 }

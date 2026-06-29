@@ -1,6 +1,5 @@
 use clap::Parser;
 use mmry_core::config::Config;
-use std::path::PathBuf;
 
 #[derive(Parser)]
 pub struct InitCmd {
@@ -28,13 +27,7 @@ pub async fn handle(cmd: InitCmd) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(dirs::config_dir)
-        .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?
-        .join("mmry");
+    let config_dir = mmry_core::paths::config_base()?.join("mmry");
 
     let config_path = config_dir.join("config.toml");
 

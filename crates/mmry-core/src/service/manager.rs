@@ -309,7 +309,7 @@ impl ServiceManager {
             std::fs::create_dir_all(dir)?;
         }
 
-        let log_dir = dirs::home_dir()
+        let log_dir = crate::paths::home_dir()
             .ok_or_else(|| crate::Error::Service("Cannot find home directory".into()))?
             .join("Library")
             .join("Logs");
@@ -462,12 +462,8 @@ fn process_exists(pid: u32) -> bool {
 }
 
 fn get_state_dir() -> Result<PathBuf> {
-    let base = std::env::var("XDG_STATE_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))
-        .ok_or_else(|| crate::Error::Service("Could not determine state directory".into()))?;
+    let base = crate::paths::state_base()
+        .map_err(|_| crate::Error::Service("Could not determine state directory".into()))?;
 
     Ok(base.join("mmry"))
 }
@@ -503,14 +499,14 @@ fn find_mmry_binary() -> Result<String> {
 
 #[cfg(target_os = "linux")]
 fn systemd_user_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir()
+    let home = crate::paths::home_dir()
         .ok_or_else(|| crate::Error::Service("Cannot find home directory".into()))?;
     Ok(home.join(".config").join("systemd").join("user"))
 }
 
 #[cfg(target_os = "macos")]
 fn launchd_plist_path() -> Result<PathBuf> {
-    let home = dirs::home_dir()
+    let home = crate::paths::home_dir()
         .ok_or_else(|| crate::Error::Service("Cannot find home directory".into()))?;
     Ok(home
         .join("Library")
