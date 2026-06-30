@@ -114,7 +114,12 @@ fn main() {
 
     // Exit immediately without running destructors to avoid fastembed/ort cleanup crashes
     // The OS will clean up resources
-    unsafe { libc::_exit(exit_code) }
+    #[cfg(unix)]
+    unsafe {
+        libc::_exit(exit_code)
+    }
+    #[cfg(not(unix))]
+    std::process::exit(exit_code)
 }
 
 async fn async_main() -> anyhow::Result<()> {

@@ -9,6 +9,7 @@ pub mod http_json;
 pub mod integrations;
 pub mod memory;
 pub mod memory_file;
+pub mod paths;
 pub mod reranker;
 pub mod search;
 pub mod sparse_embeddings;

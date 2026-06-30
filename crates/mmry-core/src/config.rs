@@ -14,13 +14,13 @@ fn expand_path(path: &Path) -> PathBuf {
 
     // Expand tilde
     let expanded = if path_str.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::paths::home_dir() {
             home.join(path_str.strip_prefix("~/").unwrap())
         } else {
             path.to_path_buf()
         }
     } else if path_str == "~" {
-        dirs::home_dir().unwrap_or_else(|| path.to_path_buf())
+        crate::paths::home_dir().unwrap_or_else(|| path.to_path_buf())
     } else {
         path.to_path_buf()
     };
@@ -35,23 +35,15 @@ fn expand_path(path: &Path) -> PathBuf {
 }
 
 fn default_data_dir() -> PathBuf {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(dirs::data_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::paths::data_base()
+        .unwrap_or_else(|_| PathBuf::from("."))
         .join("mmry")
 }
 
 fn global_config_dir() -> crate::Result<PathBuf> {
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(dirs::config_dir)
+    crate::paths::config_base()
         .map(|dir| dir.join("mmry"))
-        .ok_or_else(|| crate::Error::Config("Could not find config directory".to_string()))
+        .map_err(|_| crate::Error::Config("Could not find config directory".to_string()))
 }
 
 fn global_config_path() -> crate::Result<PathBuf> {
