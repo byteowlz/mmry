@@ -40,11 +40,14 @@ sysinfo = { version = "0.32", optional = true }
 [features]
 default = ["service", "remote-http"]
 remote-http = ["dep:reqwest"]
-service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "remote-http", "dep:rig-core"]
+service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "protoc-bin-vendored", "remote-http", "dep:rig-core"]
 federation = ["remote-http"]
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }
+# Vendored protoc so cross-platform release builds (byt linux container +
+# macOS runner) need no system protobuf-compiler.
+protoc-bin-vendored = { version = "3", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
