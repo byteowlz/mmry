@@ -17,7 +17,7 @@ mmry rm mem_<id>                  # append a deprecation event
 mmry doctor
 ```
 
-Add `--json` to write commands, list, search, or repos for structured output.
+List and search use wrapped, repository-attributed output for humans. Add `--plain` for stable tab-separated records or `--json` for structured output.
 
 ## Cross-repository reads
 

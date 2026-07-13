@@ -6,12 +6,16 @@ use clap::Subcommand;
 use clap::ValueEnum;
 use mmry_core::config::Config;
 use mmry_core::repos::Repository;
+use mmry_core::repos::RepositoryMemory;
+use mmry_core::repos::RepositorySearchHit;
 use mmry_core::repos::{self};
 use mmry_core::AgentCtx;
+use mmry_core::MemoryEntry;
 use mmry_core::MemoryEvent;
 use mmry_core::MemoryFile;
 use mmry_core::MemoryType;
 use serde::Serialize;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -84,8 +88,11 @@ struct QueryScope {
     repo: Option<String>,
     #[arg(long, conflicts_with = "repo")]
     all: bool,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "plain")]
     json: bool,
+    /// Stable tab-separated output with escaped newlines.
+    #[arg(long, conflicts_with = "json")]
+    plain: bool,
 }
 
 #[derive(Args)]
@@ -168,16 +175,10 @@ fn list(config: &Config, scope: &QueryScope) -> anyhow::Result<()> {
     let memories = repos::list(&selected_repos(config, scope)?)?;
     if scope.json {
         print_json(&memories)?;
+    } else if scope.plain {
+        print!("{}", plain_list(&memories));
     } else {
-        for item in memories {
-            println!(
-                "{}\t{}\t{}\t{}",
-                item.memory.updated_at.to_rfc3339(),
-                item.repo,
-                item.memory.memory_id,
-                item.memory.content
-            );
-        }
+        print!("{}", human_list(&memories));
     }
     Ok(())
 }
@@ -190,15 +191,132 @@ fn search(config: &Config, args: &SearchArgs) -> anyhow::Result<()> {
     )?;
     if args.scope.json {
         print_json(&hits)?;
+    } else if args.scope.plain {
+        print!("{}", plain_search(&hits));
     } else {
-        for hit in hits {
-            println!(
-                "{}\t{}\t{}\t{}",
-                hit.score, hit.repo, hit.memory.memory_id, hit.memory.content
-            );
-        }
+        print!("{}", human_search(&hits));
     }
     Ok(())
+}
+
+fn human_list(items: &[RepositoryMemory]) -> String {
+    if items.is_empty() {
+        return "No memories found.\n".to_owned();
+    }
+    let mut output = String::new();
+    for item in items {
+        write_human_memory(&mut output, &item.repo, &item.repo_path, &item.memory, None);
+    }
+    output
+}
+
+fn human_search(items: &[RepositorySearchHit]) -> String {
+    if items.is_empty() {
+        return "No matching memories.\n".to_owned();
+    }
+    let mut output = String::new();
+    for item in items {
+        write_human_memory(
+            &mut output,
+            &item.repo,
+            &item.repo_path,
+            &item.memory,
+            Some(item.score),
+        );
+    }
+    output
+}
+
+fn write_human_memory(
+    output: &mut String,
+    repo: &str,
+    repo_path: &std::path::Path,
+    memory: &MemoryEntry,
+    score: Option<usize>,
+) {
+    let kind = match memory.memory_type {
+        MemoryType::Episodic => "episodic",
+        MemoryType::Semantic => "semantic",
+        MemoryType::Procedural => "procedural",
+    };
+    let score = score.map_or_else(String::new, |value| format!("  ·  score {value}"));
+    writeln!(
+        output,
+        "{repo}  ·  {}  ·  {kind}{score}",
+        memory.updated_at.format("%Y-%m-%d %H:%M UTC")
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(output, "{}  ·  {}", repo_path.display(), memory.memory_id)
+        .expect("writing to a String cannot fail");
+    for line in wrap_content(&memory.content, 96) {
+        writeln!(output, "  {line}").expect("writing to a String cannot fail");
+    }
+    if !memory.tags.is_empty() {
+        writeln!(output, "  tags: {}", memory.tags.join(", "))
+            .expect("writing to a String cannot fail");
+    }
+    output.push('\n');
+}
+
+fn wrap_content(content: &str, width: usize) -> Vec<String> {
+    let mut wrapped = Vec::new();
+    for paragraph in content.lines() {
+        if paragraph.trim().is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if !line.is_empty() && line.chars().count() + word.chars().count() + 1 > width {
+                wrapped.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        wrapped.push(line);
+    }
+    wrapped
+}
+
+fn plain_list(items: &[RepositoryMemory]) -> String {
+    items.iter().fold(String::new(), |mut output, item| {
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}",
+            item.memory.updated_at.to_rfc3339(),
+            item.repo,
+            item.repo_path.display(),
+            item.memory.memory_id,
+            escape_plain(&item.memory.content)
+        )
+        .expect("writing to a String cannot fail");
+        output
+    })
+}
+
+fn plain_search(items: &[RepositorySearchHit]) -> String {
+    items.iter().fold(String::new(), |mut output, item| {
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}",
+            item.score,
+            item.repo,
+            item.repo_path.display(),
+            item.memory.memory_id,
+            escape_plain(&item.memory.content)
+        )
+        .expect("writing to a String cannot fail");
+        output
+    })
+}
+
+fn escape_plain(content: &str) -> String {
+    content
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
 }
 
 fn remove(memory_id: &str, json: bool) -> anyhow::Result<()> {
@@ -264,4 +382,43 @@ fn print_json(value: &impl Serialize) -> anyhow::Result<()> {
         serde_json::to_string_pretty(value).context("serialize output")?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(content: &str) -> RepositoryMemory {
+        let timestamp = "2026-06-09T18:38:57Z".parse().unwrap();
+        RepositoryMemory {
+            repo: "oqto_refactor".into(),
+            repo_path: "/home/wismut/byteowlz/oqto_refactor".into(),
+            memory: MemoryEntry {
+                memory_id: "mem_123".into(),
+                content: content.into(),
+                memory_type: MemoryType::Procedural,
+                tags: vec!["sandbox".into(), "linux".into()],
+                created_at: timestamp,
+                updated_at: timestamp,
+                metadata: serde_json::json!({}),
+                agent_ctx: serde_json::json!({}),
+            },
+        }
+    }
+
+    #[test]
+    fn human_output_is_wrapped_and_attributed() {
+        let output = human_list(&[item(&"word ".repeat(30))]);
+        assert!(output.contains("oqto_refactor  ·  2026-06-09 18:38 UTC  ·  procedural"));
+        assert!(output.contains("/home/wismut/byteowlz/oqto_refactor  ·  mem_123"));
+        assert!(output.contains("  tags: sandbox, linux"));
+        assert!(output.lines().all(|line| line.chars().count() <= 98));
+    }
+
+    #[test]
+    fn plain_output_keeps_one_record_per_line() {
+        let output = plain_list(&[item("first line\nsecond\tline")]);
+        assert_eq!(output.lines().count(), 1);
+        assert!(output.contains("first line\\nsecond\\tline"));
+    }
 }
