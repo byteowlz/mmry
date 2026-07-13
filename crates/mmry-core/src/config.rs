@@ -9,6 +9,9 @@ const CONFIG_FILE: &str = "config.toml";
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Optional editor/LSP schema reference; ignored at runtime.
+    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     /// Bounded directories searched by cross-repository commands.
     pub roots: Vec<DiscoveryRoot>,
 }
@@ -68,11 +71,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roots_deserialize_and_appear_in_schema() {
-        let config: Config =
-            toml::from_str("[[roots]]\npath = '/tmp/code'\nmax_depth = 3").unwrap();
+    fn schema_metadata_and_roots_deserialize_and_appear_in_schema() {
+        let config: Config = toml::from_str(
+            "\"$schema\" = 'https://example.test/mmry.schema.json'\n[[roots]]\npath = '/tmp/code'\nmax_depth = 3",
+        )
+        .unwrap();
+        assert_eq!(
+            config.schema.as_deref(),
+            Some("https://example.test/mmry.schema.json")
+        );
         assert_eq!(config.roots[0].max_depth, 3);
         let schema = Config::schema_json().unwrap();
+        assert!(schema.contains("$schema"));
         assert!(schema.contains("max_depth"));
         assert!(schema.contains("path"));
     }

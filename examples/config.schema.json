@@ -4,6 +4,10 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "$schema": {
+      "description": "Optional editor/LSP schema reference; ignored at runtime.",
+      "type": ["string", "null"]
+    },
     "roots": {
       "description": "Bounded directories searched by cross-repository commands.",
       "type": "array",
