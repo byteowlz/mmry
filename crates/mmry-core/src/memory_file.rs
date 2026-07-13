@@ -32,11 +32,11 @@ pub enum MemoryType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryEventType {
-    #[serde(rename = "memory.add")]
+    #[serde(rename = "memory.add", alias = "memory_add")]
     MemoryAdd,
-    #[serde(rename = "memory.deprecate")]
+    #[serde(rename = "memory.deprecate", alias = "memory_deprecate")]
     MemoryDeprecate,
-    #[serde(rename = "memory.supersede")]
+    #[serde(rename = "memory.supersede", alias = "memory_supersede")]
     MemorySupersede,
 }
 
@@ -306,6 +306,25 @@ mod tests {
         assert!(!fs::read_to_string(dir.path().join(".gitignore"))
             .unwrap()
             .contains("index"));
+    }
+
+    #[test]
+    fn legacy_event_spelling_remains_replayable() {
+        let event = MemoryEvent::add(
+            "compatible".into(),
+            MemoryType::Semantic,
+            Vec::new(),
+            &AgentCtx::default(),
+        );
+        let json = serde_json::to_string(&event)
+            .unwrap()
+            .replace("memory.add", "memory_add");
+        assert_eq!(
+            serde_json::from_str::<MemoryEvent>(&json)
+                .unwrap()
+                .event_type,
+            MemoryEventType::MemoryAdd
+        );
     }
 
     #[test]
