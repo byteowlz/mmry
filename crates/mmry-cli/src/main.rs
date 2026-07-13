@@ -1,306 +1,267 @@
-mod commands;
-
+use anyhow::bail;
+use anyhow::Context;
+use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
-use std::path::PathBuf;
-use std::sync::Arc;
-
+use clap::ValueEnum;
 use mmry_core::config::Config;
-use mmry_core::database::Database;
-use mmry_core::embeddings::EmbeddingServiceWrapper;
-use mmry_core::reranker::RerankerService;
-use mmry_core::sparse_embeddings::SparseEmbeddingService;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use mmry_core::repos::Repository;
+use mmry_core::repos::{self};
+use mmry_core::AgentCtx;
+use mmry_core::MemoryEvent;
+use mmry_core::MemoryFile;
+use mmry_core::MemoryType;
+use serde::Serialize;
+use std::io::Read;
+use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "mmry")]
-#[command(about = "A lean, local-first memory management system", long_about = None)]
-#[command(version)]
+#[command(
+    name = "mmry",
+    version,
+    about = "An append-only workspace memory ledger"
+)]
 struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-
-    #[arg(long, global = true, help = "Enable debug logging")]
-    debug: bool,
-
-    #[arg(
-        short = 's',
-        long,
-        global = true,
-        help = "Store to use (defaults to config default)"
-    )]
-    store: Option<String>,
-
-    #[arg(
-        long,
-        global = true,
-        value_name = "PATH",
-        env = "MMRY_CONFIG",
-        help = "Path to config file (overrides XDG/local default)"
-    )]
+    #[arg(long, global = true, env = "MMRY_CONFIG", value_name = "PATH")]
     config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Command,
 }
 
 #[derive(Subcommand)]
-enum Commands {
-    /// Add a new memory
-    Add(commands::add::AddCmd),
-
-    /// Ingest a canonical conversation JSON as a session header + N message records
-    AddConversation(commands::add_conversation::AddConversationCmd),
-
-    /// Search memories
-    Search(commands::search::SearchCmd),
-
-    /// List memories
-    #[command(alias = "list")]
-    Ls(commands::ls::LsCmd),
-
-    /// Remove a memory
-    Rm(commands::rm::RmCmd),
-
-    /// Show statistics
-    Stats(commands::stats::StatsCmd),
-
-    /// Export memories to JSON file
-    Export(commands::export::ExportCmd),
-
-    /// Import memories from JSON file (for cross-machine sync)
-    Import(commands::import::ImportCmd),
-
-    /// Regenerate embeddings for existing memories
-    Reembed(commands::reembed::ReembedCmd),
-
-    /// List available embedding models
-    Models(commands::models::ModelsCmd),
-
-    /// List available reranker models
-    Rerankers(commands::rerankers::RerankersCmd),
-
-    /// Initialize mmry (create config and database)
-    Init(commands::init::InitCmd),
-
-    /// Manage mmry service (daemon)
-    Service(commands::service::ServiceCmd),
-
-    /// Manage memory stores
-    Stores(commands::stores::StoresCmd),
-
-    /// Ingest files and directories into memories
-    Ingest(commands::ingest::IngestCmd),
-
-    /// Remove duplicate memories (keeping the oldest)
-    Prune(commands::prune::PruneCmd),
-
-    /// Show effective AGENT_CTX_* runtime metadata, active store, and config path
-    Context(commands::context::ContextCmd),
+enum Command {
+    Init {
+        #[arg(long)]
+        tracked: bool,
+    },
+    Add(AddArgs),
+    #[command(alias = "ls")]
+    List(QueryScope),
+    Search(SearchArgs),
+    Rm {
+        memory_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Doctor,
+    Repos {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
-fn main() {
-    let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-    let result = runtime.block_on(async_main());
+#[derive(Args)]
+struct AddArgs {
+    text: String,
+    #[arg(long, value_enum, default_value = "semantic")]
+    memory_type: TypeArg,
+    #[arg(long, value_delimiter = ',')]
+    tags: Vec<String>,
+    #[arg(long)]
+    json: bool,
+}
 
-    // Forget the runtime to avoid cleanup
-    std::mem::forget(runtime);
+#[derive(Clone, ValueEnum)]
+enum TypeArg {
+    Episodic,
+    Semantic,
+    Procedural,
+}
 
-    let exit_code = match result {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            1
+impl From<TypeArg> for MemoryType {
+    fn from(value: TypeArg) -> Self {
+        match value {
+            TypeArg::Episodic => Self::Episodic,
+            TypeArg::Semantic => Self::Semantic,
+            TypeArg::Procedural => Self::Procedural,
         }
-    };
-
-    // Exit immediately without running destructors to avoid fastembed/ort cleanup crashes
-    // The OS will clean up resources
-    #[cfg(unix)]
-    unsafe {
-        libc::_exit(exit_code)
     }
-    #[cfg(not(unix))]
-    std::process::exit(exit_code)
 }
 
-async fn async_main() -> anyhow::Result<()> {
+#[derive(Args)]
+struct QueryScope {
+    #[arg(long, conflicts_with = "all", value_name = "NAME")]
+    repo: Option<String>,
+    #[arg(long, conflicts_with = "repo")]
+    all: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SearchArgs {
+    query: String,
+    #[command(flatten)]
+    scope: QueryScope,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+}
+
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-
-    // Setup logging
-    let log_level = if cli.debug { "debug" } else { "info" };
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("mmry={log_level}").into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    let mut command = cli.command;
-
-    // Load config
-    tracing::debug!("Loading config");
-    let config = Config::load_with_path(cli.config.clone())?;
-    tracing::debug!("Config loaded");
-
-    // Handle commands that don't need database initialization
-    command = match command {
-        Commands::Init(cmd) => return commands::init::handle(cmd).await,
-        Commands::Models(cmd) => return commands::models::handle(cmd).await,
-        Commands::Rerankers(cmd) => return commands::rerankers::handle(cmd).await,
-        Commands::Service(cmd) => return commands::service::handle(cmd, cli.config.clone()).await,
-        Commands::Stores(cmd) => return commands::stores::handle(cmd, &config).await,
-        Commands::Export(cmd) => {
-            return commands::export::handle(cmd, &config, cli.store.as_deref()).await
-        }
-        Commands::Context(cmd) => {
-            return commands::context::handle(
-                cmd,
-                &config,
-                cli.config.as_deref(),
-                cli.store.as_deref(),
-            )
-            .await
-        }
-        Commands::Add(cmd) if !cmd.indexed => {
-            return commands::add::handle_jsonl(cmd, &config).await
-        }
-        Commands::Ls(cmd) if !cmd.indexed => return commands::ls::handle_jsonl(cmd, &config).await,
-        Commands::Search(cmd) if !cmd.indexed => {
-            return commands::search::handle_jsonl(cmd, &config).await
-        }
-        Commands::Rm(cmd) if !cmd.indexed => return commands::rm::handle_jsonl(cmd).await,
-        other => other,
-    };
-
-    // Validate store name if provided ("all" is a special keyword, not a real store)
-    let store_name = cli.store.as_deref();
-    if let Some(name) = store_name {
-        if name != "all" {
-            mmry_core::stores::validate_store_name(name)?;
-        }
+    let config = Config::load(cli.config.as_deref())?;
+    match cli.command {
+        Command::Init { tracked } => init(tracked),
+        Command::Add(args) => add(args),
+        Command::List(scope) => list(&config, &scope),
+        Command::Search(args) => search(&config, &args),
+        Command::Rm { memory_id, json } => remove(&memory_id, json),
+        Command::Doctor => doctor(&config),
+        Command::Repos { json } => show_repos(&config, json),
     }
+}
 
-    // Try service-backed search before starting local services
-    if config.service.enabled && store_name != Some("all") {
-        if let Commands::Search(cmd) = &command {
-            if cmd.indexed {
-                match commands::search::handle_remote(cmd.clone(), &config, store_name).await {
-                    Ok(()) => return Ok(()),
-                    Err(e) => tracing::warn!("Service search failed, falling back to local: {e}"),
-                }
-            }
-        }
+fn init(tracked: bool) -> anyhow::Result<()> {
+    let file = MemoryFile::open_current()?;
+    file.init(tracked)?;
+    let config_path = mmry_core::config::config_path()?;
+    let schema_path = config_path.with_file_name("config.schema.json");
+    if let Some(parent) = schema_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    std::fs::write(&schema_path, Config::schema_json()?)?;
+    println!("initialized {}", file.path().display());
+    Ok(())
+}
 
-    // Initialize the unified DB. "all" is a special keyword meaning
-    // "no store filter"; otherwise the store name scopes reads/writes.
-    let db_store = if store_name == Some("all") {
-        None
+fn add(args: AddArgs) -> anyhow::Result<()> {
+    let content = if args.text == "-" {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        text.trim().to_owned()
     } else {
-        store_name
+        args.text
     };
-    tracing::debug!("Initializing database for store: {:?}", db_store);
-    let db = Database::init_store(&config, db_store).await?;
-    tracing::debug!("Database initialized");
+    if content.is_empty() {
+        bail!("memory text must not be empty");
+    }
+    let file = MemoryFile::open_current()?;
+    let event = MemoryEvent::add(
+        content,
+        args.memory_type.into(),
+        args.tags,
+        &AgentCtx::from_env(),
+    );
+    file.append(&event)?;
+    if args.json {
+        print_json(&event)?;
+    } else {
+        println!("{}", event.memory_id);
+    }
+    Ok(())
+}
 
-    // Prepare shared services - use wrapper that can leverage daemon if enabled
-    tracing::debug!("Creating embedding wrapper");
-    let embeddings = Arc::new(tokio::sync::Mutex::new(EmbeddingServiceWrapper::new(
-        &config,
-    )?));
-    tracing::debug!("Creating sparse embeddings");
-    let sparse_embeddings = Arc::new(SparseEmbeddingService::new(&config.sparse_embeddings)?);
-    tracing::debug!("Creating reranker");
-    let reranker = Arc::new(RerankerService::from_config(&config.search)?);
-    tracing::debug!("All services created");
+fn selected_repos(config: &Config, scope: &QueryScope) -> anyhow::Result<Vec<Repository>> {
+    if !scope.all && scope.repo.is_none() {
+        let file = MemoryFile::open_current()?;
+        return Ok(vec![repos::repository_for_path(file.root())?]);
+    }
+    let discovered = repos::discover(&config.roots)?;
+    if let Some(name) = &scope.repo {
+        Ok(vec![repos::select_named(&discovered, name)?])
+    } else {
+        Ok(discovered)
+    }
+}
 
-    // Execute command
-    let result = match command {
-        Commands::Add(cmd) => {
-            commands::add::handle(
-                cmd,
-                &config,
-                &db,
-                Arc::clone(&embeddings),
-                Arc::clone(&sparse_embeddings),
-            )
-            .await
+fn list(config: &Config, scope: &QueryScope) -> anyhow::Result<()> {
+    let memories = repos::list(&selected_repos(config, scope)?)?;
+    if scope.json {
+        print_json(&memories)?;
+    } else {
+        for item in memories {
+            println!(
+                "{}\t{}\t{}\t{}",
+                item.memory.updated_at.to_rfc3339(),
+                item.repo,
+                item.memory.memory_id,
+                item.memory.content
+            );
         }
-        Commands::AddConversation(cmd) => {
-            commands::add_conversation::handle(
-                cmd,
-                &config,
-                &db,
-                Arc::clone(&embeddings),
-                Arc::clone(&sparse_embeddings),
-            )
-            .await
-        }
-        Commands::Search(cmd) => {
-            commands::search::handle(
-                cmd,
-                &config,
-                &db,
-                Arc::clone(&embeddings),
-                Arc::clone(&sparse_embeddings),
-                Arc::clone(&reranker),
-                store_name,
-            )
-            .await
-        }
-        Commands::Ls(cmd) => commands::ls::handle(cmd, &config, &db).await,
-        Commands::Rm(cmd) => commands::rm::handle(cmd, &config, &db).await,
-        Commands::Stats(cmd) => commands::stats::handle(cmd, &config, &db).await,
-        Commands::Reembed(cmd) => {
-            commands::reembed::handle(
-                cmd,
-                &config,
-                &db,
-                store_name,
-                Arc::clone(&embeddings),
-                Arc::clone(&sparse_embeddings),
-            )
-            .await
-        }
-        Commands::Ingest(cmd) => {
-            commands::ingest::handle(
-                cmd,
-                &config,
-                &db,
-                Arc::clone(&embeddings),
-                Arc::clone(&sparse_embeddings),
-            )
-            .await
-        }
-        Commands::Prune(cmd) => commands::prune::handle(cmd, &config, &db).await,
-        Commands::Import(cmd) => {
-            commands::import::handle(
-                cmd,
-                &config,
-                &db,
-                Arc::clone(&embeddings),
-                Arc::clone(&sparse_embeddings),
-            )
-            .await
-        }
-        Commands::Models(_)
-        | Commands::Rerankers(_)
-        | Commands::Init(_)
-        | Commands::Service(_)
-        | Commands::Stores(_)
-        | Commands::Export(_)
-        | Commands::Context(_) => {
-            unreachable!()
-        }
-    };
+    }
+    Ok(())
+}
 
-    // Close database
-    db.close().await;
+fn search(config: &Config, args: &SearchArgs) -> anyhow::Result<()> {
+    let hits = repos::search(
+        &selected_repos(config, &args.scope)?,
+        &args.query,
+        args.limit,
+    )?;
+    if args.scope.json {
+        print_json(&hits)?;
+    } else {
+        for hit in hits {
+            println!(
+                "{}\t{}\t{}\t{}",
+                hit.score, hit.repo, hit.memory.memory_id, hit.memory.content
+            );
+        }
+    }
+    Ok(())
+}
 
-    // Avoid running destructors that can trigger fastembed/ort shutdown crash
-    std::mem::forget(embeddings);
-    std::mem::forget(sparse_embeddings);
-    std::mem::forget(reranker);
+fn remove(memory_id: &str, json: bool) -> anyhow::Result<()> {
+    let file = MemoryFile::open_current()?;
+    if !file
+        .active_memories()?
+        .iter()
+        .any(|memory| memory.memory_id == memory_id)
+    {
+        bail!("memory not found: {memory_id}");
+    }
+    let event = MemoryEvent::deprecate(memory_id.to_owned(), &AgentCtx::from_env());
+    file.append(&event)?;
+    if json {
+        print_json(&event)?;
+    } else {
+        println!("deprecated {memory_id}");
+    }
+    Ok(())
+}
 
-    result
+fn doctor(config: &Config) -> anyhow::Result<()> {
+    let file = MemoryFile::open_current()?;
+    println!("workspace: {}", file.root().display());
+    println!(
+        "ledger: {} ({})",
+        file.path().display(),
+        if file.path().exists() {
+            "present"
+        } else {
+            "missing"
+        }
+    );
+    match file.read_events() {
+        Ok(events) => println!("events: {} (valid)", events.len()),
+        Err(error) => bail!(error),
+    }
+    println!("configured roots: {}", config.roots.len());
+    Ok(())
+}
+
+fn show_repos(config: &Config, json: bool) -> anyhow::Result<()> {
+    let repos = repos::discover(&config.roots)?;
+    if json {
+        print_json(&repos)?;
+    } else {
+        for repo in repos {
+            println!(
+                "{}\t{}\texists={}\treadable={}",
+                repo.name,
+                repo.repo_path.display(),
+                repo.exists,
+                repo.readable
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_json(value: &impl Serialize) -> anyhow::Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).context("serialize output")?
+    );
+    Ok(())
 }

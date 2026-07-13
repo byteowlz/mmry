@@ -1,11 +1,5 @@
 [workspace]
-members = [
-  "crates/mmry-core",
-  "crates/mmry-cli",
-  "crates/mmry-mcp",
-  "crates/mmry-tui",
-  "crates/mmry-service",
-]
+members = ["crates/mmry-core", "crates/mmry-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -14,55 +8,22 @@ edition = "2021"
 authors = ["byteowlz"]
 license = "MIT"
 repository = "https://github.com/byteowlz/mmry"
-# Do not publish to crates.io (set to true when ready)
 publish = false
 
 [workspace.dependencies]
-# Core dependencies
-tokio = { version = "1.48", features = ["full"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5.51", features = ["derive", "env"] }
+fs2 = "0.4"
+rayon = "1.10"
+schemars = { version = "0.8", features = ["chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-config = { version = "0.14", default-features = false, features = ["toml"] }
-anyhow = "1.0"
-thiserror = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.18", features = ["v4", "serde"] }
-schemars = { version = "0.8", features = ["chrono", "uuid"] }
-
-# CLI dependencies
-clap = { version = "4.5.51", features = ["derive", "env"] }
-clap_complete = "4.5.51"
-
-# Configuration
+thiserror = "2.0"
 toml = "0.8"
-dirs = "5.0"
-
-# Fuzzy matching
-strsim = "0.11.1"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Async
-async-trait = "0.1"
-
-# Utilities
-regex = "1.12"
-once_cell = "1.19"
-sqlite-vec = "0.1.7-alpha.2"
-zerocopy = "0.8.27"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+walkdir = "2.5"
 tempfile = "3.10"
-tokenizers = "0.22"
-libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = [
-  "json",
-  "rustls-tls",
-  "blocking",
-] }
-subtle = "2.6"
-tower = "0.5"
 
 [profile.release]
 opt-level = "z"
@@ -77,14 +38,7 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
-cast_precision_loss = { level = "allow", priority = 1 }
 doc_markdown = { level = "allow", priority = 1 }
-missing_const_for_fn = { level = "allow", priority = 1 }
-uninlined_format_args = { level = "warn", priority = 1 }
-io_other_error = { level = "warn", priority = 1 }
-unnecessary_map_or = { level = "warn", priority = 1 }
 missing_errors_doc = { level = "allow", priority = 1 }
-missing_panics_doc = { level = "allow", priority = 1 }
 module_name_repetitions = { level = "allow", priority = 1 }
 must_use_candidate = { level = "allow", priority = 1 }
-option_if_let_else = { level = "allow", priority = 1 }

@@ -7,48 +7,20 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-tokio = { workspace = true }
-sqlx = { workspace = true }
-async-trait = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-config = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
-strsim = { workspace = true }
-once_cell = { workspace = true }
-regex = { workspace = true }
-tracing = { workspace = true }
-toml = { workspace = true }
-sqlite-vec = { workspace = true }
-zerocopy = { workspace = true }
-libsqlite3-sys = "0.30"
-shellexpand = "3.1"
-unicode-segmentation = "1.12"
-tokenizers = { workspace = true }
-schemars = { workspace = true }
-walkdir = "2.5"
-reqwest = { workspace = true, optional = true }
-rig-core = { version = "0.26.0", default-features = false, features = ["reqwest-rustls"], optional = true }
-
-tonic = { version = "0.12", optional = true }
-prost = { version = "0.13", optional = true }
-sysinfo = { version = "0.32", optional = true }
-
-[features]
-default = ["service", "remote-http"]
-remote-http = ["dep:reqwest"]
-service = ["dep:tonic", "dep:prost", "dep:sysinfo", "tonic-build", "protoc-bin-vendored", "remote-http", "dep:rig-core"]
-federation = ["remote-http"]
-
-[build-dependencies]
-tonic-build = { version = "0.12", optional = true }
-# Vendored protoc so cross-platform release builds (byt linux container +
-# macOS runner) need no system protobuf-compiler.
-protoc-bin-vendored = { version = "3", optional = true }
+anyhow.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+rayon.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
-tokio-test = "0.4"
-tempfile = { workspace = true }
+tempfile.workspace = true
+
+[lints]
+workspace = true

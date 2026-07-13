@@ -2,13 +2,10 @@
 # The reusable workflow builds linux-gnu in the byt container (glibc floor) and
 # *-apple-darwin natively on a macOS runner, then combines + publishes.
 #
-# NOTE: the legacy release also published `mmry-cuda` (a CUDA-linked AUR
-# variant). The uniform pipeline ships one prebuilt package; the CUDA variant is
-# not reproduced here. Restore it separately if still needed.
 [release]
 name = "mmry"
 lang = "rust"
-bins = ["mmry", "mmry-mcp", "mmry-service", "mmry-tui"]
+bins = ["mmry"]
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -21,8 +18,7 @@ formula = "mmry"
 
 [release.aur]
 pkgname = "mmry"
-pkgdesc = "A lean, local-first memory management system for humans and AI agents"
+pkgdesc = "An append-only workspace memory ledger"
 license = "MIT"
 url = "https://github.com/byteowlz/mmry"
-conflicts = ["mmry-cuda"]
 depends = ["gcc-libs"]

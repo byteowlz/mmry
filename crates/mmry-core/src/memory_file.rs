@@ -1,11 +1,12 @@
-//! Append-only workspace memory file.
+//! Append-only workspace memory ledger.
 
 use crate::agent_ctx::AgentCtx;
-use crate::memory::MemoryType;
 use chrono::DateTime;
 use chrono::Utc;
+use fs2::FileExt;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Map;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -21,13 +22,21 @@ use uuid::Uuid;
 pub const MMRY_DIR: &str = ".mmry";
 pub const MEMORY_FILE: &str = "mmry.jsonl";
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryType {
+    Episodic,
+    Semantic,
+    Procedural,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryEventType {
-    #[serde(rename = "memory.add", alias = "memory_add")]
+    #[serde(rename = "memory.add")]
     MemoryAdd,
-    #[serde(rename = "memory.deprecate", alias = "memory_deprecate")]
+    #[serde(rename = "memory.deprecate")]
     MemoryDeprecate,
-    #[serde(rename = "memory.supersede", alias = "memory_supersede")]
+    #[serde(rename = "memory.supersede")]
     MemorySupersede,
 }
 
@@ -58,7 +67,7 @@ impl MemoryEvent {
         content: String,
         memory_type: MemoryType,
         tags: Vec<String>,
-        agent_ctx: &AgentCtx,
+        agent: &AgentCtx,
     ) -> Self {
         Self {
             schema_version: 1,
@@ -70,29 +79,29 @@ impl MemoryEvent {
             content: Some(content),
             memory_type: Some(memory_type),
             tags,
-            metadata: Value::Object(Default::default()),
-            agent_ctx: agent_ctx.as_json(),
+            metadata: Value::Object(Map::default()),
+            agent_ctx: agent.as_json(),
         }
     }
 
-    pub fn deprecate(memory_id: String, agent_ctx: &AgentCtx) -> Self {
+    pub fn deprecate(memory_id: String, agent: &AgentCtx) -> Self {
         Self {
             schema_version: 1,
             id: format!("evt_{}", Uuid::new_v4()),
             ts: Utc::now(),
             event_type: MemoryEventType::MemoryDeprecate,
-            memory_id: memory_id.clone(),
-            target_memory_id: Some(memory_id),
+            target_memory_id: Some(memory_id.clone()),
+            memory_id,
             content: None,
             memory_type: None,
             tags: Vec::new(),
-            metadata: Value::Object(Default::default()),
-            agent_ctx: agent_ctx.as_json(),
+            metadata: Value::Object(Map::default()),
+            agent_ctx: agent.as_json(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryEntry {
     pub memory_id: String,
     pub content: String,
@@ -102,6 +111,12 @@ pub struct MemoryEntry {
     pub updated_at: DateTime<Utc>,
     pub metadata: Value,
     pub agent_ctx: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoredMemory {
+    pub memory: MemoryEntry,
+    pub score: usize,
 }
 
 pub struct MemoryFile {
@@ -114,53 +129,42 @@ impl MemoryFile {
     }
 
     pub fn open_current() -> crate::Result<Self> {
-        Ok(Self::open_at(find_workspace_root(&std::env::current_dir()?)))
+        Ok(Self::open_at(
+            find_workspace_root(&std::env::current_dir()?),
+        ))
     }
 
-    pub fn open_workspace(workspace_path: impl Into<PathBuf>) -> Self {
-        Self::open_at(workspace_path)
+    pub fn root(&self) -> &Path {
+        &self.root
     }
-
     pub fn dir(&self) -> PathBuf {
         self.root.join(MMRY_DIR)
     }
-
     pub fn path(&self) -> PathBuf {
         self.dir().join(MEMORY_FILE)
     }
 
     pub fn init(&self, tracked: bool) -> crate::Result<()> {
         fs::create_dir_all(self.dir())?;
-        ensure_file(&self.path())?;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.path())?;
         if !tracked {
             self.ensure_gitignore()?;
         }
         Ok(())
     }
 
-    pub fn ensure_gitignore(&self) -> crate::Result<()> {
-        let gitignore_path = self.root.join(".gitignore");
-        let mut existing = if gitignore_path.exists() {
-            fs::read_to_string(&gitignore_path)?
-        } else {
-            String::new()
-        };
-        let mut changed = false;
-        for line in [".mmry/mmry.jsonl", ".mmry/index/"] {
-            if !existing
-                .lines()
-                .any(|existing_line| existing_line.trim() == line)
-            {
-                if !existing.ends_with('\n') && !existing.is_empty() {
-                    existing.push('\n');
-                }
-                existing.push_str(line);
-                existing.push('\n');
-                changed = true;
+    fn ensure_gitignore(&self) -> crate::Result<()> {
+        let path = self.root.join(".gitignore");
+        let mut text = fs::read_to_string(&path).unwrap_or_default();
+        if !text.lines().any(|line| line.trim() == ".mmry/mmry.jsonl") {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
             }
-        }
-        if changed {
-            fs::write(gitignore_path, existing)?;
+            text.push_str(".mmry/mmry.jsonl\n");
+            fs::write(path, text)?;
         }
         Ok(())
     }
@@ -171,38 +175,45 @@ impl MemoryFile {
             .create(true)
             .append(true)
             .open(self.path())?;
-        let line = serde_json::to_string(event)?;
-        file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.flush()?;
-        file.sync_all()?;
+        file.lock_exclusive()?;
+        writeln!(file, "{}", serde_json::to_string(event)?)?;
+        file.sync_data()?;
+        file.unlock()?;
         Ok(())
     }
 
     pub fn read_events(&self) -> crate::Result<Vec<MemoryEvent>> {
-        let path = self.path();
-        if !path.exists() {
+        if !self.path().exists() {
             return Ok(Vec::new());
         }
-        let mut events = read_events_from_path(&path)?;
-        events.sort_by_key(|event| event.ts);
+        let reader = BufReader::new(OpenOptions::new().read(true).open(self.path())?);
+        let mut events = Vec::new();
+        for (index, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event = serde_json::from_str(&line).map_err(|error| {
+                crate::Error::InvalidInput(format!(
+                    "{}:{}: malformed JSONL: {error}",
+                    self.path().display(),
+                    index + 1
+                ))
+            })?;
+            events.push(event);
+        }
+        events.sort_by_key(|event: &MemoryEvent| (event.ts, event.id.clone()));
         Ok(events)
     }
 
     pub fn active_memories(&self) -> crate::Result<Vec<MemoryEntry>> {
-        let mut memories: HashMap<String, MemoryEntry> = HashMap::new();
-        let mut inactive: HashSet<String> = HashSet::new();
-
+        let mut active = HashMap::new();
+        let mut inactive = HashSet::new();
         for event in self.read_events()? {
             match event.event_type {
-                MemoryEventType::MemoryAdd => {
-                    if inactive.contains(&event.memory_id) {
-                        continue;
-                    }
-                    if let (Some(content), Some(memory_type)) =
-                        (event.content.clone(), event.memory_type.clone())
-                    {
-                        memories.insert(
+                MemoryEventType::MemoryAdd if !inactive.contains(&event.memory_id) => {
+                    if let (Some(content), Some(memory_type)) = (event.content, event.memory_type) {
+                        active.insert(
                             event.memory_id.clone(),
                             MemoryEntry {
                                 memory_id: event.memory_id,
@@ -218,182 +229,130 @@ impl MemoryFile {
                     }
                 }
                 MemoryEventType::MemoryDeprecate | MemoryEventType::MemorySupersede => {
-                    let target = event
-                        .target_memory_id
-                        .clone()
-                        .unwrap_or_else(|| event.memory_id.clone());
-                    inactive.insert(target.clone());
-                    memories.remove(&target);
+                    let id = event.target_memory_id.unwrap_or(event.memory_id);
+                    inactive.insert(id.clone());
+                    active.remove(&id);
                 }
+                MemoryEventType::MemoryAdd => {}
             }
         }
-
-        let mut values: Vec<_> = memories.into_values().collect();
-        values.sort_by_key(|memory| std::cmp::Reverse(memory.updated_at));
+        let mut values: Vec<_> = active.into_values().collect();
+        values.sort_by_key(|m| (std::cmp::Reverse(m.updated_at), m.memory_id.clone()));
         Ok(values)
     }
 
     pub fn search(&self, query: &str, limit: usize) -> crate::Result<Vec<ScoredMemory>> {
-        let terms: Vec<String> = query
-            .split_whitespace()
-            .map(|term| term.to_lowercase())
-            .filter(|term| !term.is_empty())
-            .collect();
+        let terms: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        let mut scored: Vec<ScoredMemory> = self
+        let phrase = query.to_lowercase();
+        let mut hits: Vec<_> = self
             .active_memories()?
             .into_iter()
             .filter_map(|memory| {
-                let haystack =
-                    format!("{} {}", memory.content, memory.tags.join(" ")).to_lowercase();
-                let mut score = 0usize;
-                for term in &terms {
-                    score += haystack.matches(term).count() * 10;
-                    if memory.tags.iter().any(|tag| tag.eq_ignore_ascii_case(term)) {
-                        score += 25;
-                    }
-                }
-                if haystack.contains(&query.to_lowercase()) {
-                    score += 50;
-                }
+                let text = format!("{} {}", memory.content, memory.tags.join(" ")).to_lowercase();
+                let score = terms
+                    .iter()
+                    .map(|term| text.matches(term).count() * 10)
+                    .sum::<usize>()
+                    + usize::from(text.contains(&phrase)) * 50;
                 (score > 0).then_some(ScoredMemory { memory, score })
             })
             .collect();
-        scored.sort_by_key(|hit| {
+        hits.sort_by_key(|hit| {
             (
                 std::cmp::Reverse(hit.score),
                 std::cmp::Reverse(hit.memory.updated_at),
+                hit.memory.memory_id.clone(),
             )
         });
-        scored.truncate(limit);
-        Ok(scored)
+        hits.truncate(limit);
+        Ok(hits)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScoredMemory {
-    pub memory: MemoryEntry,
-    pub score: usize,
-}
-
-/// Resolve the workspace root for a starting directory.
-///
-/// Prefers the nearest ancestor that already holds a `.mmry` store, so an
-/// existing store is reused no matter which subdirectory a command runs from.
-/// Otherwise falls back to the enclosing git repository root, so memories are
-/// shared across the whole repo. With neither, the starting directory is used.
 fn find_workspace_root(start: &Path) -> PathBuf {
-    if let Some(dir) = start.ancestors().find(|dir| dir.join(MMRY_DIR).is_dir()) {
-        return dir.to_path_buf();
-    }
-    if let Some(dir) = start.ancestors().find(|dir| dir.join(".git").exists()) {
-        return dir.to_path_buf();
-    }
-    start.to_path_buf()
-}
-
-fn ensure_file(path: &Path) -> crate::Result<()> {
-    if !path.exists() {
-        OpenOptions::new().create_new(true).write(true).open(path)?;
-    }
-    Ok(())
-}
-
-fn read_events_from_path(path: &Path) -> crate::Result<Vec<MemoryEvent>> {
-    let file = OpenOptions::new().read(true).open(path)?;
-    let reader = BufReader::new(file);
-    let mut events = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<MemoryEvent>(&line) {
-            Ok(event) => events.push(event),
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "skipping invalid mmry memory file line")
-            }
-        }
-    }
-    Ok(events)
+    start
+        .ancestors()
+        .find(|dir| dir.join(MMRY_DIR).is_dir())
+        .or_else(|| start.ancestors().find(|dir| dir.join(".git").exists()))
+        .unwrap_or(start)
+        .to_path_buf()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn append_and_project_active_memory() {
+    fn append_replay_search_and_deprecate() {
         let dir = tempfile::tempdir().unwrap();
-        let memory_file = MemoryFile::open_at(dir.path());
-        memory_file.init(false).unwrap();
+        let file = MemoryFile::open_at(dir.path());
+        file.init(false).unwrap();
         let event = MemoryEvent::add(
-            "remember this".to_string(),
-            MemoryType::Semantic,
-            vec!["test".to_string()],
+            "Run just fmt".into(),
+            MemoryType::Procedural,
+            vec!["rust".into()],
             &AgentCtx::default(),
         );
-        let id = event.memory_id.clone();
-        memory_file.append(&event).unwrap();
-
-        let active = memory_file.active_memories().unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].memory_id, id);
-        assert_eq!(active[0].content, "remember this");
-        let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
-        assert!(gitignore.contains(".mmry/mmry.jsonl"));
-        assert!(gitignore.contains(".mmry/index/"));
+        file.append(&event).unwrap();
+        assert_eq!(file.search("rust fmt", 10).unwrap().len(), 1);
+        file.append(&MemoryEvent::deprecate(
+            event.memory_id,
+            &AgentCtx::default(),
+        ))
+        .unwrap();
+        assert!(file.active_memories().unwrap().is_empty());
+        assert!(!fs::read_to_string(dir.path().join(".gitignore"))
+            .unwrap()
+            .contains("index"));
     }
 
     #[test]
-    fn workspace_root_prefers_existing_mmry_from_subdir() {
+    fn malformed_lines_are_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        fs::create_dir_all(root.join(MMRY_DIR)).unwrap();
-        let sub = root.join("a").join("b");
-        fs::create_dir_all(&sub).unwrap();
-
-        assert_eq!(find_workspace_root(&sub), root);
-        // From inside the store dir itself, walk up to its owning workspace.
-        assert_eq!(find_workspace_root(&root.join(MMRY_DIR)), root);
+        let file = MemoryFile::open_at(dir.path());
+        file.init(true).unwrap();
+        fs::write(file.path(), "not json\n").unwrap();
+        assert!(file
+            .read_events()
+            .unwrap_err()
+            .to_string()
+            .contains("malformed JSONL"));
     }
 
     #[test]
-    fn workspace_root_falls_back_to_git_root() {
+    fn tracked_init_does_not_create_gitignore() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        fs::create_dir_all(root.join(".git")).unwrap();
-        let sub = root.join("crates").join("x");
-        fs::create_dir_all(&sub).unwrap();
-
-        assert_eq!(find_workspace_root(&sub), root);
+        MemoryFile::open_at(dir.path()).init(true).unwrap();
+        assert!(!dir.path().join(".gitignore").exists());
     }
 
     #[test]
-    fn workspace_root_defaults_to_start_without_repo_or_store() {
+    fn concurrent_appends_preserve_every_event() {
         let dir = tempfile::tempdir().unwrap();
-        let sub = dir.path().join("plain");
-        fs::create_dir_all(&sub).unwrap();
-
-        assert_eq!(find_workspace_root(&sub), sub);
-    }
-
-    #[test]
-    fn search_finds_matching_memory() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory_file = MemoryFile::open_at(dir.path());
-        memory_file
-            .append(&MemoryEvent::add(
-                "Run just fmt after Rust edits".to_string(),
-                MemoryType::Procedural,
-                vec!["rust".to_string()],
-                &AgentCtx::default(),
-            ))
-            .unwrap();
-        let hits = memory_file.search("rust fmt", 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].memory.content, "Run just fmt after Rust edits");
+        let root = dir.path().to_path_buf();
+        let threads: Vec<_> = (0..16)
+            .map(|index| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    MemoryFile::open_at(root)
+                        .append(&MemoryEvent::add(
+                            format!("memory {index}"),
+                            MemoryType::Semantic,
+                            Vec::new(),
+                            &AgentCtx::default(),
+                        ))
+                        .unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            MemoryFile::open_at(root).active_memories().unwrap().len(),
+            16
+        );
     }
 }

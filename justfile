@@ -18,7 +18,7 @@ install:
     rustup show active-toolchain
     cargo fetch
 
-# Build and install mmry-cli, mmry-tui, and mmry-service (non-interactive)
+# Build and install the mmry CLI (non-interactive)
 install-all:
     ./scripts/install-mmry.sh
 
