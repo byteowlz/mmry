@@ -1,4 +1,4 @@
-"$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/govnr/tool.schema.json"
+#:schema https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/govnr/tool.schema.json
 
 name = "mmry"
 title = "mmry"
