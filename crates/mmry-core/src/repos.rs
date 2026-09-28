@@ -1,9 +1,9 @@
 //! Bounded discovery and in-memory aggregation of repository ledgers.
 
-use crate::config::DiscoveryRoot;
 use crate::MemoryEntry;
 use crate::MemoryFile;
 use crate::ScoredMemory;
+use crate::config::DiscoveryRoot;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::path::Path;
@@ -257,10 +257,12 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(select_named(&repos, "unique").unwrap().name, "unique");
-        assert!(select_named(&repos, "missing")
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
+        assert!(
+            select_named(&repos, "missing")
+                .unwrap_err()
+                .to_string()
+                .contains("not found")
+        );
         let error = select_named(&repos, "same").unwrap_err().to_string();
         assert!(error.contains("one/same"));
         assert!(error.contains("two/same"));

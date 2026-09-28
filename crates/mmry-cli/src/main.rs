@@ -1,19 +1,21 @@
-use anyhow::bail;
+//! `mmry` command-line interface for the append-only workspace memory ledger.
+
 use anyhow::Context;
+use anyhow::bail;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
-use mmry_core::config::Config;
-use mmry_core::repos::Repository;
-use mmry_core::repos::RepositoryMemory;
-use mmry_core::repos::RepositorySearchHit;
-use mmry_core::repos::{self};
 use mmry_core::AgentCtx;
 use mmry_core::MemoryEntry;
 use mmry_core::MemoryEvent;
 use mmry_core::MemoryFile;
 use mmry_core::MemoryType;
+use mmry_core::config::Config;
+use mmry_core::repos::Repository;
+use mmry_core::repos::RepositoryMemory;
+use mmry_core::repos::RepositorySearchHit;
+use mmry_core::repos::{self};
 use serde::Serialize;
 use std::fmt::Write as _;
 use std::io::Read;
@@ -176,9 +178,9 @@ fn list(config: &Config, scope: &QueryScope) -> anyhow::Result<()> {
     if scope.json {
         print_json(&memories)?;
     } else if scope.plain {
-        print!("{}", plain_list(&memories));
+        print!("{}", plain_list(&memories)?);
     } else {
-        print!("{}", human_list(&memories));
+        print!("{}", human_list(&memories)?);
     }
     Ok(())
 }
@@ -192,27 +194,27 @@ fn search(config: &Config, args: &SearchArgs) -> anyhow::Result<()> {
     if args.scope.json {
         print_json(&hits)?;
     } else if args.scope.plain {
-        print!("{}", plain_search(&hits));
+        print!("{}", plain_search(&hits)?);
     } else {
-        print!("{}", human_search(&hits));
+        print!("{}", human_search(&hits)?);
     }
     Ok(())
 }
 
-fn human_list(items: &[RepositoryMemory]) -> String {
+fn human_list(items: &[RepositoryMemory]) -> Result<String, std::fmt::Error> {
     if items.is_empty() {
-        return "No memories found.\n".to_owned();
+        return Ok("No memories found.\n".to_owned());
     }
     let mut output = String::new();
     for item in items {
-        write_human_memory(&mut output, &item.repo, &item.repo_path, &item.memory, None);
+        write_human_memory(&mut output, &item.repo, &item.repo_path, &item.memory, None)?;
     }
-    output
+    Ok(output)
 }
 
-fn human_search(items: &[RepositorySearchHit]) -> String {
+fn human_search(items: &[RepositorySearchHit]) -> Result<String, std::fmt::Error> {
     if items.is_empty() {
-        return "No matching memories.\n".to_owned();
+        return Ok("No matching memories.\n".to_owned());
     }
     let mut output = String::new();
     for item in items {
@@ -222,9 +224,9 @@ fn human_search(items: &[RepositorySearchHit]) -> String {
             &item.repo_path,
             &item.memory,
             Some(item.score),
-        );
+        )?;
     }
-    output
+    Ok(output)
 }
 
 fn write_human_memory(
@@ -233,7 +235,7 @@ fn write_human_memory(
     repo_path: &std::path::Path,
     memory: &MemoryEntry,
     score: Option<usize>,
-) {
+) -> std::fmt::Result {
     let kind = match memory.memory_type {
         MemoryType::Episodic => "episodic",
         MemoryType::Semantic => "semantic",
@@ -244,18 +246,16 @@ fn write_human_memory(
         output,
         "{repo}  ·  {}  ·  {kind}{score}",
         memory.updated_at.format("%Y-%m-%d %H:%M UTC")
-    )
-    .expect("writing to a String cannot fail");
-    writeln!(output, "{}  ·  {}", repo_path.display(), memory.memory_id)
-        .expect("writing to a String cannot fail");
+    )?;
+    writeln!(output, "{}  ·  {}", repo_path.display(), memory.memory_id)?;
     for line in wrap_content(&memory.content, 96) {
-        writeln!(output, "  {line}").expect("writing to a String cannot fail");
+        writeln!(output, "  {line}")?;
     }
     if !memory.tags.is_empty() {
-        writeln!(output, "  tags: {}", memory.tags.join(", "))
-            .expect("writing to a String cannot fail");
+        writeln!(output, "  tags: {}", memory.tags.join(", "))?;
     }
     output.push('\n');
+    Ok(())
 }
 
 fn wrap_content(content: &str, width: usize) -> Vec<String> {
@@ -280,8 +280,8 @@ fn wrap_content(content: &str, width: usize) -> Vec<String> {
     wrapped
 }
 
-fn plain_list(items: &[RepositoryMemory]) -> String {
-    items.iter().fold(String::new(), |mut output, item| {
+fn plain_list(items: &[RepositoryMemory]) -> Result<String, std::fmt::Error> {
+    items.iter().try_fold(String::new(), |mut output, item| {
         writeln!(
             output,
             "{}\t{}\t{}\t{}\t{}",
@@ -290,14 +290,13 @@ fn plain_list(items: &[RepositoryMemory]) -> String {
             item.repo_path.display(),
             item.memory.memory_id,
             escape_plain(&item.memory.content)
-        )
-        .expect("writing to a String cannot fail");
-        output
+        )?;
+        Ok(output)
     })
 }
 
-fn plain_search(items: &[RepositorySearchHit]) -> String {
-    items.iter().fold(String::new(), |mut output, item| {
+fn plain_search(items: &[RepositorySearchHit]) -> Result<String, std::fmt::Error> {
+    items.iter().try_fold(String::new(), |mut output, item| {
         writeln!(
             output,
             "{}\t{}\t{}\t{}\t{}",
@@ -306,9 +305,8 @@ fn plain_search(items: &[RepositorySearchHit]) -> String {
             item.repo_path.display(),
             item.memory.memory_id,
             escape_plain(&item.memory.content)
-        )
-        .expect("writing to a String cannot fail");
-        output
+        )?;
+        Ok(output)
     })
 }
 
@@ -408,7 +406,7 @@ mod tests {
 
     #[test]
     fn human_output_is_wrapped_and_attributed() {
-        let output = human_list(&[item(&"word ".repeat(30))]);
+        let output = human_list(&[item(&"word ".repeat(30))]).unwrap();
         assert!(output.contains("oqto_refactor  ·  2026-06-09 18:38 UTC  ·  procedural"));
         assert!(output.contains("/home/wismut/byteowlz/oqto_refactor  ·  mem_123"));
         assert!(output.contains("  tags: sandbox, linux"));
@@ -417,7 +415,7 @@ mod tests {
 
     #[test]
     fn plain_output_keeps_one_record_per_line() {
-        let output = plain_list(&[item("first line\nsecond\tline")]);
+        let output = plain_list(&[item("first line\nsecond\tline")]).unwrap();
         assert_eq!(output.lines().count(), 1);
         assert!(output.contains("first line\\nsecond\\tline"));
     }

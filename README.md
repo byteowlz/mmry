@@ -4,6 +4,14 @@
 
 `mmry` is a deterministic workspace memory ledger. Its only source of truth is an append-only `.mmry/mmry.jsonl` file in each repository. It makes no model calls and has no database, daemon, semantic index, ingestion pipeline, or global memory store.
 
+## Install
+
+```bash
+brew install byteowlz/tap/mmry   # macOS / Linux
+yay -S mmry                      # Arch (AUR)
+just install-all                 # from source
+```
+
 ## Use
 
 ```bash
@@ -21,7 +29,7 @@ List and search use wrapped, repository-attributed output for humans. Add `--pla
 
 ## Cross-repository reads
 
-Configure bounded roots in the normal XDG config file (`~/.config/mmry/config.toml` on Unix):
+Configure bounded roots in the normal XDG config file (`$XDG_CONFIG_HOME/mmry/config.toml`, default `~/.config/mmry/config.toml`). A commented default is created on first run; `--config PATH` or `MMRY_CONFIG` selects another file, which must exist. See `examples/config.toml`:
 
 ```toml
 [[roots]]
@@ -65,9 +73,9 @@ The migration reports fields that cannot be represented before writing. It expor
 ## Development
 
 ```bash
-cargo check --workspace
-cargo clippy --workspace --all-targets
-cargo test --workspace
+just                   # list recipes
+just check-all         # fmt-check, strict clippy, ast-grep guardrails, rustdoc, tests (same as CI)
+just generate-config   # regenerate examples/config.schema.json from the config model
 ```
 
 The 500-repository fixture prints its measured cold runtime during tests; no fixed speed claim is made because results depend on filesystem and machine.

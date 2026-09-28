@@ -1,0 +1,11 @@
+# Complements the lint tables in Cargo.toml (byteowlz rust-workspace template).
+cognitive-complexity-threshold = 15
+type-complexity-threshold = 200
+too-many-lines-threshold = 100
+
+# Tests assert on known-good fixtures; unwrap/expect there is the failure report.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+doc-valid-idents = ["CLI", "TOML", "JSON", "XDG", "UUID", "SQLite", ".."]

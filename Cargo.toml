@@ -4,7 +4,7 @@ resolver = "2"
 
 [workspace.package]
 version = "0.13.4"
-edition = "2021"
+edition = "2024"
 authors = ["byteowlz"]
 license = "MIT"
 repository = "https://github.com/byteowlz/mmry"
@@ -34,11 +34,41 @@ strip = true
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+non_ascii_idents = "forbid"
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+unfulfilled_lint_expectations = "deny"
+# Staged exception (trx): the template also denies `missing_docs`,
+# `missing_debug_implementations` and `missing_copy_implementations`; enabling
+# them today reports ~105 undocumented public items. Enable once documented.
+
+[workspace.lints.rustdoc]
+all = { level = "deny", priority = -1 }
 
 [workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+multiple_crate_versions = { level = "allow", priority = 1 } # unavoidable with transitive deps
 doc_markdown = { level = "allow", priority = 1 }
 missing_errors_doc = { level = "allow", priority = 1 }
 module_name_repetitions = { level = "allow", priority = 1 }
 must_use_candidate = { level = "allow", priority = 1 }
+
+# Guardrails from the byteowlz rust-workspace template. Tests may unwrap
+# (see clippy.toml); production code must propagate errors.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+exit = "deny"
+mem_forget = "deny"
+large_stack_arrays = "deny"
+large_types_passed_by_value = "deny"

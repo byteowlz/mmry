@@ -303,9 +303,11 @@ mod tests {
         ))
         .unwrap();
         assert!(file.active_memories().unwrap().is_empty());
-        assert!(!fs::read_to_string(dir.path().join(".gitignore"))
-            .unwrap()
-            .contains("index"));
+        assert!(
+            !fs::read_to_string(dir.path().join(".gitignore"))
+                .unwrap()
+                .contains("index")
+        );
     }
 
     #[test]
@@ -333,11 +335,12 @@ mod tests {
         let file = MemoryFile::open_at(dir.path());
         file.init(true).unwrap();
         fs::write(file.path(), "not json\n").unwrap();
-        assert!(file
-            .read_events()
-            .unwrap_err()
-            .to_string()
-            .contains("malformed JSONL"));
+        assert!(
+            file.read_events()
+                .unwrap_err()
+                .to_string()
+                .contains("malformed JSONL")
+        );
     }
 
     #[test]

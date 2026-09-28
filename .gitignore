@@ -11,19 +11,18 @@
 *~
 .DS_Store
 .DS_Store_
-.env 
+.env
 .fastembed_cache/
 .idea/
 .venv/
 .vscode/
 /target
-Applications/ 
-Cargo.lock
+Applications/
 Thumbs.db
-_pycache__/ 
+__pycache__/
 build/
 dist/
-wheels/ 
+wheels/
 docs/
 
 # bv (beads viewer) local config and caches

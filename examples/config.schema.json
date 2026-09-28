@@ -2,25 +2,35 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Config",
   "type": "object",
-  "additionalProperties": false,
   "properties": {
-    "$schema": {
-      "description": "Optional editor/LSP schema reference; ignored at runtime.",
-      "type": ["string", "null"]
-    },
     "roots": {
       "description": "Bounded directories searched by cross-repository commands.",
-      "type": "array",
       "default": [],
+      "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["path"],
-        "properties": {
-          "path": { "type": "string" },
-          "max_depth": { "type": "integer", "format": "uint", "minimum": 0, "default": 2 }
-        }
+        "$ref": "#/definitions/DiscoveryRoot"
       }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "DiscoveryRoot": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "max_depth": {
+          "default": 2,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

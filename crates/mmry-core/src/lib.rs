@@ -1,3 +1,6 @@
+//! Core library for mmry: the append-only workspace memory ledger, repository
+//! discovery, configuration, and XDG path resolution.
+
 pub mod agent_ctx;
 pub mod config;
 pub mod error;

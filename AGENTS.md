@@ -16,6 +16,17 @@ This file provides guidance to AI Agents when working with code in this reposito
 
 - Omit "Created by" comments and dates to keep headers clean and focused
 
+## Architecture
+
+- `crates/mmry-core` — ledger format (`memory_file.rs`, append-only `.mmry/mmry.jsonl`), repository discovery/aggregation (`repos.rs`), typed config + schema (`config.rs`), XDG base dirs (`paths.rs`).
+- `crates/mmry-cli` — the `mmry` binary (clap); rendering lives in `main.rs`.
+- `examples/config.toml` + `examples/config.schema.json` — generated/validated from `Config` (`just generate-config`, `just validate-config`). Central copy: `byteowlz/schemas/mmry/`.
+- `scripts/migrate_legacy_mmry_to_jsonl.py` — transitional SQLite migration (unittest in `scripts/`).
+
+## Required checks
+
+`just check-all` is the gate CI runs: fmt-check, strict clippy (`-D warnings`, lint tables in `Cargo.toml` + `clippy.toml`), ast-grep guardrails (errors; `#[cfg(test)]` modules exempt from the unwrap rule), rustdoc with `-D warnings`, Rust tests, script tests. Staged exception: `missing_docs`/`missing_debug_implementations` are not yet enabled (tracked in trx).
+
 ## Rust
 
 In the crate folder where the rust code lives:

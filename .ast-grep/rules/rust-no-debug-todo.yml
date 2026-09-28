@@ -1,6 +1,6 @@
 id: rust-no-debug-todo
 language: Rust
-severity: warning
+severity: error
 message: "Remove debug/todo leftovers before merge."
 note: "Use structured tracing and complete implementations instead of dbg!/todo!/unimplemented!."
 rule:
