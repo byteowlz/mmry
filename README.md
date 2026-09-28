@@ -2,7 +2,7 @@
 
 # mmry
 
-`mmry` is a deterministic workspace memory ledger. Its only source of truth is an append-only `.mmry/mmry.jsonl` file in each repository. It makes no model calls and has no database, daemon, semantic index, ingestion pipeline, or global memory store.
+`mmry` is a deterministic, personal operative-memory ledger: short observations ("in this repo, command X needs flag Y") that stay useful for weeks until corrected or expired. Its only source of truth is append-only JSONL. It makes no model calls and has no database, daemon, or semantic index.
 
 ## Install
 
@@ -15,47 +15,65 @@ just install-all                 # from source
 ## Use
 
 ```bash
-mmry init                         # create an untracked workspace ledger
-mmry init --tracked               # keep the ledger in git
-mmry add "Run just fmt" --memory-type procedural --tags rust,workflow
+mmry add "Run just fmt before commit" --why "CI rejects unformatted code" --memory-type procedural
+mmry add --general "Headless Chrome here needs --no-sandbox" --machine arch-dev-01
+mmry add "Staging token rotates weekly" --expires 7d --source "ops#123"
 mmry add -                        # read one memory from stdin
-mmry list                         # alias: mmry ls
-mmry search "rust fmt"
-mmry rm mem_<id>                  # append a deprecation event
-mmry doctor
+mmry list                         # general + current repository (alias: ls)
+mmry search "fmt"
+mmry supersede mem_<id> "Run just fmt && just lint" --reason "lint added" --expected-revision 1
+mmry rm mem_<id> --reason obsolete
+mmry doctor                       # state root, repository mode, pending migration
 ```
 
-List and search use wrapped, repository-attributed output for humans. Add `--plain` for stable tab-separated records or `--json` for structured output.
+`list`/`search` read the current scope (general + current repository); `--general`, `--repo NAME` and `--all` select other scopes, `list --include-expired` shows expired entries. Output is wrapped and attributed for humans; `--plain` gives stable tab-separated records and `--json` structured output with `scope`, `repo`, `repo_path`, `revision` and `memory_id`.
 
-## Cross-repository reads
+## Storage
 
-Configure bounded roots in the normal XDG config file (`$XDG_CONFIG_HOME/mmry/config.toml`, default `~/.config/mmry/config.toml`). A commented default is created on first run; `--config PATH` or `MMRY_CONFIG` selects another file, which must exist. See `examples/config.toml`:
+By default memories live in a per-user central store (`state_root`, default `$XDG_STATE_HOME/mmry`, i.e. `~/.local/state/mmry`):
 
-```toml
-[[roots]]
-path = "~/byteowlz"
-max_depth = 2
-
-[[roots]]
-path = "~/work"
-max_depth = 2
+```text
+general/mmry.jsonl              personal memories that apply everywhere
+repos/<name>/mmry.jsonl         one ledger per repository
+repos/<name>/repo.json          stable identity (git root commit) + known checkouts
 ```
 
-Then use:
+Clones of the same repository share one ledger; different repositories with the same directory name get separate `<name>--<id>` directories.
+
+A repository is in exactly one mode:
+
+- **central** (default): `mmry init` registers it; nothing is written into the repository.
+- **tracked**: `mmry init --tracked` keeps the ledger in `.mmry/mmry.jsonl` to commit with the repository. A ledger already committed to git is treated as tracked too.
+
+### Migrating repo-local ledgers
+
+An untracked `.mmry/mmry.jsonl` in central mode is migrated on first use (`migrate = "auto"`, the default; `"prompt"` asks on a terminal, `"off"` only warns and ignores it). Manually:
 
 ```bash
-mmry repos
-mmry list --repo trx
-mmry search "release" --repo trx
-mmry list --all
-mmry search "release" --all
+mmry migrate --dry-run            # current repository; --all for every repo under [[roots]]
+mmry migrate --untrack            # also move a git-committed ledger (leaves `git rm --cached` uncommitted)
 ```
 
-Discovery never searches the home directory unless explicitly configured. It is bounded, skips dependency/build/cache trees and does not follow symlinks. Reads are parallel, merged only in memory, and every result includes its repository name and canonical path in JSON. No global catalog or index is created.
+Events are merged by id (re-running is a no-op), the central ledger is verified to contain every active local memory, and only then is the local file renamed to `.mmry/mmry.jsonl.migrated-<timestamp>` (kept as backup) with a `.mmry/MIGRATED` note. An event id present in both ledgers with different content aborts the migration with nothing moved.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/mmry/config.toml` (default `~/.config/mmry/config.toml`). A commented default is created on first run; `--config PATH` or `MMRY_CONFIG` selects another file, which must exist. See `examples/config.toml`:
+
+```toml
+# state_root = "~/.local/state/mmry"
+# migrate = "auto"
+
+[[roots]]            # where `--all`, `--repo` and `migrate --all` look for tracked/legacy ledgers
+path = "~/byteowlz"
+max_depth = 2
+```
+
+`mmry repos` lists every known ledger. Discovery never searches the home directory unless configured, skips dependency/build/cache trees and does not follow symlinks.
 
 ## File format
 
-Each line is a versioned event. Active memories are obtained by replaying additions and deprecations. Malformed lines are errors and are never silently skipped. Appends use an exclusive file lock and durable flush.
+Each line is a versioned event (`memory.add`, `memory.supersede`, `memory.deprecate`). Active memories are obtained by replaying events sorted by `(ts, id)`, so line order does not matter. A supersede keeps the memory id and increments its revision; `--expected-revision` rejects stale writers. Malformed lines are errors and are never silently skipped. Appends use an exclusive file lock and durable flush.
 
 ## Legacy SQLite migration
 

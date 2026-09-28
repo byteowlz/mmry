@@ -3,6 +3,15 @@
   "title": "Config",
   "type": "object",
   "properties": {
+    "migrate": {
+      "description": "What to do when a repository still has a repo-local ledger that belongs in the central store.",
+      "default": "auto",
+      "allOf": [
+        {
+          "$ref": "#/definitions/MigrateMode"
+        }
+      ]
+    },
     "roots": {
       "description": "Bounded directories searched by cross-repository commands.",
       "default": [],
@@ -10,6 +19,14 @@
       "items": {
         "$ref": "#/definitions/DiscoveryRoot"
       }
+    },
+    "state_root": {
+      "description": "Per-user central store (general + per-repo ledgers). Defaults to `$XDG_STATE_HOME/mmry`.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "additionalProperties": false,
@@ -31,6 +48,32 @@
         }
       },
       "additionalProperties": false
+    },
+    "MigrateMode": {
+      "description": "Handling of repo-local ledgers in central mode.",
+      "oneOf": [
+        {
+          "description": "Migrate automatically on first use in that repository.",
+          "type": "string",
+          "enum": [
+            "auto"
+          ]
+        },
+        {
+          "description": "Ask on a terminal; fail otherwise.",
+          "type": "string",
+          "enum": [
+            "prompt"
+          ]
+        },
+        {
+          "description": "Never migrate automatically; warn and use the central store only.",
+          "type": "string",
+          "enum": [
+            "off"
+          ]
+        }
+      ]
     }
   }
 }

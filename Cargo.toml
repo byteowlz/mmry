@@ -52,6 +52,7 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 multiple_crate_versions = { level = "allow", priority = 1 } # unavoidable with transitive deps
+struct_excessive_bools = { level = "allow", priority = 1 } # clap flag structs (template relaxation)
 doc_markdown = { level = "allow", priority = 1 }
 missing_errors_doc = { level = "allow", priority = 1 }
 module_name_repetitions = { level = "allow", priority = 1 }

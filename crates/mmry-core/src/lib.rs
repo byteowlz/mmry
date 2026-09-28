@@ -7,6 +7,7 @@ pub mod error;
 pub mod memory_file;
 pub mod paths;
 pub mod repos;
+pub mod store;
 
 pub use agent_ctx::AgentCtx;
 pub use error::Error;

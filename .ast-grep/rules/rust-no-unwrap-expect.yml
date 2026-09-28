@@ -19,3 +19,6 @@ rule:
           not:
             kind: attribute_item
         pattern: "#[cfg(test)]"
+# Cargo integration tests are test-only crates (see clippy.toml allow-*-in-tests).
+ignores:
+  - "crates/*/tests/**"

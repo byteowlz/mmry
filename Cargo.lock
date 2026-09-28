@@ -381,6 +381,7 @@ name = "mmry-cli"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "mmry-core",
  "serde",

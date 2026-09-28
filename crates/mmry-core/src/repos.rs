@@ -1,44 +1,151 @@
-//! Bounded discovery and in-memory aggregation of repository ledgers.
+//! Ledger sources (general, central repos, tracked repo-local ledgers) and
+//! bounded, in-memory aggregation across them.
 
 use crate::MemoryEntry;
 use crate::MemoryFile;
 use crate::ScoredMemory;
 use crate::config::DiscoveryRoot;
+use crate::store::Checkout;
+use crate::store::Store;
+use chrono::Utc;
 use rayon::prelude::*;
 use serde::Serialize;
-use std::path::Path;
 use std::path::PathBuf;
 use walkdir::DirEntry;
 use walkdir::WalkDir;
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    General,
+    Repo,
+}
+
+/// Where a ledger lives.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Storage {
+    Central,
+    Tracked,
+}
+
+/// One ledger that can be read.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct Repository {
+pub struct Source {
+    pub scope: Scope,
+    /// `general`, or the repository's readable (store-unique) name.
     pub name: String,
-    pub repo_path: PathBuf,
-    pub memory_path: PathBuf,
+    pub repo_path: Option<PathBuf>,
+    pub storage: Storage,
+    pub ledger: PathBuf,
     pub exists: bool,
-    pub readable: bool,
+}
+
+impl Source {
+    pub fn general(store: &Store) -> Self {
+        Self::new(
+            Scope::General,
+            "general".into(),
+            None,
+            Storage::Central,
+            &store.general(),
+        )
+    }
+
+    fn new(
+        scope: Scope,
+        name: String,
+        repo_path: Option<PathBuf>,
+        storage: Storage,
+        ledger: &MemoryFile,
+    ) -> Self {
+        Self {
+            scope,
+            name,
+            repo_path,
+            storage,
+            exists: ledger.exists(),
+            ledger: ledger.path().to_path_buf(),
+        }
+    }
+
+    /// Central or tracked source for `checkout`; central lookups do not write.
+    pub fn for_checkout(store: &Store, checkout: &Checkout) -> crate::Result<Self> {
+        if checkout.tracked().is_some() {
+            return Ok(Self::new(
+                Scope::Repo,
+                checkout.name.clone(),
+                Some(checkout.root.clone()),
+                Storage::Tracked,
+                &checkout.local_ledger(),
+            ));
+        }
+        let repo = store.plan(checkout)?;
+        Ok(Self::new(
+            Scope::Repo,
+            repo.dir_name(),
+            Some(checkout.root.clone()),
+            Storage::Central,
+            &repo.ledger(),
+        ))
+    }
+
+    pub fn file(&self) -> MemoryFile {
+        MemoryFile::new(&self.ledger)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct RepositoryMemory {
+pub struct SourcedMemory {
+    pub scope: Scope,
     pub repo: String,
-    pub repo_path: PathBuf,
+    pub repo_path: Option<PathBuf>,
     #[serde(flatten)]
     pub memory: MemoryEntry,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct RepositorySearchHit {
+pub struct SourcedHit {
+    pub scope: Scope,
     pub repo: String,
-    pub repo_path: PathBuf,
+    pub repo_path: Option<PathBuf>,
     pub score: usize,
     #[serde(flatten)]
     pub memory: MemoryEntry,
 }
 
-pub fn discover(roots: &[DiscoveryRoot]) -> crate::Result<Vec<Repository>> {
-    let mut repos = Vec::new();
+/// General + every central repo + tracked repo-local ledgers under `roots`.
+pub fn all_sources(store: &Store, roots: &[DiscoveryRoot]) -> crate::Result<Vec<Source>> {
+    let mut sources = vec![Source::general(store)];
+    for repo in store.repos()? {
+        sources.push(Source::new(
+            Scope::Repo,
+            repo.dir_name(),
+            repo.record.checkouts.first().cloned(),
+            Storage::Central,
+            &repo.ledger(),
+        ));
+    }
+    sources.extend(
+        discover_local(roots)?
+            .into_iter()
+            .filter(|checkout| checkout.tracked().is_some())
+            .map(|checkout| {
+                Source::new(
+                    Scope::Repo,
+                    checkout.name.clone(),
+                    Some(checkout.root.clone()),
+                    Storage::Tracked,
+                    &checkout.local_ledger(),
+                )
+            }),
+    );
+    Ok(sources)
+}
+
+/// Checkouts under `roots` that contain a repo-local `.mmry/mmry.jsonl`.
+pub fn discover_local(roots: &[DiscoveryRoot]) -> crate::Result<Vec<Checkout>> {
+    let mut found = Vec::new();
     for root in roots {
         let canonical_root = std::fs::canonicalize(&root.path).map_err(|error| {
             crate::Error::Config(format!(
@@ -53,30 +160,14 @@ pub fn discover(roots: &[DiscoveryRoot]) -> crate::Result<Vec<Repository>> {
             .filter_entry(include_entry)
         {
             let entry = entry.map_err(|error| crate::Error::Other(error.into()))?;
-            if !entry.file_type().is_dir() {
-                continue;
-            }
-            let memory_path = entry.path().join(".mmry/mmry.jsonl");
-            if memory_path.exists() {
-                let repo_path = std::fs::canonicalize(entry.path())?;
-                let readable = std::fs::File::open(&memory_path).is_ok();
-                repos.push(Repository {
-                    name: repo_path
-                        .file_name()
-                        .unwrap_or(repo_path.as_os_str())
-                        .to_string_lossy()
-                        .into_owned(),
-                    repo_path,
-                    memory_path,
-                    exists: true,
-                    readable,
-                });
+            if entry.file_type().is_dir() && entry.path().join(".mmry/mmry.jsonl").exists() {
+                found.push(Checkout::at(entry.path())?);
             }
         }
     }
-    repos.sort_by(|a, b| a.repo_path.cmp(&b.repo_path));
-    repos.dedup_by(|a, b| a.repo_path == b.repo_path);
-    Ok(repos)
+    found.sort_by(|a, b| a.root.cmp(&b.root));
+    found.dedup_by(|a, b| a.root == b.root);
+    Ok(found)
 }
 
 fn include_entry(entry: &DirEntry) -> bool {
@@ -90,105 +181,120 @@ fn include_entry(entry: &DirEntry) -> bool {
     )
 }
 
-pub fn select_named(repos: &[Repository], name: &str) -> crate::Result<Repository> {
-    let matches: Vec<_> = repos
+/// The single repository source called `name` (general excluded).
+pub fn select_named(sources: &[Source], name: &str) -> crate::Result<Source> {
+    let matches: Vec<_> = sources
         .iter()
-        .filter(|repo| repo.name == name)
+        .filter(|source| source.scope == Scope::Repo)
+        .filter(|source| {
+            source.name == name
+                || source
+                    .repo_path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .is_some_and(|file| file == name)
+        })
         .cloned()
         .collect();
     match matches.as_slice() {
         [] => Err(crate::Error::NotFound(format!("repository '{name}'"))),
-        [repo] => Ok(repo.clone()),
+        [source] => Ok(source.clone()),
         _ => Err(crate::Error::InvalidInput(format!(
-            "repository name '{name}' is ambiguous:\n{}",
+            "repository name '{name}' is ambiguous; use one of the store names:\n{}",
             matches
                 .iter()
-                .map(|repo| format!("  {}", repo.repo_path.display()))
+                .map(|source| {
+                    format!(
+                        "  {}\t{}",
+                        source.name,
+                        source
+                            .repo_path
+                            .as_ref()
+                            .map_or_else(String::new, |p| p.display().to_string())
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         ))),
     }
 }
 
-pub fn list(repos: &[Repository]) -> crate::Result<Vec<RepositoryMemory>> {
-    let results: Vec<crate::Result<Vec<_>>> = repos
+fn sort_key(scope: Scope, source: &Source) -> (Scope, String) {
+    (scope, source.ledger.display().to_string())
+}
+
+/// Active, non-expired memories from `sources`, newest first.
+pub fn list(sources: &[Source]) -> crate::Result<Vec<SourcedMemory>> {
+    let now = Utc::now();
+    collect(sources, |file| file.current_memories(now))
+}
+
+/// Active memories from `sources` including expired ones, newest first.
+pub fn list_including_expired(sources: &[Source]) -> crate::Result<Vec<SourcedMemory>> {
+    collect(sources, MemoryFile::active_memories)
+}
+
+fn collect(
+    sources: &[Source],
+    read: impl Fn(&MemoryFile) -> crate::Result<Vec<MemoryEntry>> + Sync,
+) -> crate::Result<Vec<SourcedMemory>> {
+    let results: Vec<crate::Result<Vec<MemoryEntry>>> = sources
         .par_iter()
-        .map(|repo| {
-            MemoryFile::open_at(&repo.repo_path)
-                .active_memories()
-                .map(|memories| {
-                    memories
-                        .into_iter()
-                        .map(|memory| RepositoryMemory {
-                            repo: repo.name.clone(),
-                            repo_path: repo.repo_path.clone(),
-                            memory,
-                        })
-                        .collect()
-                })
-        })
+        .map(|source| read(&source.file()))
         .collect();
-    let mut merged = results
-        .into_iter()
-        .collect::<crate::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    merged.sort_by(|a, b| {
+    let mut merged = Vec::new();
+    for (source, memories) in sources.iter().zip(results) {
+        for memory in memories? {
+            merged.push((
+                sort_key(source.scope, source),
+                SourcedMemory {
+                    scope: source.scope,
+                    repo: source.name.clone(),
+                    repo_path: source.repo_path.clone(),
+                    memory,
+                },
+            ));
+        }
+    }
+    merged.sort_by(|(ka, a), (kb, b)| {
         b.memory
             .updated_at
             .cmp(&a.memory.updated_at)
-            .then_with(|| a.repo_path.cmp(&b.repo_path))
+            .then_with(|| ka.cmp(kb))
             .then_with(|| a.memory.memory_id.cmp(&b.memory.memory_id))
     });
-    Ok(merged)
+    Ok(merged.into_iter().map(|(_, item)| item).collect())
 }
 
-pub fn search(
-    repos: &[Repository],
-    query: &str,
-    limit: usize,
-) -> crate::Result<Vec<RepositorySearchHit>> {
-    let results: Vec<crate::Result<Vec<ScoredMemory>>> = repos
+pub fn search(sources: &[Source], query: &str, limit: usize) -> crate::Result<Vec<SourcedHit>> {
+    let results: Vec<crate::Result<Vec<ScoredMemory>>> = sources
         .par_iter()
-        .map(|repo| MemoryFile::open_at(&repo.repo_path).search(query, usize::MAX))
+        .map(|source| source.file().search(query, usize::MAX))
         .collect();
     let mut merged = Vec::new();
-    for (repo, hits) in repos.iter().zip(results) {
+    for (source, hits) in sources.iter().zip(results) {
         for hit in hits? {
-            merged.push(RepositorySearchHit {
-                repo: repo.name.clone(),
-                repo_path: repo.repo_path.clone(),
-                score: hit.score,
-                memory: hit.memory,
-            });
+            merged.push((
+                sort_key(source.scope, source),
+                SourcedHit {
+                    scope: source.scope,
+                    repo: source.name.clone(),
+                    repo_path: source.repo_path.clone(),
+                    score: hit.score,
+                    memory: hit.memory,
+                },
+            ));
         }
     }
-    merged.sort_by(|a, b| {
+    merged.sort_by(|(ka, a), (kb, b)| {
         b.score
             .cmp(&a.score)
             .then_with(|| b.memory.updated_at.cmp(&a.memory.updated_at))
-            .then_with(|| a.repo_path.cmp(&b.repo_path))
+            .then_with(|| ka.cmp(kb))
             .then_with(|| a.memory.memory_id.cmp(&b.memory.memory_id))
     });
     merged.truncate(limit);
-    Ok(merged)
-}
-
-pub fn repository_for_path(path: &Path) -> crate::Result<Repository> {
-    let path = std::fs::canonicalize(path)?;
-    let memory_path = path.join(".mmry/mmry.jsonl");
-    Ok(Repository {
-        name: path
-            .file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned(),
-        repo_path: path,
-        exists: memory_path.exists(),
-        readable: std::fs::File::open(&memory_path).is_ok(),
-        memory_path,
-    })
+    Ok(merged.into_iter().map(|(_, item)| item).collect())
 }
 
 #[cfg(test)]
@@ -198,33 +304,63 @@ mod tests {
     use crate::MemoryEvent;
     use crate::MemoryType;
     use std::fs;
+    use std::path::Path;
 
-    fn repo(root: &Path, name: &str, text: &str) {
+    fn note(file: &MemoryFile, text: &str) {
+        file.append(&MemoryEvent::add(
+            text.into(),
+            MemoryType::Semantic,
+            vec![],
+            &AgentCtx::default(),
+        ))
+        .unwrap();
+    }
+
+    /// Repo-local ledger in tracked mode (`.mmry/tracked`).
+    fn tracked_repo(root: &Path, name: &str, text: &str) -> PathBuf {
         let path = root.join(name);
         fs::create_dir_all(&path).unwrap();
-        MemoryFile::open_at(&path)
-            .append(&MemoryEvent::add(
-                text.into(),
-                MemoryType::Semantic,
-                vec![],
-                &AgentCtx::default(),
-            ))
-            .unwrap();
+        note(&crate::store::init_tracked(&path).unwrap(), text);
+        path
+    }
+
+    fn roots(path: &Path, max_depth: usize) -> Vec<DiscoveryRoot> {
+        vec![DiscoveryRoot {
+            path: path.into(),
+            max_depth,
+        }]
     }
 
     #[test]
     fn discovers_excludes_and_aggregates() {
         let dir = tempfile::tempdir().unwrap();
-        repo(dir.path(), "a", "release alpha");
-        repo(dir.path(), "b", "release beta");
-        repo(&dir.path().join("target"), "ignored", "release");
-        let roots = [DiscoveryRoot {
-            path: dir.path().into(),
-            max_depth: 2,
-        }];
-        let repos = discover(&roots).unwrap();
-        assert_eq!(repos.len(), 2);
-        assert_eq!(search(&repos, "release", 10).unwrap().len(), 2);
+        let state = tempfile::tempdir().unwrap();
+        let store = Store::new(state.path());
+        tracked_repo(dir.path(), "a", "release alpha");
+        tracked_repo(dir.path(), "b", "release beta");
+        tracked_repo(&dir.path().join("target"), "ignored", "release");
+        note(&store.general(), "release general");
+        let sources = all_sources(&store, &roots(dir.path(), 2)).unwrap();
+        assert_eq!(sources.len(), 3);
+        let hits = search(&sources, "release", 10).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(
+            hits.iter()
+                .filter(|hit| hit.scope == Scope::General)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn untracked_local_ledgers_are_not_read_by_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let pending = dir.path().join("pending");
+        note(&MemoryFile::open_at(&pending), "not migrated");
+        assert_eq!(discover_local(&roots(dir.path(), 2)).unwrap().len(), 1);
+        let sources = all_sources(&Store::new(state.path()), &roots(dir.path(), 2)).unwrap();
+        assert_eq!(sources.len(), 1, "only general: {sources:?}");
     }
 
     #[cfg(unix)]
@@ -232,76 +368,62 @@ mod tests {
     fn does_not_follow_symlink_loops() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
-        repo(dir.path(), "a", "x");
+        tracked_repo(dir.path(), "a", "x");
         symlink(dir.path(), dir.path().join("a/loop")).unwrap();
-        assert_eq!(
-            discover(&[DiscoveryRoot {
-                path: dir.path().into(),
-                max_depth: 8
-            }])
-            .unwrap()
-            .len(),
-            1
-        );
+        assert_eq!(discover_local(&roots(dir.path(), 8)).unwrap().len(), 1);
     }
 
     #[test]
     fn named_selection_handles_success_zero_and_ambiguity() {
         let dir = tempfile::tempdir().unwrap();
-        repo(&dir.path().join("one"), "same", "x");
-        repo(&dir.path().join("two"), "same", "y");
-        repo(dir.path(), "unique", "z");
-        let repos = discover(&[DiscoveryRoot {
-            path: dir.path().into(),
-            max_depth: 3,
-        }])
-        .unwrap();
-        assert_eq!(select_named(&repos, "unique").unwrap().name, "unique");
-        assert!(
-            select_named(&repos, "missing")
-                .unwrap_err()
-                .to_string()
-                .contains("not found")
-        );
-        let error = select_named(&repos, "same").unwrap_err().to_string();
+        let state = tempfile::tempdir().unwrap();
+        tracked_repo(&dir.path().join("one"), "same", "x");
+        tracked_repo(&dir.path().join("two"), "same", "y");
+        tracked_repo(dir.path(), "unique", "z");
+        let sources = all_sources(&Store::new(state.path()), &roots(dir.path(), 3)).unwrap();
+        assert_eq!(select_named(&sources, "unique").unwrap().name, "unique");
+        assert!(matches!(
+            select_named(&sources, "missing"),
+            Err(crate::Error::NotFound(_))
+        ));
+        assert!(matches!(
+            select_named(&sources, "general"),
+            Err(crate::Error::NotFound(_))
+        ));
+        let error = select_named(&sources, "same").unwrap_err().to_string();
         assert!(error.contains("one/same"));
         assert!(error.contains("two/same"));
     }
 
     #[test]
-    fn aggregation_order_has_stable_repository_tie_break() {
+    fn aggregation_order_has_stable_source_tie_break() {
         let dir = tempfile::tempdir().unwrap();
-        repo(dir.path(), "b", "same");
-        repo(dir.path(), "a", "same");
-        let repos = discover(&[DiscoveryRoot {
-            path: dir.path().into(),
-            max_depth: 1,
-        }])
-        .unwrap();
-        let first = list(&repos).unwrap();
-        let second = list(&repos).unwrap();
-        assert_eq!(
-            first.iter().map(|item| &item.repo_path).collect::<Vec<_>>(),
-            second
-                .iter()
-                .map(|item| &item.repo_path)
+        let state = tempfile::tempdir().unwrap();
+        tracked_repo(dir.path(), "b", "same");
+        tracked_repo(dir.path(), "a", "same");
+        let sources = all_sources(&Store::new(state.path()), &roots(dir.path(), 1)).unwrap();
+        let order = |items: Vec<SourcedMemory>| {
+            items
+                .into_iter()
+                .map(|item| item.repo_path)
                 .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(list(&sources).unwrap()),
+            order(list(&sources).unwrap())
         );
     }
 
     #[test]
     fn five_hundred_repository_fixture_completes() {
         let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
         for index in 0..500 {
-            repo(dir.path(), &format!("r{index}"), "small ledger");
+            tracked_repo(dir.path(), &format!("r{index}"), "small ledger");
         }
         let start = std::time::Instant::now();
-        let repos = discover(&[DiscoveryRoot {
-            path: dir.path().into(),
-            max_depth: 1,
-        }])
-        .unwrap();
-        let memories = list(&repos).unwrap();
+        let sources = all_sources(&Store::new(state.path()), &roots(dir.path(), 1)).unwrap();
+        let memories = list(&sources).unwrap();
         eprintln!("500 repository cold fixture: {:?}", start.elapsed());
         assert_eq!(memories.len(), 500);
     }

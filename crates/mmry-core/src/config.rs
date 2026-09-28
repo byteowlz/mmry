@@ -10,7 +10,15 @@ const CONFIG_FILE: &str = "config.toml";
 pub const DEFAULT_CONFIG: &str = "\
 #:schema https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/mmry/mmry.config.schema.json
 
-# Bounded directories searched by cross-repository commands (`--all`, `--root`).
+# Central per-user store: general/ and repos/<name>/ ledgers.
+# state_root = \"~/.local/state/mmry\"
+
+# Repo-local .mmry/mmry.jsonl ledgers are moved into the central store:
+# \"auto\" (default), \"prompt\" (ask on a terminal) or \"off\" (warn only).
+# Repos with .mmry/tracked or a git-committed ledger stay repo-local.
+# migrate = \"auto\"
+
+# Bounded directories searched by cross-repository commands (`--all`, `--repo`).
 # Discovery never searches the home directory unless it is listed here.
 #
 # [[roots]]
@@ -21,8 +29,27 @@ pub const DEFAULT_CONFIG: &str = "\
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Per-user central store (general + per-repo ledgers). Defaults to
+    /// `$XDG_STATE_HOME/mmry`.
+    pub state_root: Option<PathBuf>,
+    /// What to do when a repository still has a repo-local ledger that belongs
+    /// in the central store.
+    pub migrate: MigrateMode,
     /// Bounded directories searched by cross-repository commands.
     pub roots: Vec<DiscoveryRoot>,
+}
+
+/// Handling of repo-local ledgers in central mode.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MigrateMode {
+    /// Migrate automatically on first use in that repository.
+    #[default]
+    Auto,
+    /// Ask on a terminal; fail otherwise.
+    Prompt,
+    /// Never migrate automatically; warn and use the central store only.
+    Off,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -57,10 +84,21 @@ impl Config {
         })?;
         let mut config: Self = toml::from_str(&content)
             .map_err(|error| crate::Error::Config(format!("{}: {error}", path.display())))?;
+        if let Some(state_root) = &config.state_root {
+            config.state_root = Some(expand_tilde(state_root)?);
+        }
         for root in &mut config.roots {
             root.path = expand_tilde(&root.path)?;
         }
         Ok(config)
+    }
+
+    /// The central store root: `state_root` or `$XDG_STATE_HOME/mmry`.
+    pub fn state_root(&self) -> crate::Result<PathBuf> {
+        match &self.state_root {
+            Some(root) => Ok(root.clone()),
+            None => Ok(crate::paths::state_base()?.join("mmry")),
+        }
     }
 
     pub fn schema_json() -> crate::Result<String> {
@@ -114,6 +152,7 @@ mod tests {
                     path: "/tmp/code".into(),
                     max_depth: 2,
                 }],
+                ..Config::default()
             }
         );
     }
