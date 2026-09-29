@@ -27,6 +27,20 @@
         "string",
         "null"
       ]
+    },
+    "sync": {
+      "description": "Git sync of the state root (`mmry sync init` sets it up).",
+      "default": {
+        "auto_commit": false,
+        "auto_pull": false,
+        "auto_push": false,
+        "timeout_secs": 10
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/SyncConfig"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -74,6 +88,35 @@
           ]
         }
       ]
+    },
+    "SyncConfig": {
+      "description": "Automatic git sync; all off by default. Failures only warn.",
+      "type": "object",
+      "properties": {
+        "auto_commit": {
+          "description": "Commit the store after every write.",
+          "default": false,
+          "type": "boolean"
+        },
+        "auto_pull": {
+          "description": "Pull at session start (`mmry preview`).",
+          "default": false,
+          "type": "boolean"
+        },
+        "auto_push": {
+          "description": "Push after an automatic commit.",
+          "default": false,
+          "type": "boolean"
+        },
+        "timeout_secs": {
+          "description": "Upper bound for each git network operation, in seconds.",
+          "default": 10,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

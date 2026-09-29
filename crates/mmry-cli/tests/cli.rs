@@ -395,6 +395,50 @@ fn preview_never_prompts_or_migrates_and_warns_about_pending_ledgers() {
 }
 
 #[test]
+fn two_machines_sync_through_a_bare_remote() {
+    let auto = "[sync]\nauto_pull = true\nauto_commit = true\nauto_push = true\n";
+    let a = Sandbox::new(auto);
+    let b = Sandbox::new(auto);
+    let remote = a.home.join("remote.git");
+    let bare = Command::new("git")
+        .args(["init", "-q", "--bare", "-b", "main"])
+        .arg(&remote)
+        .status()
+        .unwrap();
+    assert!(bare.success());
+    let url = remote.to_str().unwrap();
+
+    a.ok(&a.home, &["sync", "init", "--remote", url]);
+    a.ok(&a.home, &["add", "--general", "from machine a"]);
+    let status = a.json(&a.home, &["sync", "status", "--json"]);
+    assert_eq!(
+        (
+            status["pending_commits"].as_u64(),
+            status["uncommitted"].as_bool()
+        ),
+        (Some(0), Some(false))
+    );
+
+    b.ok(&b.home, &["sync", "init", "--remote", url]);
+    b.ok(&b.home, &["add", "--general", "from machine b"]);
+    // Session start on a pulls b's memory.
+    let preview = a.json(&a.home, &["preview", "--json"]);
+    let contents: Vec<_> = preview["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["content"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(contents, ["from machine b", "from machine a"]);
+    assert_eq!(preview["warnings"], serde_json::json!([]));
+
+    let off = Sandbox::new("");
+    let output = off.run(&off.home, &["sync", "push"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("mmry sync init"));
+}
+
+#[test]
 fn expired_memories_are_hidden_unless_requested() {
     let sb = Sandbox::new("");
     let app = sb.repo("app");

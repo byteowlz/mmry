@@ -9,6 +9,7 @@ pub mod paths;
 pub mod preview;
 pub mod repos;
 pub mod store;
+pub mod sync;
 
 pub use agent_ctx::AgentCtx;
 pub use error::Error;

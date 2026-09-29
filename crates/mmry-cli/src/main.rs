@@ -59,6 +59,8 @@ enum Command {
     /// Switch to the central store: find every repo-local .mmry ledger,
     /// show the plan, migrate after confirmation and set `migrate = "auto"`.
     Setup(SetupArgs),
+    /// Git sync of the central store (opt-in): commit, pull, push.
+    Sync(SyncArgs),
     /// Memories a harness should inject at session start, with the exact text.
     Preview(PreviewArgs),
     /// Record a memory in the current repository (or general with --general).
@@ -209,6 +211,30 @@ struct MigrateArgs {
 }
 
 #[derive(Args)]
+struct SyncArgs {
+    #[command(subcommand)]
+    action: Option<SyncAction>,
+    #[arg(long, global = true)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum SyncAction {
+    /// Make the state root a git repository and optionally connect a remote.
+    Init {
+        /// Remote URL (uses your git credentials; nothing is stored by mmry).
+        #[arg(long)]
+        remote: Option<String>,
+    },
+    /// Remote, pending commits, last pull/push, last error.
+    Status,
+    /// Commit local changes and merge the remote.
+    Pull,
+    /// Commit local changes and push (pulls once if the push is rejected).
+    Push,
+}
+
+#[derive(Args)]
 struct PreviewArgs {
     /// Directory the session starts in (default: current directory).
     #[arg(long, value_name = "DIR")]
@@ -291,8 +317,18 @@ fn main() -> anyhow::Result<()> {
     ) {
         auto_migrate(&env)?;
     }
-    match cli.command {
+    let writes = matches!(
+        cli.command,
+        Command::Init { .. }
+            | Command::Add(_)
+            | Command::Supersede(_)
+            | Command::Rm(_)
+            | Command::Migrate(_)
+            | Command::Setup(_)
+    );
+    let result = match cli.command {
         Command::Init { tracked } => init(&env, tracked),
+        Command::Sync(args) => sync(&env, &args),
         Command::Setup(args) => setup(&env, &args),
         Command::Preview(args) => preview(&env, &args),
         Command::Add(args) => add(&env, args),
@@ -303,6 +339,101 @@ fn main() -> anyhow::Result<()> {
         Command::Migrate(args) => migrate(&env, &args),
         Command::Doctor(args) => doctor(&env, &args),
         Command::Repos { json } => show_repos(&env, json),
+    };
+    if writes && result.is_ok() {
+        auto_commit(&env);
+    }
+    result
+}
+
+fn syncer(env: &Env) -> mmry_core::sync::Sync {
+    let machine = mmry_core::agent_ctx::current_machine(&AgentCtx::from_env())
+        .unwrap_or_else(|| "unknown".to_owned());
+    mmry_core::sync::Sync::new(
+        env.store.root(),
+        std::time::Duration::from_secs(env.config.sync.timeout_secs),
+        machine,
+    )
+}
+
+/// `sync.auto_commit` / `sync.auto_push` after a successful write. Failures
+/// only warn: the write itself is already durable.
+fn auto_commit(env: &Env) {
+    if !env.config.sync.auto_commit || !mmry_core::sync::is_enabled(env.store.root()) {
+        return;
+    }
+    let sync = syncer(env);
+    let result = if env.config.sync.auto_push {
+        sync.push().map(|outcome| outcome.error)
+    } else {
+        sync.commit().map(|_| None)
+    };
+    match result {
+        Ok(None) => {}
+        Ok(Some(error)) => {
+            eprintln!("mmry: warning: sync: {error} (kept locally; `mmry sync status`)");
+        }
+        Err(error) => eprintln!("mmry: warning: sync: {error}"),
+    }
+}
+
+fn sync(env: &Env, args: &SyncArgs) -> anyhow::Result<()> {
+    let sync = syncer(env);
+    let outcome = match &args.action {
+        Some(SyncAction::Status) => {
+            let status = sync.status()?;
+            if args.json {
+                return print_json(&status);
+            }
+            print_sync_status(&status);
+            return Ok(());
+        }
+        Some(SyncAction::Init { remote }) => sync.init(remote.as_deref())?,
+        Some(SyncAction::Pull) => sync.pull()?,
+        Some(SyncAction::Push) => sync.push()?,
+        None => sync.sync()?,
+    };
+    if args.json {
+        print_json(&outcome)?;
+    } else {
+        print_sync_status(&outcome.status);
+    }
+    if let Some(error) = outcome.error {
+        bail!("{error} (local changes are kept and committed)");
+    }
+    Ok(())
+}
+
+fn print_sync_status(status: &mmry_core::sync::SyncStatus) {
+    if !status.enabled {
+        println!("sync: off (run `mmry sync init --remote URL`)");
+        return;
+    }
+    println!("sync: {}", status.root.display());
+    println!("remote: {}", status.remote.as_deref().unwrap_or("none"));
+    println!(
+        "pending commits: {}, behind: {}{}",
+        status.pending_commits,
+        status.behind,
+        if status.uncommitted {
+            ", uncommitted changes"
+        } else {
+            ""
+        }
+    );
+    let at = |time: Option<chrono::DateTime<chrono::Utc>>| {
+        time.map_or_else(
+            || "never".to_owned(),
+            |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+        )
+    };
+    println!(
+        "last pull: {}, last push: {}",
+        at(status.state.last_pull),
+        at(status.state.last_push)
+    );
+    if let Some(error) = &status.state.last_error {
+        println!("last error: {error}");
     }
 }
 
@@ -793,6 +924,12 @@ fn preview(env: &Env, args: &PreviewArgs) -> anyhow::Result<()> {
     };
     let mut sources = vec![Source::general(&env.store)];
     let mut warnings = Vec::new();
+    if env.config.sync.auto_pull && mmry_core::sync::is_enabled(env.store.root()) {
+        match syncer(env).pull() {
+            Ok(outcome) => warnings.extend(outcome.error.map(|e| format!("sync pull failed: {e}"))),
+            Err(error) => warnings.push(format!("sync pull failed: {error}")),
+        }
+    }
     if let Some(checkout) = checkout {
         sources.push(Source::for_checkout(&env.store, checkout)?);
         if checkout.needs_migration() {

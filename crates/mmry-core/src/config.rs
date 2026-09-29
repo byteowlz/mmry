@@ -24,6 +24,13 @@ pub const DEFAULT_CONFIG: &str = "\
 # Repos with .mmry/tracked or a git-committed ledger stay repo-local.
 # migrate = \"prompt\"
 
+# Git sync of the state root; set up with `mmry sync init --remote URL`.
+# [sync]
+# auto_pull = false      # pull at session start (mmry preview)
+# auto_commit = false    # commit after every write
+# auto_push = false      # push after an automatic commit
+# timeout_secs = 10
+
 # Bounded directories searched by cross-repository commands (`--all`, `--repo`).
 # Discovery never searches the home directory unless it is listed here.
 #
@@ -43,6 +50,33 @@ pub struct Config {
     pub migrate: MigrateMode,
     /// Bounded directories searched by cross-repository commands.
     pub roots: Vec<DiscoveryRoot>,
+    /// Git sync of the state root (`mmry sync init` sets it up).
+    pub sync: SyncConfig,
+}
+
+/// Automatic git sync; all off by default. Failures only warn.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyncConfig {
+    /// Pull at session start (`mmry preview`).
+    pub auto_pull: bool,
+    /// Commit the store after every write.
+    pub auto_commit: bool,
+    /// Push after an automatic commit.
+    pub auto_push: bool,
+    /// Upper bound for each git network operation, in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            auto_pull: false,
+            auto_commit: false,
+            auto_push: false,
+            timeout_secs: 10,
+        }
+    }
 }
 
 /// Handling of repo-local ledgers in central mode.
