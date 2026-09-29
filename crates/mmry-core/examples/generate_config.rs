@@ -11,6 +11,7 @@ fn main() -> anyhow::Result<()> {
         ),
         ("preview.schema.json", mmry_core::preview::schema_json()?),
         ("memory.schema.json", mmry_core::repos::entry_schema_json()?),
+        ("cleanup.schema.json", mmry_core::cleanup::schema_json()?),
     ] {
         std::fs::write(examples.join(file), format!("{schema}\n"))?;
     }

@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Array_of_Proposal",
+  "type": "array",
+  "items": {
+    "$ref": "#/definitions/Proposal"
+  },
+  "definitions": {
+    "Action": {
+      "oneOf": [
+        {
+          "description": "Remove `memory_id`.",
+          "type": "string",
+          "enum": [
+            "deprecate"
+          ]
+        },
+        {
+          "description": "Replace the content of `memory_id` with `content`.",
+          "type": "string",
+          "enum": [
+            "supersede"
+          ]
+        }
+      ]
+    },
+    "Proposal": {
+      "description": "One reviewable change.",
+      "type": "object",
+      "required": [
+        "action",
+        "memory_id",
+        "reason",
+        "revision"
+      ],
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/Action"
+        },
+        "content": {
+          "description": "New content for `supersede`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current": {
+          "description": "Current content of `memory_id`, for review.",
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable id derived from action, target, revision and content. May be empty in proposals from other tools.",
+          "default": "",
+          "type": "string"
+        },
+        "memory_id": {
+          "type": "string"
+        },
+        "proposer": {
+          "description": "Who proposed it (`mmry` for built-in rules).",
+          "default": "external",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "related": {
+          "description": "Other memories the reason refers to.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "revision": {
+          "description": "Revision the proposal was made against; apply refuses otherwise.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

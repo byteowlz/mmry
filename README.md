@@ -72,6 +72,16 @@ mmry migrate --untrack            # also move a git-committed ledger (leaves `gi
 
 Events are merged by id (re-running is a no-op), the central ledger is verified to contain every active local memory, and only then is the local file renamed to `.mmry/mmry.jsonl.migrated-<timestamp>` (kept as backup) with a `.mmry/MIGRATED` note. An event id present in both ledgers with different content aborts the migration with nothing moved.
 
+## Cleanup
+
+```bash
+mmry cleanup propose [--json] [--all|--repo NAME|--general]   # never writes
+mmry cleanup apply prop_<id> [...] [--dry-run]
+mmry cleanup apply --file proposals.json                         # from a cleanup agent; '-' for stdin
+```
+
+Built-in proposals are deterministic and model-free: exact duplicates (e.g. the same fact recorded on two machines), near-duplicates (token similarity >= 0.8; review both texts) and expired entries. Other tools, such as an agent or a model you chose, can write proposals in the same schema (`examples/cleanup.schema.json`; `id` may be empty). mmry sends nothing anywhere. Applying records ordinary supersede/deprecate events with the proposal as reason, and refuses when the memory changed since the proposal.
+
 ## Syncing between machines
 
 Opt-in: the state root becomes a git repository with a remote you choose. Authentication is whatever git already uses (ssh keys, credential helpers); mmry never prompts or stores credentials.

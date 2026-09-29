@@ -59,6 +59,9 @@ enum Command {
     /// Switch to the central store: find every repo-local .mmry ledger,
     /// show the plan, migrate after confirmation and set `migrate = "auto"`.
     Setup(SetupArgs),
+    /// Reviewed cleanup: propose (no writes), then apply chosen proposals.
+    #[command(subcommand)]
+    Cleanup(CleanupAction),
     /// Git sync of the central store (opt-in): commit, pull, push.
     Sync(SyncArgs),
     /// Memories a harness should inject at session start, with the exact text.
@@ -210,6 +213,29 @@ struct MigrateArgs {
     json: bool,
 }
 
+#[derive(Subcommand)]
+enum CleanupAction {
+    /// Duplicates, near-duplicates and expired entries. Never writes.
+    Propose {
+        #[command(flatten)]
+        scope: QueryScope,
+    },
+    /// Apply proposals by id (recomputed now) or from a reviewed JSON file.
+    Apply {
+        /// Proposal ids from `cleanup propose`.
+        ids: Vec<String>,
+        /// Proposals JSON (same schema as `propose --json`; '-' for stdin),
+        /// e.g. from a cleanup agent. Every entry is applied.
+        #[arg(long, value_name = "FILE", conflicts_with = "ids")]
+        file: Option<PathBuf>,
+        /// Show what would be applied.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        scope: QueryScope,
+    },
+}
+
 #[derive(Args)]
 struct SyncArgs {
     #[command(subcommand)]
@@ -325,10 +351,12 @@ fn main() -> anyhow::Result<()> {
             | Command::Rm(_)
             | Command::Migrate(_)
             | Command::Setup(_)
+            | Command::Cleanup(CleanupAction::Apply { .. })
     );
     let result = match cli.command {
         Command::Init { tracked } => init(&env, tracked),
         Command::Sync(args) => sync(&env, &args),
+        Command::Cleanup(action) => cleanup(&env, action),
         Command::Setup(args) => setup(&env, &args),
         Command::Preview(args) => preview(&env, &args),
         Command::Add(args) => add(&env, args),
@@ -344,6 +372,86 @@ fn main() -> anyhow::Result<()> {
         auto_commit(&env);
     }
     result
+}
+
+fn cleanup(env: &Env, action: CleanupAction) -> anyhow::Result<()> {
+    use mmry_core::cleanup;
+    match action {
+        CleanupAction::Propose { scope } => {
+            let proposals = cleanup::propose(&selected_sources(env, &scope)?, chrono::Utc::now())?;
+            if scope.json {
+                return print_json(&proposals);
+            }
+            if proposals.is_empty() {
+                println!("nothing to clean up");
+            }
+            for proposal in &proposals {
+                print_proposal(proposal);
+            }
+            Ok(())
+        }
+        CleanupAction::Apply {
+            ids,
+            file,
+            dry_run,
+            scope,
+        } => {
+            let sources = selected_sources(env, &scope)?;
+            let chosen: Vec<cleanup::Proposal> = if let Some(path) = file {
+                let text = if path.as_os_str() == "-" {
+                    let mut text = String::new();
+                    std::io::stdin().read_to_string(&mut text)?;
+                    text
+                } else {
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("cannot read {}", path.display()))?
+                };
+                serde_json::from_str(&text)
+                    .context("proposals file does not match `mmry cleanup propose --json`")?
+            } else {
+                if ids.is_empty() {
+                    bail!("pass proposal ids from `mmry cleanup propose`, or --file");
+                }
+                let current = cleanup::propose(&sources, chrono::Utc::now())?;
+                ids.iter()
+                    .map(|id| {
+                        current
+                            .iter()
+                            .find(|proposal| &proposal.id == id)
+                            .cloned()
+                            .with_context(|| format!("no current proposal {id}; the memory changed or it was applied; re-run `mmry cleanup propose`"))
+                    })
+                    .collect::<anyhow::Result<_>>()?
+            };
+            let agent = AgentCtx::from_env();
+            for proposal in &chosen {
+                if dry_run {
+                    print!("would apply ");
+                    print_proposal(proposal);
+                    continue;
+                }
+                cleanup::apply(&sources, proposal, &agent)
+                    .with_context(|| format!("proposal {} not applied", proposal.id))?;
+                println!(
+                    "applied {} ({:?} {})",
+                    proposal.id, proposal.action, proposal.memory_id
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_proposal(proposal: &mmry_core::cleanup::Proposal) {
+    println!(
+        "{}  {:?} {} (rev {})",
+        proposal.id, proposal.action, proposal.memory_id, proposal.revision
+    );
+    println!("  {}", proposal.reason);
+    println!("  current: {}", proposal.current);
+    if let Some(content) = &proposal.content {
+        println!("  new: {content}");
+    }
 }
 
 fn syncer(env: &Env) -> mmry_core::sync::Sync {

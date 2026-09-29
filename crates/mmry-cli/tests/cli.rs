@@ -439,6 +439,73 @@ fn two_machines_sync_through_a_bare_remote() {
 }
 
 #[test]
+fn cleanup_proposes_without_writing_and_applies_on_request() {
+    let sb = Sandbox::new("");
+    let app = sb.repo("app");
+    sb.ok(&app, &["add", "Staging DB needs VPN"]);
+    sb.ok(&app, &["add", "staging db needs vpn"]);
+    sb.ok(&app, &["add", "unrelated"]);
+    let ledger = sb.central("app");
+    let before = fs::read_to_string(&ledger).unwrap();
+
+    let proposals = sb.json(&app, &["cleanup", "propose", "--json"]);
+    assert_eq!(proposals.as_array().unwrap().len(), 1);
+    assert_eq!(
+        fs::read_to_string(&ledger).unwrap(),
+        before,
+        "propose never writes"
+    );
+    let id = proposals[0]["id"].as_str().unwrap();
+
+    sb.ok(&app, &["cleanup", "apply", id, "--dry-run"]);
+    assert_eq!(fs::read_to_string(&ledger).unwrap(), before);
+    sb.ok(&app, &["cleanup", "apply", id]);
+    assert_eq!(
+        sb.json(&app, &["list", "--json"]).as_array().unwrap().len(),
+        2
+    );
+    assert!(
+        !sb.run(&app, &["cleanup", "apply", id]).status.success(),
+        "stale id"
+    );
+
+    // A reviewed file from another proposer (e.g. a cleanup agent).
+    let target = sb.json(&app, &["search", "unrelated", "--json"]);
+    let mut external = serde_json::json!([{
+        "id": "",
+        "action": "supersede",
+        "memory_id": target[0]["memory_id"],
+        "revision": 1,
+        "content": "related after all",
+        "reason": "clarified",
+        "proposer": "cleanup-agent"
+    }]);
+    let file = sb.home.join("proposals.json");
+    let apply_file = || {
+        sb.run(
+            &app,
+            &["cleanup", "apply", "--file", file.to_str().unwrap()],
+        )
+    };
+    external[0]["id"] = "prop_0000000000000000".into();
+    fs::write(&file, external.to_string()).unwrap();
+    let refused = apply_file();
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("does not match"),
+        "{refused:?}"
+    );
+    // Other tools may leave the id empty; mmry derives it.
+    external[0]["id"] = "".into();
+    fs::write(&file, external.to_string()).unwrap();
+    let applied = apply_file();
+    assert!(applied.status.success(), "{applied:?}");
+    assert_eq!(
+        sb.json(&app, &["search", "related", "--json"])[0]["content"],
+        "related after all"
+    );
+}
+
+#[test]
 fn expired_memories_are_hidden_unless_requested() {
     let sb = Sandbox::new("");
     let app = sb.repo("app");

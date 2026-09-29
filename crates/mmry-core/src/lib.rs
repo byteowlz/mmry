@@ -2,6 +2,7 @@
 //! discovery, configuration, and XDG path resolution.
 
 pub mod agent_ctx;
+pub mod cleanup;
 pub mod config;
 pub mod error;
 pub mod memory_file;
