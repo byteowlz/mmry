@@ -242,6 +242,28 @@ fn supersede_checks_revision_and_rm_deprecates() {
 }
 
 #[test]
+fn machine_dot_uses_agent_ctx_machine_id_and_provenance_is_recorded() {
+    let sb = Sandbox::new("");
+    let app = sb.repo("app");
+    let output = Command::new(env!("CARGO_BIN_EXE_mmry"))
+        .current_dir(&app)
+        .args(["add", "needs --no-sandbox", "--machine", ".", "--json"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", &sb.home)
+        .env("MMRY_CONFIG", &sb.config)
+        .env("AGENT_CTX_MACHINE_ID", "m-42")
+        .env("AGENT_CTX_AGENT_ID", "agent-7")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let listed = sb.json(&app, &["list", "--json"]);
+    assert_eq!(listed[0]["machine"], "m-42");
+    let ledger = fs::read_to_string(sb.central("app")).unwrap();
+    assert!(ledger.contains("\"agent_id\":\"agent-7\""), "{ledger}");
+}
+
+#[test]
 fn expired_memories_are_hidden_unless_requested() {
     let sb = Sandbox::new("");
     let app = sb.repo("app");

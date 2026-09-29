@@ -100,7 +100,8 @@ struct AddArgs {
     /// Where it was observed (command, issue, URL).
     #[arg(long)]
     source: Option<String>,
-    /// Label for machine-only observations.
+    /// Only true on this machine: a label, or '.' for the current machine
+    /// (AGENT_CTX_MACHINE_ID, else the host name).
     #[arg(long)]
     machine: Option<String>,
     /// RFC 3339 timestamp or duration (12h, 30d, 8w).
@@ -456,16 +457,19 @@ fn add(env: &Env, args: AddArgs) -> anyhow::Result<()> {
         .map(|text| parse_expiry(text, chrono::Utc::now()))
         .transpose()?;
     let (file, scope) = write_target(env, args.general)?;
-    let mut event = MemoryEvent::add(
-        content,
-        args.memory_type.into(),
-        args.tags,
-        &AgentCtx::from_env(),
-    );
+    let agent = AgentCtx::from_env();
+    let machine = match args.machine.as_deref() {
+        Some(".") => Some(
+            mmry_core::agent_ctx::current_machine(&agent)
+                .context("cannot determine this machine; pass --machine NAME")?,
+        ),
+        _ => args.machine,
+    };
+    let mut event = MemoryEvent::add(content, args.memory_type.into(), args.tags, &agent);
     event.scope = Some(scope);
     event.why = args.why;
     event.source = args.source;
-    event.machine = args.machine;
+    event.machine = machine;
     event.expires_at = expires_at;
     file.append(&event)?;
     if args.json {
