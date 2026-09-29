@@ -40,6 +40,12 @@ use std::path::PathBuf;
 struct Cli {
     #[arg(long, global = true, env = "MMRY_CONFIG", value_name = "PATH")]
     config: Option<PathBuf>,
+    /// Central store root (overrides MMRY_STATE_ROOT and `state_root`).
+    #[arg(long, global = true, value_name = "PATH")]
+    state_root: Option<PathBuf>,
+    /// Repo-local ledger handling (overrides MMRY_MIGRATE and `migrate`).
+    #[arg(long, global = true, value_name = "MODE")]
+    migrate: Option<MigrateMode>,
     #[command(subcommand)]
     command: Command,
 }
@@ -52,6 +58,9 @@ enum Command {
         #[arg(long)]
         tracked: bool,
     },
+    /// Switch to the central store: find every repo-local .mmry ledger,
+    /// show the plan, migrate after confirmation and set `migrate = "auto"`.
+    Setup(SetupArgs),
     /// Record a memory in the current repository (or general with --general).
     Add(AddArgs),
     /// List memories of the current scope (general + current repository).
@@ -198,8 +207,30 @@ struct MigrateArgs {
     json: bool,
 }
 
+#[derive(Args)]
+struct SetupArgs {
+    /// Directories to scan for .mmry ledgers (default: home). Configured roots are always included.
+    #[arg(long, value_name = "PATH")]
+    scan: Vec<PathBuf>,
+    /// Maximum directory depth of the scan.
+    #[arg(long, default_value_t = 6)]
+    depth: usize,
+    /// Also migrate git-committed ledgers (runs `git rm --cached`; left uncommitted).
+    #[arg(long)]
+    untrack: bool,
+    /// Print the plan without writing anything.
+    #[arg(long)]
+    dry_run: bool,
+    /// Do not ask for confirmation (required without a terminal).
+    #[arg(short, long)]
+    yes: bool,
+    #[arg(long)]
+    json: bool,
+}
+
 /// Resolved store plus the repository enclosing the working directory.
 struct Env {
+    config_path: PathBuf,
     config: Config,
     store: Store,
     checkout: Option<Checkout>,
@@ -207,22 +238,32 @@ struct Env {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let config = Config::load(cli.config.as_deref())?;
+    let config_path = Config::resolve_path(cli.config.as_deref())?;
+    let mut config = Config::load(cli.config.as_deref())?;
+    config.apply_env(|key| std::env::var(key).ok())?;
+    if let Some(root) = cli.state_root {
+        config.state_root = Some(mmry_core::config::expand_tilde(&root)?);
+    }
+    if let Some(mode) = cli.migrate {
+        config.migrate = mode;
+    }
     let store = Store::new(config.state_root()?);
     let checkout = Checkout::detect(&std::env::current_dir()?)?;
     let env = Env {
+        config_path,
         config,
         store,
         checkout,
     };
     if !matches!(
         cli.command,
-        Command::Migrate(_) | Command::Doctor | Command::Repos { .. }
+        Command::Migrate(_) | Command::Setup(_) | Command::Doctor | Command::Repos { .. }
     ) {
         auto_migrate(&env)?;
     }
     match cli.command {
         Command::Init { tracked } => init(&env, tracked),
+        Command::Setup(args) => setup(&env, &args),
         Command::Add(args) => add(&env, args),
         Command::List(args) => list(&env, &args),
         Command::Search(args) => search(&env, &args),
@@ -253,10 +294,11 @@ fn auto_migrate(env: &Env) -> anyhow::Result<()> {
         }
         MigrateMode::Prompt => {
             if !std::io::stdin().is_terminal() {
-                bail!(
-                    "{} must be migrated to the central store; run `mmry migrate` (migrate = \"prompt\" and no terminal)",
+                eprintln!(
+                    "mmry: warning: {} is not used yet (central mode); run `mmry setup` or `mmry migrate` to move it",
                     local.path().display()
                 );
+                return Ok(());
             }
             eprint!(
                 "mmry: move {} into the central store? [y/N] ",
@@ -265,9 +307,10 @@ fn auto_migrate(env: &Env) -> anyhow::Result<()> {
             let mut answer = String::new();
             std::io::stdin().read_line(&mut answer)?;
             if !answer.trim().eq_ignore_ascii_case("y") {
-                bail!(
-                    "not migrated; this repository's memories are unavailable until `mmry migrate` runs"
+                eprintln!(
+                    "mmry: not migrated; this repository's local memories stay unused until `mmry migrate` runs"
                 );
+                return Ok(());
             }
         }
         MigrateMode::Auto => {}
@@ -551,6 +594,135 @@ fn migrate(env: &Env, args: &MigrateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Serialize)]
+struct SetupReport {
+    config: PathBuf,
+    state_root: PathBuf,
+    dry_run: bool,
+    reports: Vec<MigrationReport>,
+    unreadable: Vec<PathBuf>,
+}
+
+fn setup(env: &Env, args: &SetupArgs) -> anyhow::Result<()> {
+    let scan_paths = if args.scan.is_empty() {
+        vec![
+            mmry_core::paths::home_dir()
+                .context("cannot determine the home directory; pass --scan PATH")?,
+        ]
+    } else {
+        args.scan.clone()
+    };
+    let mut roots: Vec<_> = scan_paths
+        .into_iter()
+        .map(|path| mmry_core::config::DiscoveryRoot {
+            path,
+            max_depth: args.depth,
+        })
+        .collect();
+    roots.extend(env.config.roots.iter().cloned());
+    let exclude: Vec<_> = std::fs::canonicalize(env.store.root())
+        .into_iter()
+        .collect();
+    let scan = repos::scan_local(&roots, &exclude);
+    let plan_options = MigrateOptions {
+        dry_run: true,
+        untrack: args.untrack,
+    };
+    let plan = scan
+        .found
+        .iter()
+        .map(|checkout| store::migrate(&env.store, checkout, plan_options))
+        .collect::<Result<Vec<_>, _>>()?;
+    let pending = plan
+        .iter()
+        .filter(|r| r.status == MigrationStatus::Migrated)
+        .count();
+
+    if !args.json || args.dry_run {
+        let report = SetupReport {
+            config: env.config_path.clone(),
+            state_root: env.store.root().to_path_buf(),
+            dry_run: true,
+            reports: plan,
+            unreadable: scan.unreadable.clone(),
+        };
+        if args.json {
+            return print_json(&report);
+        }
+        print_setup(&report);
+        if args.dry_run {
+            return Ok(());
+        }
+    }
+    if !args.yes {
+        if !std::io::stdin().is_terminal() {
+            bail!("no terminal to confirm; re-run with --yes (or --dry-run to only see the plan)");
+        }
+        eprint!(
+            "Migrate {pending} ledger(s) and set migrate = \"auto\" in {}? [y/N] ",
+            env.config_path.display()
+        );
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            bail!("aborted; nothing was changed");
+        }
+    }
+
+    env.store.general().touch()?;
+    mmry_core::config::set_config_value(&env.config_path, "migrate", MigrateMode::Auto.as_str())?;
+    let options = MigrateOptions {
+        dry_run: false,
+        untrack: args.untrack,
+    };
+    let reports = scan
+        .found
+        .iter()
+        .map(|checkout| store::migrate(&env.store, checkout, options))
+        .collect::<Result<Vec<_>, _>>()?;
+    let report = SetupReport {
+        config: env.config_path.clone(),
+        state_root: env.store.root().to_path_buf(),
+        dry_run: false,
+        reports,
+        unreadable: scan.unreadable,
+    };
+    if args.json {
+        print_json(&report)?;
+    } else {
+        println!();
+        for item in &report.reports {
+            println!("{}", summarize(item));
+        }
+        println!("config: migrate = \"auto\" in {}", report.config.display());
+    }
+    if report
+        .reports
+        .iter()
+        .any(|r| r.status == MigrationStatus::Conflict)
+    {
+        bail!("some ledgers were not migrated because of conflicting event ids; see above");
+    }
+    Ok(())
+}
+
+fn print_setup(report: &SetupReport) {
+    println!("central store: {}", report.state_root.display());
+    println!("config:        {}", report.config.display());
+    if report.reports.is_empty() {
+        println!("no repo-local .mmry ledgers found");
+    }
+    for item in &report.reports {
+        println!("  {}", summarize(item));
+    }
+    if !report.unreadable.is_empty() {
+        println!("skipped (unreadable): {}", report.unreadable.len());
+        for path in &report.unreadable {
+            println!("  {}", path.display());
+        }
+    }
+}
+
 fn doctor(env: &Env) -> anyhow::Result<()> {
     println!("state root: {}", env.store.root().display());
     report_ledger("general", &env.store.general())?;
@@ -576,6 +748,7 @@ fn doctor(env: &Env) -> anyhow::Result<()> {
             }
         }
     }
+    println!("migrate: {}", env.config.migrate.as_str());
     println!("configured roots: {}", env.config.roots.len());
     Ok(())
 }

@@ -24,6 +24,10 @@ This file provides guidance to AI Agents when working with code in this reposito
 - `examples/config.toml` + `examples/config.schema.json` — generated/validated from `Config` (`just generate-config`, `just validate-config`). Central copy: `byteowlz/schemas/mmry/`.
 - `scripts/migrate_legacy_mmry_to_jsonl.py` — transitional SQLite migration (unittest in `scripts/`).
 
+## Configuration precedence
+
+`--state-root`/`--migrate` flags > `MMRY_STATE_ROOT`/`MMRY_MIGRATE` env > config file (`--config`/`MMRY_CONFIG`, else XDG global). Deliberate exception to the repository standard: there is no repo-local config layer, because a cloned repository must not be able to redirect the state root or force migration.
+
 ## Required checks
 
 `just check-all` is the gate CI runs: fmt-check, strict clippy (`-D warnings`, lint tables in `Cargo.toml` + `clippy.toml`), ast-grep guardrails (errors; `#[cfg(test)]` modules exempt from the unwrap rule), rustdoc with `-D warnings`, Rust tests, script tests. Staged exception: `missing_docs`/`missing_debug_implementations` are not yet enabled (tracked in trx).

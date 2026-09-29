@@ -6,6 +6,11 @@ use std::path::PathBuf;
 
 const CONFIG_FILE: &str = "config.toml";
 
+/// Environment override for [`Config::state_root`].
+pub const ENV_STATE_ROOT: &str = "MMRY_STATE_ROOT";
+/// Environment override for [`Config::migrate`] (`auto`, `prompt`, `off`).
+pub const ENV_MIGRATE: &str = "MMRY_MIGRATE";
+
 /// Commented config written on first run when no global config exists.
 pub const DEFAULT_CONFIG: &str = "\
 #:schema https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/mmry/mmry.config.schema.json
@@ -13,10 +18,11 @@ pub const DEFAULT_CONFIG: &str = "\
 # Central per-user store: general/ and repos/<name>/ ledgers.
 # state_root = \"~/.local/state/mmry\"
 
-# Repo-local .mmry/mmry.jsonl ledgers are moved into the central store:
-# \"auto\" (default), \"prompt\" (ask on a terminal) or \"off\" (warn only).
+# Repo-local .mmry/mmry.jsonl ledgers that belong in the central store:
+# \"prompt\" (default: ask on a terminal, otherwise warn and continue),
+# \"auto\" (migrate on first use; `mmry setup` sets this) or \"off\" (warn only).
 # Repos with .mmry/tracked or a git-committed ledger stay repo-local.
-# migrate = \"auto\"
+# migrate = \"prompt\"
 
 # Bounded directories searched by cross-repository commands (`--all`, `--repo`).
 # Discovery never searches the home directory unless it is listed here.
@@ -44,9 +50,9 @@ pub struct Config {
 #[serde(rename_all = "lowercase")]
 pub enum MigrateMode {
     /// Migrate automatically on first use in that repository.
-    #[default]
     Auto,
-    /// Ask on a terminal; fail otherwise.
+    /// Ask on a terminal; otherwise warn and continue without migrating.
+    #[default]
     Prompt,
     /// Never migrate automatically; warn and use the central store only.
     Off,
@@ -78,6 +84,24 @@ impl Config {
         Self::load_file(&path)
     }
 
+    /// Path of the config file `load` reads: `explicit`, else the global one.
+    pub fn resolve_path(explicit: Option<&Path>) -> crate::Result<PathBuf> {
+        explicit.map_or_else(config_path, |path| Ok(path.to_path_buf()))
+    }
+
+    /// Apply `MMRY_STATE_ROOT` / `MMRY_MIGRATE` from `lookup` (normally
+    /// `std::env::var`). Environment overrides the config file; empty values
+    /// are ignored. Command-line flags are applied by the caller afterwards.
+    pub fn apply_env(&mut self, lookup: impl Fn(&str) -> Option<String>) -> crate::Result<()> {
+        if let Some(root) = lookup(ENV_STATE_ROOT).filter(|value| !value.is_empty()) {
+            self.state_root = Some(expand_tilde(Path::new(&root))?);
+        }
+        if let Some(mode) = lookup(ENV_MIGRATE).filter(|value| !value.is_empty()) {
+            self.migrate = mode.parse()?;
+        }
+        Ok(())
+    }
+
     fn load_file(path: &Path) -> crate::Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|error| {
             crate::Error::Config(format!("cannot read {}: {error}", path.display()))
@@ -104,6 +128,74 @@ impl Config {
     pub fn schema_json() -> crate::Result<String> {
         Ok(serde_json::to_string_pretty(&schemars::schema_for!(Self))?)
     }
+}
+
+impl std::str::FromStr for MigrateMode {
+    type Err = crate::Error;
+
+    fn from_str(text: &str) -> crate::Result<Self> {
+        match text {
+            "auto" => Ok(Self::Auto),
+            "prompt" => Ok(Self::Prompt),
+            "off" => Ok(Self::Off),
+            other => Err(crate::Error::Config(format!(
+                "invalid migrate mode '{other}': use auto, prompt or off"
+            ))),
+        }
+    }
+}
+
+impl MigrateMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Prompt => "prompt",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Set a top-level string `key` in the TOML file at `path`.
+///
+/// Comments and formatting are preserved. Creates the file (from [`DEFAULT_CONFIG`]) if
+/// missing. The result is validated against [`Config`] before writing.
+pub fn set_config_value(path: &Path, key: &str, value: &str) -> crate::Result<()> {
+    ensure_default_config(path)?;
+    let text = std::fs::read_to_string(path)?;
+    let document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| crate::Error::Config(format!("{}: {error}", path.display())))?;
+    let updated = if document.contains_key(key) {
+        let mut document = document;
+        document[key] = toml_edit::value(value);
+        document.to_string()
+    } else {
+        insert_top_level(&text, key, &toml_edit::value(value).to_string())
+    };
+    toml::from_str::<Config>(&updated)
+        .map_err(|error| crate::Error::Config(format!("{}: {error}", path.display())))?;
+    let temp = path.with_extension("toml.tmp");
+    std::fs::write(&temp, &updated)?;
+    std::fs::rename(&temp, path)?;
+    Ok(())
+}
+
+/// Insert `key = value` next to its commented default (`# key = ...`), else
+/// before the first table header, so leading comments (`#:schema`) stay first.
+fn insert_top_level(text: &str, key: &str, value: &str) -> String {
+    let line = format!("{key} = {}", value.trim());
+    let lines: Vec<&str> = text.lines().collect();
+    let commented = format!("# {key} =");
+    let position = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with(&commented))
+        .map(|index| index + 1)
+        .or_else(|| lines.iter().position(|l| l.trim_start().starts_with('[')))
+        .unwrap_or(lines.len());
+    let mut out: Vec<&str> = lines[..position].to_vec();
+    out.push(&line);
+    out.extend_from_slice(&lines[position..]);
+    out.join("\n") + "\n"
 }
 
 /// Write [`DEFAULT_CONFIG`] to `path` unless a file already exists there.
@@ -183,6 +275,66 @@ mod tests {
         std::fs::write(&path, "[[roots]]\npath = '/srv'\n").unwrap();
         ensure_default_config(&path).unwrap();
         assert_eq!(Config::load(Some(&path)).unwrap().roots.len(), 1);
+    }
+
+    #[test]
+    fn env_overrides_config_file() {
+        let mut config: Config = toml::from_str("state_root = '/file'\nmigrate = 'auto'").unwrap();
+        config.apply_env(|_| None).unwrap();
+        assert_eq!(
+            (config.state_root.clone(), config.migrate),
+            (Some("/file".into()), MigrateMode::Auto)
+        );
+        config
+            .apply_env(|key| match key {
+                ENV_STATE_ROOT => Some("/env".into()),
+                ENV_MIGRATE => Some("off".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            (config.state_root.clone(), config.migrate),
+            (Some("/env".into()), MigrateMode::Off)
+        );
+        config.apply_env(|_| Some(String::new())).unwrap();
+        assert_eq!(config.migrate, MigrateMode::Off);
+        let error = config
+            .apply_env(|key| (key == ENV_MIGRATE).then(|| "sometimes".into()))
+            .unwrap_err();
+        assert!(error.to_string().contains("auto, prompt or off"), "{error}");
+    }
+
+    #[test]
+    fn set_config_value_preserves_comments_and_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# keep me\n[[roots]]\npath = '/srv' # inline\n").unwrap();
+        set_config_value(&path, "migrate", "auto").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# keep me") && text.contains("# inline"),
+            "{text}"
+        );
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!((config.migrate, config.roots.len()), (MigrateMode::Auto, 1));
+        assert!(set_config_value(&path, "migrate", "never").is_err());
+        assert_eq!(
+            Config::load(Some(&path)).unwrap().migrate,
+            MigrateMode::Auto
+        );
+
+        let fresh = dir.path().join("new/config.toml");
+        set_config_value(&fresh, "migrate", "auto").unwrap();
+        let fresh_text = std::fs::read_to_string(&fresh).unwrap();
+        assert!(fresh_text.starts_with("#:schema"), "{fresh_text}");
+        assert!(
+            fresh_text.contains("# migrate = \"prompt\"\nmigrate = \"auto\"\n"),
+            "{fresh_text}"
+        );
+        assert_eq!(
+            Config::load(Some(&fresh)).unwrap().migrate,
+            MigrateMode::Auto
+        );
     }
 
     #[test]

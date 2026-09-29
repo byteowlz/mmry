@@ -121,7 +121,7 @@ pub fn all_sources(store: &Store, roots: &[DiscoveryRoot]) -> crate::Result<Vec<
         sources.push(Source::new(
             Scope::Repo,
             repo.dir_name(),
-            repo.record.checkouts.first().cloned(),
+            repo.checkouts.first().cloned(),
             Storage::Central,
             &repo.ledger(),
         ));
@@ -170,6 +170,58 @@ pub fn discover_local(roots: &[DiscoveryRoot]) -> crate::Result<Vec<Checkout>> {
     Ok(found)
 }
 
+/// Result of a best-effort scan for repo-local ledgers.
+#[derive(Debug, Default, Clone)]
+pub struct Scan {
+    pub found: Vec<Checkout>,
+    /// Directories that could not be read (permissions, vanished); skipped.
+    pub unreadable: Vec<PathBuf>,
+}
+
+/// Best-effort search for `.mmry/mmry.jsonl` below `roots`.
+///
+/// Like [`discover_local`] but tolerant: unreadable directories are recorded instead of aborting, and
+/// anything under `exclude` (e.g. the central store) is skipped.
+pub fn scan_local(roots: &[DiscoveryRoot], exclude: &[PathBuf]) -> Scan {
+    let mut scan = Scan::default();
+    for root in roots {
+        let Ok(canonical_root) = std::fs::canonicalize(&root.path) else {
+            scan.unreadable.push(root.path.clone());
+            continue;
+        };
+        let walker = WalkDir::new(&canonical_root)
+            .max_depth(root.max_depth)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                include_entry(entry) && !exclude.iter().any(|path| entry.path().starts_with(path))
+            });
+        for entry in walker {
+            match entry {
+                Ok(entry) => {
+                    if entry.file_type().is_dir() && entry.path().join(".mmry/mmry.jsonl").exists()
+                    {
+                        match Checkout::at(entry.path()) {
+                            Ok(checkout) => scan.found.push(checkout),
+                            Err(_) => scan.unreadable.push(entry.path().to_path_buf()),
+                        }
+                    }
+                }
+                Err(error) => {
+                    if let Some(path) = error.path() {
+                        scan.unreadable.push(path.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    scan.found.sort_by(|a, b| a.root.cmp(&b.root));
+    scan.found.dedup_by(|a, b| a.root == b.root);
+    scan.unreadable.sort();
+    scan.unreadable.dedup();
+    scan
+}
+
 fn include_entry(entry: &DirEntry) -> bool {
     if entry.depth() == 0 {
         return true;
@@ -177,7 +229,22 @@ fn include_entry(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     !matches!(
         name.as_ref(),
-        ".git" | "target" | "node_modules" | ".cache" | ".cargo" | ".npm" | ".pnpm-store"
+        ".git"
+            | "target"
+            | "node_modules"
+            | ".cache"
+            | ".cargo"
+            | ".rustup"
+            | ".npm"
+            | ".pnpm-store"
+            | ".bun"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".local"
+            | ".Trash"
+            | "Library"
+            | "snap"
     )
 }
 
@@ -188,6 +255,10 @@ pub fn select_named(sources: &[Source], name: &str) -> crate::Result<Source> {
         .filter(|source| source.scope == Scope::Repo)
         .filter(|source| {
             source.name == name
+                || source
+                    .name
+                    .rsplit_once("--")
+                    .is_some_and(|(readable, _)| readable == name)
                 || source
                     .repo_path
                     .as_ref()
@@ -371,6 +442,27 @@ mod tests {
         tracked_repo(dir.path(), "a", "x");
         symlink(dir.path(), dir.path().join("a/loop")).unwrap();
         assert_eq!(discover_local(&roots(dir.path(), 8)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scan_is_tolerant_and_honours_excludes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = dir.path().join("work/deep/app");
+        note(&MemoryFile::open_at(&pending), "legacy");
+        let excluded = dir.path().join("store");
+        note(&MemoryFile::open_at(&excluded), "inside the store");
+        let mut scan_roots = roots(dir.path(), 6);
+        scan_roots.push(DiscoveryRoot {
+            path: dir.path().join("missing"),
+            max_depth: 2,
+        });
+        let scan = scan_local(
+            &scan_roots,
+            &[fs::canonicalize(dir.path()).unwrap().join("store")],
+        );
+        let found: Vec<_> = scan.found.iter().map(|c| c.root.clone()).collect();
+        assert_eq!(found, vec![fs::canonicalize(&pending).unwrap()]);
+        assert_eq!(scan.unreadable, vec![dir.path().join("missing")]);
     }
 
     #[test]

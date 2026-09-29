@@ -4,9 +4,16 @@
 //!
 //! ```text
 //! <state_root>/general/mmry.jsonl
-//! <state_root>/repos/<readable-name>/mmry.jsonl
-//! <state_root>/repos/<readable-name>/repo.json   # stable identity + checkouts
+//! <state_root>/repos/<name>--<id>/mmry.jsonl
+//! <state_root>/repos/<name>--<id>/repo.json      # {identity, name}, written once
+//! <state_root>/local/checkouts.json              # this machine's checkout paths
 //! ```
+//!
+//! Everything outside `local/` is safe to sync between machines: directory
+//! names are derived from the repository identity (not registration order),
+//! `repo.json` never changes, and ledgers are append-only. If two machines
+//! name the same repository differently, the extra directories are merged
+//! into the first one by event id on the next registration.
 //!
 //! A repository is in exactly one storage mode: central (default) or tracked
 //! (its ledger lives in `<repo>/.mmry/` and is committed with the repo). A
@@ -23,6 +30,7 @@ use fs2::FileExt;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -33,20 +41,23 @@ use std::process::Command;
 const GENERAL_DIR: &str = "general";
 const REPOS_DIR: &str = "repos";
 const REGISTRY_FILE: &str = "repo.json";
+/// Machine-local state that must never be synced.
+pub const LOCAL_DIR: &str = "local";
+const CHECKOUTS_FILE: &str = "checkouts.json";
 /// Marker selecting tracked (repo-local) mode.
 pub const TRACKED_MARKER: &str = "tracked";
 /// Note left in `.mmry/` after migration, pointing at the central ledger.
 pub const MIGRATED_MARKER: &str = "MIGRATED";
 
 /// Registry entry binding a central repo directory to a stable identity.
+///
+/// Immutable once written so it never conflicts when the store is synced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoRecord {
     /// `git:<root-commit>` or `path:<canonical path>`.
     pub identity: String,
     /// Readable name (directory name of the first registered checkout).
     pub name: String,
-    /// Known checkout paths, first registered first.
-    pub checkouts: Vec<PathBuf>,
 }
 
 /// A repository directory inside the central store.
@@ -54,6 +65,8 @@ pub struct RepoRecord {
 pub struct CentralRepo {
     pub dir: PathBuf,
     pub record: RepoRecord,
+    /// Checkout paths known on this machine (machine-local, not synced).
+    pub checkouts: Vec<PathBuf>,
 }
 
 impl CentralRepo {
@@ -91,19 +104,25 @@ impl Store {
     }
 
     /// All registered central repositories, sorted by directory name.
+    ///
+    /// The same identity can appear twice after a sync until
+    /// [`Store::register`] merges the directories.
     pub fn repos(&self) -> crate::Result<Vec<CentralRepo>> {
         let dir = self.root.join(REPOS_DIR);
         if !dir.is_dir() {
             return Ok(Vec::new());
         }
+        let checkouts = self.local_checkouts()?;
         let mut repos = Vec::new();
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let registry = entry.path().join(REGISTRY_FILE);
             if registry.is_file() {
+                let record = read_record(&registry)?;
                 repos.push(CentralRepo {
                     dir: entry.path(),
-                    record: read_record(&registry)?,
+                    checkouts: checkouts.get(&record.identity).cloned().unwrap_or_default(),
+                    record,
                 });
             }
         }
@@ -111,7 +130,8 @@ impl Store {
         Ok(repos)
     }
 
-    /// The central repo for `checkout`, if registered.
+    /// The central repo for `checkout`, if registered (the first directory
+    /// when several share its identity).
     pub fn find(&self, checkout: &Checkout) -> crate::Result<Option<CentralRepo>> {
         Ok(self
             .repos()?
@@ -124,32 +144,81 @@ impl Store {
         if let Some(repo) = self.find(checkout)? {
             return Ok(repo);
         }
-        let mut name = sanitize(&checkout.name);
-        if self.root.join(REPOS_DIR).join(&name).exists() {
-            name = format!("{name}--{}", short_id(&checkout.identity));
-        }
+        let name = format!(
+            "{}--{}",
+            sanitize(&checkout.name),
+            short_id(&checkout.identity)
+        );
         Ok(CentralRepo {
             dir: self.root.join(REPOS_DIR).join(name),
             record: RepoRecord {
                 identity: checkout.identity.clone(),
                 name: checkout.name.clone(),
-                checkouts: vec![checkout.root.clone()],
             },
+            checkouts: Vec::new(),
         })
     }
 
-    /// Resolve and register `checkout`, recording new checkout paths.
+    /// Resolve and register `checkout`: create its directory, remember the
+    /// checkout path locally, and merge duplicate directories of the same
+    /// identity (from other machines) into the first one.
     pub fn register(&self, checkout: &Checkout) -> crate::Result<CentralRepo> {
         let mut repo = self.plan(checkout)?;
         let registry = repo.dir.join(REGISTRY_FILE);
-        if !repo.record.checkouts.contains(&checkout.root) {
-            repo.record.checkouts.push(checkout.root.clone());
-        }
-        if !registry.is_file() || read_record(&registry)? != repo.record {
+        if !registry.is_file() {
             fs::create_dir_all(&repo.dir)?;
             write_atomic(&registry, &serde_json::to_string_pretty(&repo.record)?)?;
         }
+        if !repo.checkouts.contains(&checkout.root) {
+            repo.checkouts.push(checkout.root.clone());
+            self.remember_checkout(&checkout.identity, &checkout.root)?;
+        }
+        self.merge_duplicates(&repo)?;
         Ok(repo)
+    }
+
+    /// Merge other directories with `primary`'s identity into it, then remove
+    /// them. Directories with conflicting event ids are left in place.
+    fn merge_duplicates(&self, primary: &CentralRepo) -> crate::Result<Vec<PathBuf>> {
+        let mut kept = Vec::new();
+        for other in self.repos()? {
+            if other.record.identity != primary.record.identity || other.dir == primary.dir {
+                continue;
+            }
+            let merged = merge_ledgers(&other.ledger(), &primary.ledger())?;
+            if merged.conflicts.is_empty() {
+                fs::remove_dir_all(&other.dir)?;
+            } else {
+                kept.push(other.dir);
+            }
+        }
+        Ok(kept)
+    }
+
+    fn checkouts_file(&self) -> PathBuf {
+        self.root.join(LOCAL_DIR).join(CHECKOUTS_FILE)
+    }
+
+    fn local_checkouts(&self) -> crate::Result<BTreeMap<String, Vec<PathBuf>>> {
+        let path = self.checkouts_file();
+        if !path.is_file() {
+            return Ok(BTreeMap::new());
+        }
+        serde_json::from_str(&fs::read_to_string(&path)?)
+            .map_err(|error| crate::Error::Config(format!("invalid {}: {error}", path.display())))
+    }
+
+    fn remember_checkout(&self, identity: &str, root: &Path) -> crate::Result<()> {
+        let mut all = self.local_checkouts()?;
+        let paths = all.entry(identity.to_owned()).or_default();
+        if !paths.iter().any(|path| path == root) {
+            paths.push(root.to_path_buf());
+        }
+        let path = self.checkouts_file();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_atomic(&path, &serde_json::to_string_pretty(&all)?)
     }
 }
 
@@ -398,6 +467,42 @@ fn merge_into(
     verify_contains(&central, local_lines.into_iter().map(|(_, e)| e).collect())
 }
 
+/// Outcome of merging one ledger's events into another.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MergeOutcome {
+    pub added: usize,
+    pub duplicate: usize,
+    /// Event ids present in both ledgers with different content.
+    pub conflicts: Vec<String>,
+}
+
+/// Append events of `from` missing in `into`, byte-for-byte, under the
+/// target's lock. Nothing is written if any event id conflicts.
+pub fn merge_ledgers(from: &MemoryFile, into: &MemoryFile) -> crate::Result<MergeOutcome> {
+    let existing: HashMap<String, Value> = into
+        .read_lines()?
+        .into_iter()
+        .map(|(line, event)| Ok((event.id, serde_json::from_str(&line)?)))
+        .collect::<crate::Result<_>>()?;
+    let mut outcome = MergeOutcome::default();
+    let mut pending = Vec::new();
+    let mut seen = HashSet::new();
+    for (line, event) in from.read_lines()? {
+        let value: Value = serde_json::from_str(&line)?;
+        match existing.get(&event.id) {
+            Some(current) if *current == value => outcome.duplicate += 1,
+            Some(_) => outcome.conflicts.push(event.id),
+            None if seen.insert(event.id) => pending.push(line),
+            None => outcome.duplicate += 1,
+        }
+    }
+    if outcome.conflicts.is_empty() {
+        outcome.added = pending.len();
+        into.append_raw_lines(&pending)?;
+    }
+    Ok(outcome)
+}
+
 /// Every active local memory must be active centrally with the same content.
 fn verify_contains(central: &MemoryFile, local_events: Vec<MemoryEvent>) -> crate::Result<()> {
     let central_active: HashMap<_, _> = central
@@ -497,10 +602,10 @@ fn sanitize(name: &str) -> String {
     }
 }
 
-/// Short, stable suffix for disambiguating same-named repositories.
+/// Short, stable id suffix of every central repository directory.
 fn short_id(identity: &str) -> String {
     if let Some(sha) = identity.strip_prefix("git:") {
-        return sha.chars().take(8).collect();
+        return sha.chars().take(12).collect();
     }
     // FNV-1a: stable across runs and platforms, unlike `DefaultHasher`.
     let hash = identity
@@ -508,7 +613,7 @@ fn short_id(identity: &str) -> String {
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
         });
-    format!("{hash:016x}").chars().take(8).collect()
+    format!("{hash:016x}").chars().take(12).collect()
 }
 
 #[cfg(test)]
@@ -632,13 +737,60 @@ mod tests {
 
         assert_eq!(a.dir, c.dir);
         assert_eq!(
-            fx.store.find(&first).unwrap().unwrap().record.checkouts,
+            fx.store.find(&first).unwrap().unwrap().checkouts,
             vec![first.root.clone(), clone.root]
         );
-        assert_eq!(a.dir_name(), "app");
-        assert_ne!(o.dir, a.dir);
-        assert!(o.dir_name().starts_with("app--"), "{}", o.dir_name());
+        // Names never depend on registration order: always <name>--<id>.
+        let id = |c: &Checkout| c.identity.trim_start_matches("git:")[..12].to_owned();
+        assert_eq!(a.dir_name(), format!("app--{}", id(&first)));
+        assert_eq!(o.dir_name(), format!("app--{}", id(&other)));
         assert_eq!(fx.store.repos().unwrap().len(), 2);
+        // Checkout paths are machine-local; repo.json holds only identity + name.
+        let record = fs::read_to_string(a.dir.join(REGISTRY_FILE)).unwrap();
+        assert!(!record.contains(fx.work.to_str().unwrap()), "{record}");
+    }
+
+    #[test]
+    fn registration_order_does_not_change_directory_names() {
+        let fx = fixture();
+        let x = Checkout::at(&git_repo(&fx.work.join("work"), "app")).unwrap();
+        let y = Checkout::at(&git_repo(&fx.work.join("byteowlz"), "app")).unwrap();
+        let other = Store::new(fx.work.join("other-machine"));
+        let here = (
+            fx.store.register(&x).unwrap(),
+            fx.store.register(&y).unwrap(),
+        );
+        let there = (other.register(&y).unwrap(), other.register(&x).unwrap());
+        assert_eq!(here.0.dir_name(), there.1.dir_name());
+        assert_eq!(here.1.dir_name(), there.0.dir_name());
+        assert_ne!(here.0.dir_name(), here.1.dir_name());
+    }
+
+    #[test]
+    fn synced_duplicate_directories_are_merged_by_event_id() {
+        let fx = fixture();
+        let repo = git_repo(&fx.work, "app");
+        let here = Checkout::at(&repo).unwrap();
+        // The other machine cloned the same repository as "app-fork".
+        let there = Checkout {
+            name: "app-fork".into(),
+            ..here.clone()
+        };
+        let other = Store::new(fx.work.join("other-machine"));
+        add(&fx.store.register(&here).unwrap().ledger(), "from here");
+        let remote = other.register(&there).unwrap();
+        add(&remote.ledger(), "from there");
+        // Simulate sync: the other machine's directory appears here.
+        let synced = fx.store.root().join(REPOS_DIR).join(remote.dir_name());
+        fs::create_dir_all(&synced).unwrap();
+        for file in [MEMORY_FILE, REGISTRY_FILE] {
+            fs::copy(remote.dir.join(file), synced.join(file)).unwrap();
+        }
+        assert_eq!(fx.store.repos().unwrap().len(), 2);
+
+        let merged = fx.store.register(&here).unwrap();
+        assert_eq!(fx.store.repos().unwrap().len(), 1);
+        assert_eq!(contents(&merged.ledger()), ["from here", "from there"]);
     }
 
     #[test]
@@ -833,7 +985,7 @@ mod tests {
     fn sanitize_and_short_id_are_stable() {
         assert_eq!(sanitize("my app!"), "my_app_");
         assert_eq!(sanitize(".."), "repo");
-        assert_eq!(short_id("git:0123456789abcdef"), "01234567");
+        assert_eq!(short_id("git:0123456789abcdef"), "0123456789ab");
         assert_eq!(short_id("path:/x"), short_id("path:/x"));
         assert_ne!(short_id("path:/x"), short_id("path:/y"));
     }

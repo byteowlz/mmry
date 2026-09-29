@@ -34,20 +34,27 @@ By default memories live in a per-user central store (`state_root`, default `$XD
 
 ```text
 general/mmry.jsonl              personal memories that apply everywhere
-repos/<name>/mmry.jsonl         one ledger per repository
-repos/<name>/repo.json          stable identity (git root commit) + known checkouts
+repos/<name>--<id>/mmry.jsonl   one ledger per repository
+repos/<name>--<id>/repo.json    identity (git root commit, else path) + name; never rewritten
+local/checkouts.json            this machine's checkout paths (not synced)
 ```
 
-Clones of the same repository share one ledger; different repositories with the same directory name get separate `<name>--<id>` directories.
+Repositories are identified by their git root commit, not their directory: clones and worktrees share a ledger, while `~/work/app` and `~/byteowlz/app` from unrelated histories get different `app--<id>` directories. The `<id>` comes from the identity, so every machine picks the same directory name. If two machines checked out one repository under different names, the directories are merged by event id on next use. Repositories without git fall back to their path, which is machine-specific.
 
 A repository is in exactly one mode:
 
 - **central** (default): `mmry init` registers it; nothing is written into the repository.
 - **tracked**: `mmry init --tracked` keeps the ledger in `.mmry/mmry.jsonl` to commit with the repository. A ledger already committed to git is treated as tracked too.
 
-### Migrating repo-local ledgers
+### Switching to the central store
 
-An untracked `.mmry/mmry.jsonl` in central mode is migrated on first use (`migrate = "auto"`, the default; `"prompt"` asks on a terminal, `"off"` only warns and ignores it). Manually:
+```bash
+mmry setup --dry-run              # scan home (+ [[roots]]) for .mmry ledgers and show the plan
+mmry setup                        # confirm, migrate them all, set migrate = "auto" in the config
+mmry setup --scan ~/work --scan /data --depth 8
+```
+
+Until you decide, an untracked `.mmry/mmry.jsonl` is not read (`migrate = "prompt"`, the default: ask once on a terminal, otherwise warn and continue). `"auto"` migrates on first use, `"off"` only warns. The config file is only edited by `mmry setup`, keeping its comments. Per repository:
 
 ```bash
 mmry migrate --dry-run            # current repository; --all for every repo under [[roots]]
@@ -58,11 +65,11 @@ Events are merged by id (re-running is a no-op), the central ledger is verified 
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/mmry/config.toml` (default `~/.config/mmry/config.toml`). A commented default is created on first run; `--config PATH` or `MMRY_CONFIG` selects another file, which must exist. See `examples/config.toml`:
+Precedence: `--state-root`/`--migrate` flags, then `MMRY_STATE_ROOT`/`MMRY_MIGRATE`, then the config file. There is deliberately no repo-local config. The file is `$XDG_CONFIG_HOME/mmry/config.toml` (default `~/.config/mmry/config.toml`). A commented default is created on first run; `--config PATH` or `MMRY_CONFIG` selects another file, which must exist. See `examples/config.toml`:
 
 ```toml
 # state_root = "~/.local/state/mmry"
-# migrate = "auto"
+# migrate = "prompt"
 
 [[roots]]            # where `--all`, `--repo` and `migrate --all` look for tracked/legacy ledgers
 path = "~/byteowlz"

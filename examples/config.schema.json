@@ -5,7 +5,7 @@
   "properties": {
     "migrate": {
       "description": "What to do when a repository still has a repo-local ledger that belongs in the central store.",
-      "default": "auto",
+      "default": "prompt",
       "allOf": [
         {
           "$ref": "#/definitions/MigrateMode"
@@ -60,7 +60,7 @@
           ]
         },
         {
-          "description": "Ask on a terminal; fail otherwise.",
+          "description": "Ask on a terminal; otherwise warn and continue without migrating.",
           "type": "string",
           "enum": [
             "prompt"

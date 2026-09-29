@@ -65,6 +65,22 @@ impl Sandbox {
         path
     }
 
+    /// The single central ledger whose directory starts with `name--`.
+    fn central(&self, name: &str) -> PathBuf {
+        let dirs: Vec<_> = fs::read_dir(self.state.join("repos"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(&format!("{name}--"))
+            })
+            .collect();
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+        dirs[0].join("mmry.jsonl")
+    }
+
     fn run(&self, cwd: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_mmry"))
             .current_dir(cwd)
@@ -124,7 +140,7 @@ fn repo_and_general_memories_are_scoped_and_labelled() {
         !app.join(".mmry").exists(),
         "central mode must not write repo-local files"
     );
-    assert!(sb.state.join("repos/app/mmry.jsonl").exists());
+    assert!(sb.central("app").exists());
     assert!(sb.state.join("general/mmry.jsonl").exists());
 
     let in_app = sb.json(&app, &["list", "--json"]);
@@ -141,7 +157,7 @@ fn repo_and_general_memories_are_scoped_and_labelled() {
         .iter()
         .find(|item| item["scope"] == "repo")
         .unwrap();
-    assert_eq!(repo_item["repo"], "app");
+    assert!(repo_item["repo"].as_str().unwrap().starts_with("app--"));
     assert_eq!(repo_item["why"], "because");
     assert!(
         repo_item["recorded_scope"]
@@ -259,7 +275,7 @@ fn seed_local_ledger(sb: &Sandbox, repo: &Path, text: &str) {
 
 #[test]
 fn auto_migration_moves_local_ledger_on_first_use() {
-    let sb = Sandbox::new("");
+    let sb = Sandbox::new("migrate = 'auto'\n");
     let app = sb.repo("app");
     seed_local_ledger(&sb, &app, "legacy memory");
 
@@ -274,7 +290,7 @@ fn auto_migration_moves_local_ledger_on_first_use() {
     // Writes now go to the central store only.
     sb.ok(&app, &["add", "after migration"]);
     assert!(!app.join(".mmry/mmry.jsonl").exists());
-    let central = fs::read_to_string(sb.state.join("repos/app/mmry.jsonl")).unwrap();
+    let central = fs::read_to_string(sb.central("app")).unwrap();
     assert!(central.contains("after migration") && central.contains("legacy memory"));
 }
 
@@ -304,14 +320,108 @@ fn migrate_off_warns_and_never_reads_local() {
 }
 
 #[test]
-fn migrate_prompt_without_terminal_fails_with_hint() {
-    let sb = Sandbox::new("migrate = 'prompt'\n");
+fn default_prompt_without_terminal_warns_and_continues() {
+    let sb = Sandbox::new("");
     let app = sb.repo("app");
     seed_local_ledger(&sb, &app, "legacy memory");
-    let output = sb.run(&app, &["list"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("mmry migrate"));
+    let output = sb.run(&app, &["list", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("mmry setup"));
     assert!(app.join(".mmry/mmry.jsonl").exists());
+    // Writes still work and go to the central store only.
+    sb.ok(&app, &["add", "new memory"]);
+    assert!(
+        !fs::read_to_string(app.join(".mmry/mmry.jsonl"))
+            .unwrap()
+            .contains("new memory")
+    );
+    assert!(
+        !fs::read_to_string(&sb.config)
+            .unwrap()
+            .contains("migrate = ")
+    );
+}
+
+#[test]
+fn setup_plans_asks_and_migrates_everything() {
+    let sb = Sandbox::new("");
+    let one = sb.repo("one");
+    let two = sb.repo("nested/deeper/two");
+    seed_local_ledger(&sb, &one, "first");
+    seed_local_ledger(&sb, &two, "second");
+
+    let plan = sb.json(&sb.home, &["setup", "--dry-run", "--json"]);
+    let statuses: Vec<_> = plan["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(statuses, ["migrated", "migrated"]);
+    assert!(one.join(".mmry/mmry.jsonl").exists() && !sb.state.join("repos").exists());
+
+    let refused = sb.run(&sb.home, &["setup"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--yes"));
+    assert!(one.join(".mmry/mmry.jsonl").exists());
+
+    sb.ok(&sb.home, &["setup", "--yes"]);
+    assert!(!one.join(".mmry/mmry.jsonl").exists() && !two.join(".mmry/mmry.jsonl").exists());
+    let config = fs::read_to_string(&sb.config).unwrap();
+    assert!(
+        config.contains("state_root = ") && config.contains("migrate = \"auto\""),
+        "{config}"
+    );
+    assert_eq!(
+        contents(&sb.json(&two, &["list", "--json"])),
+        [pair("repo", "second")]
+    );
+    // Idempotent.
+    let again = sb.json(&sb.home, &["setup", "--yes", "--json"]);
+    assert_eq!(again["reports"], serde_json::json!([]));
+}
+
+#[test]
+fn flags_override_env_override_config() {
+    let sb = Sandbox::new("");
+    let app = sb.repo("app");
+    let env_root = sb.home.join("env-state");
+    let flag_root = sb.home.join("flag-state");
+    let run = |args: &[&str], env_value: &Path| {
+        let output = Command::new(env!("CARGO_BIN_EXE_mmry"))
+            .current_dir(&app)
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &sb.home)
+            .env("MMRY_CONFIG", &sb.config)
+            .env("MMRY_STATE_ROOT", env_value)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    run(&["add", "--general", "via env"], &env_root);
+    assert!(env_root.join("general/mmry.jsonl").exists());
+    let flag = flag_root.to_str().unwrap();
+    run(
+        &["--state-root", flag, "add", "--general", "via flag"],
+        &env_root,
+    );
+    assert!(flag_root.join("general/mmry.jsonl").exists());
+    assert!(!sb.state.join("general").exists());
+
+    seed_local_ledger(&sb, &app, "legacy");
+    let output = sb.run(&app, &["--migrate", "auto", "list", "--json"]);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("migrated"),
+        "{output:?}"
+    );
+    assert!(
+        !sb.run(&app, &["--migrate", "never", "list"])
+            .status
+            .success()
+    );
 }
 
 #[test]
