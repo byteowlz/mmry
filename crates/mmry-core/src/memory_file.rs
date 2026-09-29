@@ -23,7 +23,7 @@ use uuid::Uuid;
 pub const MMRY_DIR: &str = ".mmry";
 pub const MEMORY_FILE: &str = "mmry.jsonl";
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum MemoryType {
     Episodic,
@@ -162,7 +162,7 @@ impl MemoryEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct MemoryEntry {
     pub memory_id: String,
     pub content: String,

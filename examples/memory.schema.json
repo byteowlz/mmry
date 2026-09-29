@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SourcedMemory",
+  "type": "object",
+  "required": [
+    "agent_ctx",
+    "content",
+    "created_at",
+    "memory_id",
+    "memory_type",
+    "metadata",
+    "repo",
+    "revision",
+    "scope",
+    "tags",
+    "updated_at"
+  ],
+  "properties": {
+    "agent_ctx": true,
+    "content": {
+      "type": "string"
+    },
+    "contested": {
+      "description": "Concurrent edits were merged (e.g. from two machines) and nobody has resolved them yet with a supersede or rm on the current revision. Contested memories are never injected automatically.",
+      "default": false,
+      "type": "boolean"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "machine": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "memory_id": {
+      "type": "string"
+    },
+    "memory_type": {
+      "$ref": "#/definitions/MemoryType"
+    },
+    "metadata": true,
+    "recorded_scope": {
+      "description": "Scope recorded on the add event (`general` / `repo:<stable-id>`). Named apart from the source `scope` label it is flattened next to.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "repo": {
+      "type": "string"
+    },
+    "repo_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "description": "1 on add, +1 per supersede or deprecation attempt. Used for optimistic concurrency.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "scope": {
+      "$ref": "#/definitions/Scope"
+    },
+    "source": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "why": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "MemoryType": {
+      "type": "string",
+      "enum": [
+        "episodic",
+        "semantic",
+        "procedural"
+      ]
+    },
+    "Scope": {
+      "type": "string",
+      "enum": [
+        "general",
+        "repo"
+      ]
+    }
+  }
+}

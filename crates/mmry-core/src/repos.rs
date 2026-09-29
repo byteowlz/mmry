@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use walkdir::DirEntry;
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     General,
@@ -29,12 +29,23 @@ pub enum Storage {
     Tracked,
 }
 
+/// JSON schema of the entry objects printed by `list`, `search`, `add`,
+/// `supersede` and `rm` (`search` adds `score`, `rm` adds `removed`).
+pub fn entry_schema_json() -> crate::Result<String> {
+    Ok(serde_json::to_string_pretty(&schemars::schema_for!(
+        SourcedMemory
+    ))?)
+}
+
 /// One ledger that can be read.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Source {
     pub scope: Scope,
-    /// `general`, or the repository's readable (store-unique) name.
+    /// `general`, or the repository's store-unique name (`<name>--<id>` in
+    /// the central store).
     pub name: String,
+    /// Human label: `general` or the repository's directory name.
+    pub label: String,
     pub repo_path: Option<PathBuf>,
     pub storage: Storage,
     pub ledger: PathBuf,
@@ -61,6 +72,7 @@ impl Source {
     ) -> Self {
         Self {
             scope,
+            label: name.clone(),
             name,
             repo_path,
             storage,
@@ -81,13 +93,16 @@ impl Source {
             ));
         }
         let repo = store.plan(checkout)?;
-        Ok(Self::new(
-            Scope::Repo,
-            repo.dir_name(),
-            Some(checkout.root.clone()),
-            Storage::Central,
-            &repo.ledger(),
-        ))
+        Ok(Self {
+            label: repo.record.name.clone(),
+            ..Self::new(
+                Scope::Repo,
+                repo.dir_name(),
+                Some(checkout.root.clone()),
+                Storage::Central,
+                &repo.ledger(),
+            )
+        })
     }
 
     pub fn file(&self) -> MemoryFile {
@@ -95,7 +110,7 @@ impl Source {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SourcedMemory {
     pub scope: Scope,
     pub repo: String,
@@ -118,13 +133,16 @@ pub struct SourcedHit {
 pub fn all_sources(store: &Store, roots: &[DiscoveryRoot]) -> crate::Result<Vec<Source>> {
     let mut sources = vec![Source::general(store)];
     for repo in store.repos()? {
-        sources.push(Source::new(
-            Scope::Repo,
-            repo.dir_name(),
-            repo.checkouts.first().cloned(),
-            Storage::Central,
-            &repo.ledger(),
-        ));
+        sources.push(Source {
+            label: repo.record.name.clone(),
+            ..Source::new(
+                Scope::Repo,
+                repo.dir_name(),
+                repo.checkouts.first().cloned(),
+                Storage::Central,
+                &repo.ledger(),
+            )
+        });
     }
     sources.extend(
         discover_local(roots)?

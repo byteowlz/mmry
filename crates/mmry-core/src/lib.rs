@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod memory_file;
 pub mod paths;
+pub mod preview;
 pub mod repos;
 pub mod store;
 

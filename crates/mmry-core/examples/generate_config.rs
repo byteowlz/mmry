@@ -1,10 +1,18 @@
-//! Regenerate `examples/config.schema.json` from the typed config model.
+//! Regenerate the JSON schemas in `examples/` from the typed models.
 
 use std::path::Path;
 
 fn main() -> anyhow::Result<()> {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-    let schema = mmry_core::config::Config::schema_json()?;
-    std::fs::write(examples.join("config.schema.json"), format!("{schema}\n"))?;
+    for (file, schema) in [
+        (
+            "config.schema.json",
+            mmry_core::config::Config::schema_json()?,
+        ),
+        ("preview.schema.json", mmry_core::preview::schema_json()?),
+        ("memory.schema.json", mmry_core::repos::entry_schema_json()?),
+    ] {
+        std::fs::write(examples.join(file), format!("{schema}\n"))?;
+    }
     Ok(())
 }

@@ -308,6 +308,93 @@ fn doctor_reports_contested_memories_and_damage() {
 }
 
 #[test]
+fn preview_contract_and_entry_json_for_writes() {
+    let sb = Sandbox::new("");
+    let app = sb.repo("app");
+    let added = sb.json(&app, &["add", "repo fact", "--why", "because", "--json"]);
+    assert_eq!(
+        (
+            added["scope"].as_str(),
+            added["revision"].as_u64(),
+            added["why"].as_str()
+        ),
+        (Some("repo"), Some(1), Some("because"))
+    );
+    let id = added["memory_id"].as_str().unwrap();
+    sb.ok(&app, &["add", "--general", "general fact"]);
+    let superseded = sb.json(
+        &app,
+        &["supersede", id, "repo fact v2", "--reason", "r", "--json"],
+    );
+    assert_eq!(
+        (
+            superseded["content"].as_str(),
+            superseded["revision"].as_u64()
+        ),
+        (Some("repo fact v2"), Some(2))
+    );
+
+    // --cwd selects the repository independent of the working directory.
+    let preview = sb.json(
+        &sb.home,
+        &["preview", "--json", "--cwd", app.to_str().unwrap()],
+    );
+    assert_eq!(preview["schema_version"], 1);
+    let origins: Vec<_> = preview["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["origin"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(origins, ["app", "general"]);
+    let rendered = preview["rendered"].as_str().unwrap();
+    assert!(
+        rendered.starts_with("<mmry>\n") && rendered.contains("[repo app]"),
+        "{rendered}"
+    );
+    assert_eq!(
+        sb.ok(&app, &["preview"]),
+        rendered,
+        "plain output is exactly `rendered`"
+    );
+    let again = sb.json(&app, &["preview", "--json"]);
+    assert_eq!(again["selection_hash"], preview["selection_hash"]);
+
+    let small = sb.json(&app, &["preview", "--json", "--limit", "1"]);
+    assert_eq!(
+        (
+            small["entries"].as_array().unwrap().len(),
+            small["omitted"].as_u64()
+        ),
+        (1, Some(1))
+    );
+
+    let removed = sb.json(&app, &["rm", id, "--json"]);
+    assert_eq!(
+        (removed["memory_id"].as_str(), removed["removed"].as_bool()),
+        (Some(id), Some(true))
+    );
+    let after = sb.json(&app, &["preview", "--json"]);
+    assert_ne!(after["selection_hash"], preview["selection_hash"]);
+}
+
+#[test]
+fn preview_never_prompts_or_migrates_and_warns_about_pending_ledgers() {
+    let sb = Sandbox::new("migrate = 'auto'\n");
+    let app = sb.repo("app");
+    seed_local_ledger(&sb, &app, "legacy memory");
+    let preview = sb.json(&app, &["preview", "--json"]);
+    assert!(app.join(".mmry/mmry.jsonl").exists());
+    assert!(
+        preview["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("mmry setup")
+    );
+    assert_eq!(preview["rendered"], "");
+}
+
+#[test]
 fn expired_memories_are_hidden_unless_requested() {
     let sb = Sandbox::new("");
     let app = sb.repo("app");

@@ -51,7 +51,7 @@ test:
     cargo test --workspace --all-features --no-fail-fast
     python3 -m unittest discover -s scripts -p 'test_*.py'
 
-# Regenerate examples/config.schema.json from the typed config model
+# Regenerate the JSON schemas in examples/ (config, preview, memory entry)
 generate-config:
     cargo run -p mmry-core --example generate_config
 

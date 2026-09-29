@@ -9,7 +9,6 @@ use clap::ValueEnum;
 use mmry_core::AgentCtx;
 use mmry_core::MemoryEntry;
 use mmry_core::MemoryEvent;
-use mmry_core::MemoryFile;
 use mmry_core::MemoryType;
 use mmry_core::config::Config;
 use mmry_core::config::MigrateMode;
@@ -60,6 +59,8 @@ enum Command {
     /// Switch to the central store: find every repo-local .mmry ledger,
     /// show the plan, migrate after confirmation and set `migrate = "auto"`.
     Setup(SetupArgs),
+    /// Memories a harness should inject at session start, with the exact text.
+    Preview(PreviewArgs),
     /// Record a memory in the current repository (or general with --general).
     Add(AddArgs),
     /// List memories of the current scope (general + current repository).
@@ -208,6 +209,22 @@ struct MigrateArgs {
 }
 
 #[derive(Args)]
+struct PreviewArgs {
+    /// Directory the session starts in (default: current directory).
+    #[arg(long, value_name = "DIR")]
+    cwd: Option<PathBuf>,
+    /// Token budget for the rendered text (estimated at 4 bytes per token).
+    #[arg(long, default_value_t = 1200)]
+    max_tokens: usize,
+    /// Maximum number of entries.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Print the JSON contract (default prints only the rendered text).
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
 struct DoctorArgs {
     /// Check every known ledger, not just the current scope.
     #[arg(long)]
@@ -266,13 +283,18 @@ fn main() -> anyhow::Result<()> {
     };
     if !matches!(
         cli.command,
-        Command::Migrate(_) | Command::Setup(_) | Command::Doctor(_) | Command::Repos { .. }
+        Command::Migrate(_)
+            | Command::Setup(_)
+            | Command::Preview(_)
+            | Command::Doctor(_)
+            | Command::Repos { .. }
     ) {
         auto_migrate(&env)?;
     }
     match cli.command {
         Command::Init { tracked } => init(&env, tracked),
         Command::Setup(args) => setup(&env, &args),
+        Command::Preview(args) => preview(&env, &args),
         Command::Add(args) => add(&env, args),
         Command::List(args) => list(&env, &args),
         Command::Search(args) => search(&env, &args),
@@ -382,16 +404,38 @@ fn require_checkout(env: &Env) -> anyhow::Result<&Checkout> {
 }
 
 /// Ledger that writes for this scope go to, plus its scope label.
-fn write_target(env: &Env, general: bool) -> anyhow::Result<(MemoryFile, String)> {
+fn write_target(env: &Env, general: bool) -> anyhow::Result<(Source, String)> {
     if general {
-        return Ok((env.store.general(), "general".into()));
+        return Ok((Source::general(&env.store), "general".into()));
     }
     let checkout = require_checkout(env)?;
     let scope = format!("repo:{}", checkout.identity);
-    if checkout.tracked().is_some() {
-        return Ok((checkout.local_ledger(), scope));
+    if checkout.tracked().is_none() {
+        env.store.register(checkout)?;
     }
-    Ok((env.store.register(checkout)?.ledger(), scope))
+    Ok((Source::for_checkout(&env.store, checkout)?, scope))
+}
+
+/// `memory_id` as stored in `source` after a write, in the list/search entry
+/// schema. A removed memory is reported as it was before removal.
+fn sourced(
+    source: &Source,
+    memory_id: &str,
+    before: Option<MemoryEntry>,
+) -> anyhow::Result<SourcedMemory> {
+    let memory = source
+        .file()
+        .active_memories()?
+        .into_iter()
+        .find(|memory| memory.memory_id == memory_id)
+        .or(before)
+        .with_context(|| format!("{memory_id} not found after writing"))?;
+    Ok(SourcedMemory {
+        scope: source.scope,
+        repo: source.name.clone(),
+        repo_path: source.repo_path.clone(),
+        memory,
+    })
 }
 
 /// General plus, when inside one, the current repository.
@@ -464,7 +508,7 @@ fn add(env: &Env, args: AddArgs) -> anyhow::Result<()> {
         .as_deref()
         .map(|text| parse_expiry(text, chrono::Utc::now()))
         .transpose()?;
-    let (file, scope) = write_target(env, args.general)?;
+    let (target, scope) = write_target(env, args.general)?;
     let agent = AgentCtx::from_env();
     let machine = match args.machine.as_deref() {
         Some(".") => Some(
@@ -479,9 +523,9 @@ fn add(env: &Env, args: AddArgs) -> anyhow::Result<()> {
     event.source = args.source;
     event.machine = machine;
     event.expires_at = expires_at;
-    file.append(&event)?;
+    target.file().append(&event)?;
     if args.json {
-        print_json(&event)?;
+        print_json(&sourced(&target, &event.memory_id, None)?)?;
     } else {
         println!("{}", event.memory_id);
     }
@@ -522,15 +566,15 @@ fn search(env: &Env, args: &SearchArgs) -> anyhow::Result<()> {
 }
 
 /// The current-scope ledger holding active memory `memory_id`.
-fn ledger_of(env: &Env, memory_id: &str) -> anyhow::Result<MemoryFile> {
+fn ledger_of(env: &Env, memory_id: &str) -> anyhow::Result<Source> {
     for source in current_sources(env)? {
-        let file = source.file();
-        if file
+        if source
+            .file()
             .active_memories()?
             .iter()
             .any(|memory| memory.memory_id == memory_id)
         {
-            return Ok(file);
+            return Ok(source);
         }
     }
     bail!("memory not found in the current scope (general + current repository): {memory_id}")
@@ -538,7 +582,7 @@ fn ledger_of(env: &Env, memory_id: &str) -> anyhow::Result<MemoryFile> {
 
 fn supersede(env: &Env, args: SupersedeArgs) -> anyhow::Result<()> {
     let content = read_text(args.text)?;
-    let file = ledger_of(env, &args.memory_id)?;
+    let target = ledger_of(env, &args.memory_id)?;
     let mut event = MemoryEvent::supersede(
         args.memory_id.clone(),
         content,
@@ -550,9 +594,9 @@ fn supersede(env: &Env, args: SupersedeArgs) -> anyhow::Result<()> {
         .as_deref()
         .map(|text| parse_expiry(text, chrono::Utc::now()))
         .transpose()?;
-    let event = file.append_edit(event, args.expected_revision)?;
+    target.file().append_edit(event, args.expected_revision)?;
     if args.json {
-        print_json(&event)?;
+        print_json(&sourced(&target, &args.memory_id, None)?)?;
     } else {
         println!("superseded {}", args.memory_id);
     }
@@ -560,12 +604,19 @@ fn supersede(env: &Env, args: SupersedeArgs) -> anyhow::Result<()> {
 }
 
 fn remove(env: &Env, args: &RmArgs) -> anyhow::Result<()> {
-    let file = ledger_of(env, &args.memory_id)?;
+    let target = ledger_of(env, &args.memory_id)?;
+    let before = target
+        .file()
+        .active_memories()?
+        .into_iter()
+        .find(|memory| memory.memory_id == args.memory_id);
     let mut event = MemoryEvent::deprecate(args.memory_id.clone(), &AgentCtx::from_env());
     event.reason.clone_from(&args.reason);
-    let event = file.append_edit(event, args.expected_revision)?;
+    target.file().append_edit(event, args.expected_revision)?;
     if args.json {
-        print_json(&event)?;
+        let mut removed = serde_json::to_value(sourced(&target, &args.memory_id, before)?)?;
+        removed["removed"] = true.into();
+        print_json(&removed)?;
     } else {
         println!("deprecated {}", args.memory_id);
     }
@@ -728,6 +779,50 @@ fn print_setup(report: &SetupReport) {
         for path in &report.unreadable {
             println!("  {}", path.display());
         }
+    }
+}
+
+fn preview(env: &Env, args: &PreviewArgs) -> anyhow::Result<()> {
+    let detected;
+    let checkout = match &args.cwd {
+        Some(dir) => {
+            detected = Checkout::detect(dir)?;
+            detected.as_ref()
+        }
+        None => env.checkout.as_ref(),
+    };
+    let mut sources = vec![Source::general(&env.store)];
+    let mut warnings = Vec::new();
+    if let Some(checkout) = checkout {
+        sources.push(Source::for_checkout(&env.store, checkout)?);
+        if checkout.needs_migration() {
+            warnings.push(format!(
+                "{} is not used yet; run `mmry setup` or `mmry migrate` in {}",
+                checkout.local_ledger().path().display(),
+                checkout.root.display()
+            ));
+        }
+    }
+    let machine = mmry_core::agent_ctx::current_machine(&AgentCtx::from_env());
+    let budget = mmry_core::preview::Budget {
+        max_tokens: args.max_tokens,
+        limit: args.limit,
+    };
+    let preview = mmry_core::preview::build(
+        &sources,
+        machine.as_deref(),
+        budget,
+        chrono::Utc::now(),
+        warnings,
+    )?;
+    if args.json {
+        print_json(&preview)
+    } else {
+        print!("{}", preview.rendered);
+        for warning in &preview.warnings {
+            eprintln!("mmry: warning: {warning}");
+        }
+        Ok(())
     }
 }
 

@@ -28,6 +28,15 @@ mmry doctor                       # state root, repository mode, pending migrati
 
 `list`/`search` read the current scope (general + current repository); `--general`, `--repo NAME` and `--all` select other scopes, `list --include-expired` shows expired entries. Output is wrapped and attributed for humans; `--plain` gives stable tab-separated records and `--json` structured output with `scope`, `repo`, `repo_path`, `revision` and `memory_id`.
 
+## Harness integration
+
+```bash
+mmry preview                      # exact text to inject at session start
+mmry preview --json --cwd DIR --max-tokens 1200 --limit 20
+```
+
+`preview --json` (schema: `examples/preview.schema.json`) returns the selected `entries`, the exact `rendered` bytes to inject, a `selection_hash`, `omitted`, withheld `contested` memories and `warnings` (e.g. a pending migration). Selection is deterministic: repository memories before general ones, newest first; expired, contested and other-machine memories are left out; the budget is estimated at 4 bytes per token. The rendered text contains dates, not relative ages, so the hash only changes when the ledgers do. `preview` never prompts or migrates. `add`, `supersede`, `rm`, `list` and `search` print entries in one schema (`examples/memory.schema.json`) with `--json`. Harnesses should use this CLI contract, never read ledger files.
+
 ## Storage
 
 By default memories live in a per-user central store (`state_root`, default `$XDG_STATE_HOME/mmry`, i.e. `~/.local/state/mmry`):

@@ -1,0 +1,188 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Preview",
+  "description": "Output of `mmry preview --json`.",
+  "type": "object",
+  "required": [
+    "contested",
+    "entries",
+    "estimated_tokens",
+    "omitted",
+    "rendered",
+    "schema_version",
+    "selection_hash",
+    "warnings"
+  ],
+  "properties": {
+    "contested": {
+      "description": "Contested memories, never injected; resolve with supersede/rm.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Withheld"
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PreviewEntry"
+      }
+    },
+    "estimated_tokens": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "machine": {
+      "description": "Machine used to filter machine-scoped memories.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "omitted": {
+      "description": "Eligible entries left out by the budget.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "rendered": {
+      "description": "Exact text to inject; empty when nothing is selected.",
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "selection_hash": {
+      "description": "Stable hash of the selection (ids, revisions) and `rendered`.",
+      "type": "string"
+    },
+    "warnings": {
+      "description": "Things the harness should surface (pending migration, damage).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "MemoryType": {
+      "type": "string",
+      "enum": [
+        "episodic",
+        "semantic",
+        "procedural"
+      ]
+    },
+    "PreviewEntry": {
+      "description": "One injected memory.",
+      "type": "object",
+      "required": [
+        "age_days",
+        "content",
+        "contested",
+        "memory_id",
+        "memory_type",
+        "origin",
+        "revision",
+        "scope",
+        "updated_at"
+      ],
+      "properties": {
+        "age_days": {
+          "description": "Whole days since `updated_at` (informational; not part of `rendered`).",
+          "type": "integer",
+          "format": "int64"
+        },
+        "content": {
+          "type": "string"
+        },
+        "contested": {
+          "description": "Always false for selected entries; contested ones are listed in [`Preview::contested`] instead.",
+          "type": "boolean"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "machine": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_id": {
+          "type": "string"
+        },
+        "memory_type": {
+          "$ref": "#/definitions/MemoryType"
+        },
+        "origin": {
+          "description": "`general` or the repository's directory name, as shown in `rendered`.",
+          "type": "string"
+        },
+        "repo_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scope": {
+          "$ref": "#/definitions/Scope"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Scope": {
+      "type": "string",
+      "enum": [
+        "general",
+        "repo"
+      ]
+    },
+    "Withheld": {
+      "description": "A contested memory that was withheld from injection.",
+      "type": "object",
+      "required": [
+        "content",
+        "memory_id",
+        "origin"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "memory_id": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
