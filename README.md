@@ -80,7 +80,9 @@ max_depth = 2
 
 ## File format
 
-Each line is a versioned event (`memory.add`, `memory.supersede`, `memory.deprecate`). Active memories are obtained by replaying events sorted by `(ts, id)`, so line order does not matter. A supersede keeps the memory id and increments its revision; `--expected-revision` rejects stale writers. Malformed lines are errors and are never silently skipped. Appends use an exclusive file lock and durable flush.
+Each line is a versioned event (`memory.add`, `memory.supersede`, `memory.deprecate`). Active memories are obtained by replaying events sorted by `(ts, id)`, so line order does not matter. A supersede keeps the memory id and increments its revision; `--expected-revision` rejects stale writers.
+
+Edits record the revision they were made against. When ledgers from two machines are merged and an edit turns out to be based on an older revision (both machines superseded the same version, or one removed a version the other changed), the memory is **contested**: it stays visible, is marked `CONTESTED` / `"contested": true`, is never injected automatically, and is listed by `mmry doctor`. A `supersede` or `rm` on the current revision resolves it. There is no last-writer-wins. Damaged lines (e.g. a truncated write) and one event id with two payloads are reported by `mmry doctor [--all] [--json]` instead of making the ledger unreadable. Ordering uses event timestamps, so large clock skew between machines can misorder edits. Malformed lines are errors and are never silently skipped. Appends use an exclusive file lock and durable flush.
 
 ## Legacy SQLite migration
 

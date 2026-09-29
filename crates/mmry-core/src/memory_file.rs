@@ -74,6 +74,11 @@ pub struct MemoryEvent {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Revision a supersede/deprecate was made against. Replay marks the
+    /// memory contested when this is older than the revision it meets
+    /// (concurrent edits merged from another machine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<u32>,
     #[serde(default)]
     pub metadata: Value,
     #[serde(default)]
@@ -103,6 +108,7 @@ impl MemoryEvent {
             machine: None,
             reason: None,
             expires_at: None,
+            base_revision: None,
             metadata: Value::Object(Map::default()),
             agent_ctx: agent.as_json(),
         }
@@ -164,8 +170,14 @@ pub struct MemoryEntry {
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// 1 on add, +1 per supersede. Used for optimistic concurrency.
+    /// 1 on add, +1 per supersede or deprecation attempt. Used for
+    /// optimistic concurrency.
     pub revision: u32,
+    /// Concurrent edits were merged (e.g. from two machines) and nobody has
+    /// resolved them yet with a supersede or rm on the current revision.
+    /// Contested memories are never injected automatically.
+    #[serde(default)]
+    pub contested: bool,
     /// Scope recorded on the add event (`general` / `repo:<stable-id>`).
     /// Named apart from the source `scope` label it is flattened next to.
     #[serde(rename = "recorded_scope", skip_serializing_if = "Option::is_none")]
@@ -246,13 +258,94 @@ impl MemoryFile {
         let mut file = self.open_for_append()?;
         file.lock_exclusive()?;
         let result = (|| {
-            check(&project(self.read_events()?))?;
+            check(&self.replay()?.entries)?;
             writeln!(file, "{}", serde_json::to_string(event)?)?;
             file.sync_data()?;
             Ok(())
         })();
         file.unlock()?;
         result
+    }
+
+    /// Append a supersede/deprecate of `event.target()` under the ledger
+    /// lock. The memory must be active (contested memories included) and at
+    /// `expected_revision` when given; the event records the revision it was
+    /// made against as `base_revision`.
+    pub fn append_edit(
+        &self,
+        mut event: MemoryEvent,
+        expected_revision: Option<u32>,
+    ) -> crate::Result<MemoryEvent> {
+        let mut file = self.open_for_append()?;
+        file.lock_exclusive()?;
+        let result = (|| {
+            let replay = self.replay()?;
+            let target = event.target().to_owned();
+            require_revision(&replay.entries, &target, expected_revision)?;
+            event.base_revision = replay
+                .entries
+                .iter()
+                .find(|entry| entry.memory_id == target)
+                .map(|entry| entry.revision);
+            writeln!(file, "{}", serde_json::to_string(&event)?)?;
+            file.sync_data()?;
+            Ok(event)
+        })();
+        file.unlock()?;
+        result
+    }
+
+    /// Replay tolerating damage: malformed lines and conflicting duplicate
+    /// event ids are reported as [`LedgerIssue`]s instead of failing, so one
+    /// truncated line synced from another machine does not hide everything.
+    pub fn replay(&self) -> crate::Result<Replay> {
+        let mut issues = Vec::new();
+        let mut by_id: HashMap<String, (Value, MemoryEvent)> = HashMap::new();
+        let mut conflicting = HashSet::new();
+        if self.path.exists() {
+            let reader = BufReader::new(OpenOptions::new().read(true).open(&self.path)?);
+            for (index, line) in reader.lines().enumerate() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let parsed = serde_json::from_str::<Value>(&line).and_then(|value| {
+                    serde_json::from_value::<MemoryEvent>(value.clone()).map(|e| (value, e))
+                });
+                let (value, event) = match parsed {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        issues.push(LedgerIssue::Malformed {
+                            line: index + 1,
+                            error: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                match by_id.get(&event.id) {
+                    None => {
+                        by_id.insert(event.id.clone(), (value, event));
+                    }
+                    Some((existing, _)) if *existing == value => {}
+                    Some((_, existing)) => {
+                        conflicting.insert(existing.target().to_owned());
+                        conflicting.insert(event.target().to_owned());
+                        issues.push(LedgerIssue::ConflictingEventId {
+                            event_id: event.id.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        let mut events: Vec<_> = by_id.into_values().map(|(_, event)| event).collect();
+        events.sort_by(|a, b| (a.ts, &a.id).cmp(&(b.ts, &b.id)));
+        let mut entries = project(events);
+        for entry in &mut entries {
+            if conflicting.contains(&entry.memory_id) {
+                entry.contested = true;
+            }
+        }
+        Ok(Replay { entries, issues })
     }
 
     /// Append raw, already-validated JSONL lines (used by migration to keep
@@ -302,9 +395,10 @@ impl MemoryFile {
         Ok(events)
     }
 
-    /// Active memories including expired ones, newest first.
+    /// Active memories including expired ones, newest first. Damaged lines
+    /// are skipped here; use [`MemoryFile::replay`] to see them.
     pub fn active_memories(&self) -> crate::Result<Vec<MemoryEntry>> {
-        Ok(project(self.read_events()?))
+        Ok(self.replay()?.entries)
     }
 
     /// Active, non-expired memories, newest first.
@@ -345,68 +439,126 @@ impl MemoryFile {
     }
 }
 
-/// Replay sorted events into the active set.
+/// Result of [`MemoryFile::replay`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Replay {
+    /// Active memories (expired included), newest first.
+    pub entries: Vec<MemoryEntry>,
+    pub issues: Vec<LedgerIssue>,
+}
+
+/// Damage found while replaying a ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LedgerIssue {
+    /// Unparseable line (e.g. truncated write); skipped.
+    Malformed { line: usize, error: String },
+    /// One event id with two different payloads; affected memories are
+    /// contested.
+    ConflictingEventId { event_id: String },
+}
+
+#[derive(Default)]
+struct Tracked {
+    entry: Option<MemoryEntry>,
+    active: bool,
+    revision: u32,
+    /// Deprecated before its add was seen (clock skew).
+    early_deprecation: bool,
+    contested: bool,
+}
+
+/// Replay sorted events into the active set, detecting concurrent edits.
 ///
-/// Deprecations and supersedes seen before their add (clock skew between
-/// devices) keep the memory inactive or are ignored respectively; conflict
-/// reporting is handled separately.
+/// Every supersede/deprecate advances the revision. An edit whose
+/// `base_revision` is older than the revision it meets was made without
+/// seeing an earlier edit (two machines, merged later): the memory becomes
+/// contested and stays visible. An edit made on the current revision
+/// resolves the contest. Deprecations seen before their add (clock skew)
+/// keep the memory inactive; supersedes before their add are ignored.
 pub(crate) fn project(events: Vec<MemoryEvent>) -> Vec<MemoryEntry> {
-    let mut active: HashMap<String, MemoryEntry> = HashMap::new();
-    let mut inactive = HashSet::new();
+    let mut memories: HashMap<String, Tracked> = HashMap::new();
     for event in events {
-        match event.event_type {
-            MemoryEventType::MemoryAdd => {
-                if inactive.contains(&event.memory_id) {
-                    continue;
-                }
-                if let (Some(content), Some(memory_type)) = (event.content, event.memory_type) {
-                    active.insert(
-                        event.memory_id.clone(),
-                        MemoryEntry {
-                            memory_id: event.memory_id,
-                            content,
-                            memory_type,
-                            tags: event.tags,
-                            created_at: event.ts,
-                            updated_at: event.ts,
-                            revision: 1,
-                            scope: event.scope,
-                            why: event.why,
-                            source: event.source,
-                            machine: event.machine,
-                            expires_at: event.expires_at,
-                            metadata: event.metadata,
-                            agent_ctx: event.agent_ctx,
-                        },
-                    );
-                }
+        let state = memories.entry(event.target().to_owned()).or_default();
+        if event.event_type == MemoryEventType::MemoryAdd {
+            let (Some(content), Some(memory_type)) = (event.content, event.memory_type) else {
+                continue;
+            };
+            if state.entry.is_some() {
+                // Two adds with one memory id.
+                state.contested = true;
+                continue;
             }
-            MemoryEventType::MemorySupersede if event.content.is_some() => {
-                if let Some(entry) = active.get_mut(event.target()) {
-                    if let Some(content) = event.content {
-                        entry.content = content;
-                    }
-                    if let Some(memory_type) = event.memory_type {
-                        entry.memory_type = memory_type;
-                    }
-                    if !event.tags.is_empty() {
-                        entry.tags = event.tags;
-                    }
-                    if event.expires_at.is_some() {
-                        entry.expires_at = event.expires_at;
-                    }
-                    entry.updated_at = event.ts;
-                    entry.revision += 1;
-                }
-            }
-            MemoryEventType::MemoryDeprecate | MemoryEventType::MemorySupersede => {
-                let id = event.target().to_owned();
-                active.remove(&id);
-                inactive.insert(id);
-            }
+            state.revision = 1;
+            state.active = !state.early_deprecation;
+            state.entry = Some(MemoryEntry {
+                memory_id: event.memory_id,
+                content,
+                memory_type,
+                tags: event.tags,
+                created_at: event.ts,
+                updated_at: event.ts,
+                revision: 1,
+                contested: false,
+                scope: event.scope,
+                why: event.why,
+                source: event.source,
+                machine: event.machine,
+                expires_at: event.expires_at,
+                metadata: event.metadata,
+                agent_ctx: event.agent_ctx,
+            });
+            continue;
         }
+        let deactivate =
+            event.event_type == MemoryEventType::MemoryDeprecate || event.content.is_none();
+        let Some(entry) = state.entry.as_mut() else {
+            state.early_deprecation |= deactivate;
+            continue;
+        };
+        let concurrent = event
+            .base_revision
+            .is_some_and(|base| base < state.revision);
+        state.revision += 1;
+        state.contested = concurrent;
+        if deactivate {
+            // A concurrent removal of a changed memory keeps it visible (contested).
+            if !(concurrent && state.active) {
+                state.active = false;
+            }
+            continue;
+        }
+        if !state.active {
+            if !concurrent {
+                continue;
+            }
+            // Concurrent supersede of a removed memory: resurrect, contested.
+            state.active = true;
+        }
+        if let Some(content) = event.content {
+            entry.content = content;
+        }
+        if let Some(memory_type) = event.memory_type {
+            entry.memory_type = memory_type;
+        }
+        if !event.tags.is_empty() {
+            entry.tags = event.tags;
+        }
+        if event.expires_at.is_some() {
+            entry.expires_at = event.expires_at;
+        }
+        entry.updated_at = event.ts;
     }
-    let mut values: Vec<_> = active.into_values().collect();
+    let mut values: Vec<_> = memories
+        .into_values()
+        .filter(|state| state.active)
+        .filter_map(|state| {
+            let mut entry = state.entry?;
+            entry.revision = state.revision;
+            entry.contested = state.contested;
+            Some(entry)
+        })
+        .collect();
     values.sort_by(|a, b| {
         b.updated_at
             .cmp(&a.updated_at)
@@ -668,5 +820,171 @@ mod tests {
         for bad in ["", "d", "0d", "-1d", "5m", "soon"] {
             assert!(parse_expiry(bad, now).is_err(), "{bad}");
         }
+    }
+
+    /// Two machines start from `base`, edit independently, then git's
+    /// `merge=union` keeps both sides' lines.
+    struct TwoClones {
+        _dir: tempfile::TempDir,
+        a: MemoryFile,
+        b: MemoryFile,
+    }
+
+    impl TwoClones {
+        fn new(setup: impl FnOnce(&MemoryFile)) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let a = MemoryFile::new(dir.path().join("a.jsonl"));
+            setup(&a);
+            a.touch().unwrap();
+            let b = MemoryFile::new(dir.path().join("b.jsonl"));
+            fs::copy(a.path(), b.path()).unwrap();
+            Self { _dir: dir, a, b }
+        }
+
+        fn merged(&self) -> MemoryFile {
+            let text_a = fs::read_to_string(self.a.path()).unwrap();
+            let mut merged = text_a.clone();
+            for line in fs::read_to_string(self.b.path()).unwrap().lines() {
+                if !text_a.lines().any(|existing| existing == line) {
+                    merged.push_str(line);
+                    merged.push('\n');
+                }
+            }
+            let path = self.a.path().with_file_name("merged.jsonl");
+            fs::write(&path, merged).unwrap();
+            MemoryFile::new(path)
+        }
+    }
+
+    fn edit(file: &MemoryFile, id: &str, text: Option<&str>) {
+        let agent = AgentCtx::default();
+        let event = text.map_or_else(
+            || MemoryEvent::deprecate(id.into(), &agent),
+            |text| MemoryEvent::supersede(id.into(), text.into(), "r".into(), &agent),
+        );
+        file.append_edit(event, None).unwrap();
+    }
+
+    fn contested(file: &MemoryFile) -> Vec<String> {
+        let mut ids: Vec<_> = file
+            .active_memories()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.contested)
+            .map(|entry| entry.memory_id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn only(file: &MemoryFile) -> MemoryEntry {
+        let mut entries = file.active_memories().unwrap();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        entries.remove(0)
+    }
+
+    #[test]
+    fn independent_adds_merge_without_contest() {
+        let clones = TwoClones::new(|_| {});
+        add(&clones.a, "from a");
+        add(&clones.b, "from b");
+        let merged = clones.merged();
+        assert_eq!(merged.active_memories().unwrap().len(), 2);
+        assert!(contested(&merged).is_empty());
+        assert!(merged.replay().unwrap().issues.is_empty());
+    }
+
+    #[test]
+    fn concurrent_supersedes_are_contested_until_resolved() {
+        let mut id = String::new();
+        let clones = TwoClones::new(|file| id = add(file, "v1").memory_id);
+        edit(&clones.a, &id, Some("v2 from a"));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        edit(&clones.b, &id, Some("v2 from b"));
+        let merged = clones.merged();
+        assert_eq!(contested(&merged), vec![id.clone()]);
+        let entry = only(&merged);
+        assert_eq!((entry.content.as_str(), entry.revision), ("v2 from b", 3));
+
+        // Resolving on the current revision clears the contest.
+        edit(&merged, &id, Some("v3 agreed"));
+        assert!(contested(&merged).is_empty());
+        assert_eq!(only(&merged).content, "v3 agreed");
+    }
+
+    #[test]
+    fn sequential_edits_after_sync_are_not_contested() {
+        let mut id = String::new();
+        let clones = TwoClones::new(|file| id = add(file, "v1").memory_id);
+        edit(&clones.a, &id, Some("v2"));
+        // b pulls a's edit before editing.
+        fs::copy(clones.a.path(), clones.b.path()).unwrap();
+        edit(&clones.b, &id, Some("v3"));
+        let merged = clones.merged();
+        assert!(contested(&merged).is_empty());
+        assert_eq!(only(&merged).revision, 3);
+    }
+
+    #[test]
+    fn removing_a_concurrently_changed_memory_keeps_it_contested() {
+        let mut id = String::new();
+        let clones = TwoClones::new(|file| id = add(file, "v1").memory_id);
+        edit(&clones.a, &id, Some("v2 from a"));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        edit(&clones.b, &id, None);
+        let merged = clones.merged();
+        assert_eq!(contested(&merged), vec![id.clone()]);
+        assert_eq!(only(&merged).content, "v2 from a");
+        edit(&merged, &id, None);
+        assert!(merged.active_memories().unwrap().is_empty());
+    }
+
+    #[test]
+    fn superseding_a_concurrently_removed_memory_resurrects_it_contested() {
+        let mut id = String::new();
+        let clones = TwoClones::new(|file| id = add(file, "v1").memory_id);
+        edit(&clones.a, &id, None);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        edit(&clones.b, &id, Some("v2 from b"));
+        let merged = clones.merged();
+        assert_eq!(contested(&merged), vec![id]);
+        assert_eq!(only(&merged).content, "v2 from b");
+    }
+
+    #[test]
+    fn conflicting_duplicate_event_id_is_reported_and_contested() {
+        let clones = TwoClones::new(|_| {});
+        let original = add(&clones.a, "same id, text a");
+        let mut forged = original.clone();
+        forged.content = Some("same id, text b".into());
+        clones.b.append(&forged).unwrap();
+        let merged = clones.merged();
+        let replay = merged.replay().unwrap();
+        assert_eq!(
+            replay.issues,
+            vec![LedgerIssue::ConflictingEventId {
+                event_id: original.id
+            }]
+        );
+        assert_eq!(contested(&merged), vec![original.memory_id]);
+    }
+
+    #[test]
+    fn truncated_trailing_line_is_reported_not_fatal() {
+        let (_dir, file) = ledger();
+        add(&file, "survives");
+        let mut text = fs::read_to_string(file.path()).unwrap();
+        text.push_str("{\"schema_version\":1,\"id\":\"evt_tr");
+        fs::write(file.path(), text).unwrap();
+        let replay = file.replay().unwrap();
+        assert_eq!(replay.entries.len(), 1);
+        assert!(matches!(
+            replay.issues.as_slice(),
+            [LedgerIssue::Malformed { line: 2, .. }]
+        ));
+        assert!(
+            file.read_events().is_err(),
+            "strict reads still refuse damage"
+        );
     }
 }

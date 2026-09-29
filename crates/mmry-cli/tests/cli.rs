@@ -264,6 +264,50 @@ fn machine_dot_uses_agent_ctx_machine_id_and_provenance_is_recorded() {
 }
 
 #[test]
+fn doctor_reports_contested_memories_and_damage() {
+    let sb = Sandbox::new("");
+    let app = sb.repo("app");
+    let added = sb.json(&app, &["add", "v1", "--json"]);
+    let id = added["memory_id"].as_str().unwrap();
+    sb.ok(&app, &["supersede", id, "v2 here", "--reason", "r"]);
+    assert!(
+        sb.json(&app, &["doctor", "--json"])["healthy"]
+            .as_bool()
+            .unwrap()
+    );
+
+    // Another machine superseded revision 1 concurrently; the sync merged it.
+    let ledger = sb.central("app");
+    let text = fs::read_to_string(&ledger).unwrap();
+    let mut other: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    other["id"] = "evt_other_machine".into();
+    other["content"] = "v2 there".into();
+    // Same timestamp; the id sorts after the local edit ("evt_o" > "evt_<hex>").
+    fs::write(&ledger, format!("{text}{other}\n{{\"truncated\n")).unwrap();
+
+    let doctor = sb.json(&app, &["doctor", "--json"]);
+    assert_eq!(doctor["healthy"], false);
+    let repo = &doctor["ledgers"][1];
+    assert_eq!(repo["contested"], serde_json::json!([id]));
+    assert_eq!(repo["issues"][0]["kind"], "malformed");
+    assert!(!sb.run(&app, &["doctor"]).status.success());
+
+    let listed = sb.json(&app, &["list", "--json"]);
+    assert_eq!(
+        (
+            listed[0]["contested"].as_bool(),
+            listed[0]["content"].as_str()
+        ),
+        (Some(true), Some("v2 there"))
+    );
+    assert!(sb.ok(&app, &["list"]).contains("CONTESTED"));
+
+    sb.ok(&app, &["supersede", id, "v3 agreed", "--reason", "merge"]);
+    let listed = sb.json(&app, &["list", "--json"]);
+    assert_eq!(listed[0]["contested"], false);
+}
+
+#[test]
 fn expired_memories_are_hidden_unless_requested() {
     let sb = Sandbox::new("");
     let app = sb.repo("app");

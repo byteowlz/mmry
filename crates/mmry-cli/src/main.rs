@@ -14,7 +14,6 @@ use mmry_core::MemoryType;
 use mmry_core::config::Config;
 use mmry_core::config::MigrateMode;
 use mmry_core::memory_file::parse_expiry;
-use mmry_core::memory_file::require_revision;
 use mmry_core::repos::Source;
 use mmry_core::repos::SourcedHit;
 use mmry_core::repos::SourcedMemory;
@@ -75,7 +74,7 @@ enum Command {
     /// Move repo-local .mmry/mmry.jsonl ledgers into the central store.
     Migrate(MigrateArgs),
     /// Show store, repository mode, and ledger health.
-    Doctor,
+    Doctor(DoctorArgs),
     /// List known ledgers (general, central repos, tracked repos under roots).
     Repos {
         #[arg(long)]
@@ -209,6 +208,15 @@ struct MigrateArgs {
 }
 
 #[derive(Args)]
+struct DoctorArgs {
+    /// Check every known ledger, not just the current scope.
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
 struct SetupArgs {
     /// Directories to scan for .mmry ledgers (default: home). Configured roots are always included.
     #[arg(long, value_name = "PATH")]
@@ -258,7 +266,7 @@ fn main() -> anyhow::Result<()> {
     };
     if !matches!(
         cli.command,
-        Command::Migrate(_) | Command::Setup(_) | Command::Doctor | Command::Repos { .. }
+        Command::Migrate(_) | Command::Setup(_) | Command::Doctor(_) | Command::Repos { .. }
     ) {
         auto_migrate(&env)?;
     }
@@ -271,7 +279,7 @@ fn main() -> anyhow::Result<()> {
         Command::Supersede(args) => supersede(&env, args),
         Command::Rm(args) => remove(&env, &args),
         Command::Migrate(args) => migrate(&env, &args),
-        Command::Doctor => doctor(&env),
+        Command::Doctor(args) => doctor(&env, &args),
         Command::Repos { json } => show_repos(&env, json),
     }
 }
@@ -542,9 +550,7 @@ fn supersede(env: &Env, args: SupersedeArgs) -> anyhow::Result<()> {
         .as_deref()
         .map(|text| parse_expiry(text, chrono::Utc::now()))
         .transpose()?;
-    file.append_checked(&event, |active| {
-        require_revision(active, &args.memory_id, args.expected_revision)
-    })?;
+    let event = file.append_edit(event, args.expected_revision)?;
     if args.json {
         print_json(&event)?;
     } else {
@@ -557,9 +563,7 @@ fn remove(env: &Env, args: &RmArgs) -> anyhow::Result<()> {
     let file = ledger_of(env, &args.memory_id)?;
     let mut event = MemoryEvent::deprecate(args.memory_id.clone(), &AgentCtx::from_env());
     event.reason.clone_from(&args.reason);
-    file.append_checked(&event, |active| {
-        require_revision(active, &args.memory_id, args.expected_revision)
-    })?;
+    let event = file.append_edit(event, args.expected_revision)?;
     if args.json {
         print_json(&event)?;
     } else {
@@ -727,47 +731,129 @@ fn print_setup(report: &SetupReport) {
     }
 }
 
-fn doctor(env: &Env) -> anyhow::Result<()> {
-    println!("state root: {}", env.store.root().display());
-    report_ledger("general", &env.store.general())?;
-    match &env.checkout {
+#[derive(Serialize)]
+struct DoctorReport {
+    state_root: PathBuf,
+    config: PathBuf,
+    migrate: &'static str,
+    repository: Option<RepositoryStatus>,
+    ledgers: Vec<LedgerStatus>,
+    /// True when every ledger is readable and nothing is contested.
+    healthy: bool,
+}
+
+#[derive(Serialize)]
+struct RepositoryStatus {
+    root: PathBuf,
+    identity: String,
+    mode: String,
+    pending_migration: Option<PathBuf>,
+}
+
+#[derive(Serialize)]
+struct LedgerStatus {
+    scope: repos::Scope,
+    name: String,
+    path: PathBuf,
+    exists: bool,
+    active: usize,
+    contested: Vec<String>,
+    issues: Vec<mmry_core::memory_file::LedgerIssue>,
+}
+
+fn doctor(env: &Env, args: &DoctorArgs) -> anyhow::Result<()> {
+    let sources = if args.all {
+        repos::all_sources(&env.store, &env.config.roots)?
+    } else {
+        current_sources(env)?
+    };
+    let mut ledgers = Vec::new();
+    for source in &sources {
+        let file = source.file();
+        let replay = file.replay()?;
+        ledgers.push(LedgerStatus {
+            scope: source.scope,
+            name: source.name.clone(),
+            path: source.ledger.clone(),
+            exists: file.exists(),
+            active: replay.entries.len(),
+            contested: replay
+                .entries
+                .iter()
+                .filter(|entry| entry.contested)
+                .map(|entry| entry.memory_id.clone())
+                .collect(),
+            issues: replay.issues,
+        });
+    }
+    let repository = env.checkout.as_ref().map(|checkout| RepositoryStatus {
+        root: checkout.root.clone(),
+        identity: checkout.identity.clone(),
+        mode: match checkout.tracked() {
+            Some(store::TrackedReason::Marker) => "tracked (.mmry/tracked)".into(),
+            Some(store::TrackedReason::GitTracked) => "tracked (ledger committed to git)".into(),
+            None => "central".into(),
+        },
+        pending_migration: checkout
+            .needs_migration()
+            .then(|| checkout.local_ledger().path().to_path_buf()),
+    });
+    let healthy = ledgers
+        .iter()
+        .all(|ledger| ledger.contested.is_empty() && ledger.issues.is_empty());
+    let report = DoctorReport {
+        state_root: env.store.root().to_path_buf(),
+        config: env.config_path.clone(),
+        migrate: env.config.migrate.as_str(),
+        repository,
+        ledgers,
+        healthy,
+    };
+    if args.json {
+        return print_json(&report);
+    }
+    println!("state root: {}", report.state_root.display());
+    println!(
+        "config: {} (migrate = {})",
+        report.config.display(),
+        report.migrate
+    );
+    match &report.repository {
         None => println!("repository: none (outside any repository)"),
-        Some(checkout) => {
-            println!(
-                "repository: {} ({})",
-                checkout.root.display(),
-                checkout.identity
-            );
-            let source = Source::for_checkout(&env.store, checkout)?;
-            match checkout.tracked() {
-                Some(reason) => println!("mode: tracked ({})", serde_json::to_value(reason)?),
-                None => println!("mode: central ({})", source.name),
-            }
-            report_ledger("repo", &source.file())?;
-            if checkout.needs_migration() {
+        Some(repo) => {
+            println!("repository: {} ({})", repo.root.display(), repo.identity);
+            println!("mode: {}", repo.mode);
+            if let Some(path) = &repo.pending_migration {
                 println!(
-                    "pending migration: {} (run `mmry migrate`)",
-                    checkout.local_ledger().path().display()
+                    "pending migration: {} (run `mmry setup` or `mmry migrate`)",
+                    path.display()
                 );
             }
         }
     }
-    println!("migrate: {}", env.config.migrate.as_str());
-    println!("configured roots: {}", env.config.roots.len());
-    Ok(())
-}
-
-fn report_ledger(label: &str, file: &MemoryFile) -> anyhow::Result<()> {
-    if !file.exists() {
-        println!("{label} ledger: {} (missing)", file.path().display());
-        return Ok(());
+    for ledger in &report.ledgers {
+        let state = if ledger.exists { "" } else { " (missing)" };
+        println!(
+            "{} ledger {}: {}{state}, {} active",
+            ledger.name,
+            ledger.path.display(),
+            if ledger.issues.is_empty() {
+                "valid"
+            } else {
+                "DAMAGED"
+            },
+            ledger.active
+        );
+        for issue in &ledger.issues {
+            println!("  issue: {}", serde_json::to_string(issue)?);
+        }
+        for id in &ledger.contested {
+            println!("  contested: {id} (resolve with `mmry supersede` or `mmry rm`)");
+        }
     }
-    let events = file.read_events()?;
-    println!(
-        "{label} ledger: {} ({} events, valid)",
-        file.path().display(),
-        events.len()
-    );
+    if !report.healthy {
+        bail!("problems found");
+    }
     Ok(())
 }
 
@@ -849,9 +935,14 @@ fn write_human_memory(
         MemoryType::Procedural => "procedural",
     };
     let score = score.map_or_else(String::new, |value| format!("  ·  score {value}"));
+    let contested = if memory.contested {
+        "  ·  CONTESTED (resolve with `mmry supersede` or `mmry rm`)"
+    } else {
+        ""
+    };
     writeln!(
         output,
-        "{repo}  ·  {}  ·  {kind}{score}",
+        "{repo}  ·  {}  ·  {kind}{score}{contested}",
         memory.updated_at.format("%Y-%m-%d %H:%M UTC")
     )?;
     match repo_path {
@@ -969,6 +1060,7 @@ mod tests {
                 created_at: timestamp,
                 updated_at: timestamp,
                 revision: 1,
+                contested: false,
                 scope: None,
                 why: Some("sandbox differs".into()),
                 source: None,
