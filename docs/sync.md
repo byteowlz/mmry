@@ -1,0 +1,20 @@
+# Syncing between machines
+
+Opt-in: the state root becomes a git repository with a remote you choose. Authentication is whatever git already uses (ssh keys, credential helpers); mmry never prompts or stores credentials.
+
+```bash
+mmry sync init --remote git@github.com:you/mmry-state.git   # also merges an existing remote
+mmry sync                          # commit, pull, push
+mmry sync status [--json]          # remote, pending commits, last pull/push, last error
+mmry sync pull | push
+```
+
+```toml
+[sync]
+auto_pull = true      # at session start (mmry preview)
+auto_commit = true    # after every write
+auto_push = true      # after an automatic commit
+timeout_secs = 10
+```
+
+Ledgers merge with `merge=union` (written to `.gitattributes`): events are append-only lines with unique ids, so keeping both sides is correct, and concurrent edits of one memory show up as contested. `local/` (checkout paths, sync status) is never synced. Offline or rejected pushes keep everything committed locally and report pending commits; a rejected push pulls once and retries. mmry never force-pushes or resets; a conflict outside the ledgers aborts the merge and is reported. Use a private remote: memories, `why`, sources and provenance (`agent_ctx`) are all in there, and `mmry rm` does not erase history.

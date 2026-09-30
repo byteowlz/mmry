@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.14.0
+
+Breaking: memories move from repo-local `.mmry/mmry.jsonl` to a per-user central store. Run `mmry setup --dry-run`, then `mmry setup`. Until then repo-local ledgers are not read (`migrate = "prompt"` asks once on a terminal, otherwise warns).
+
+### Added
+
+- Central store (`~/.local/state/mmry`) with `general/` and one `repos/<name>--<id>/` ledger per repository, identified by git root commit; `mmry init --tracked` keeps a repo-local ledger.
+- `mmry setup` and `mmry migrate` (verified merge by event id, backup of the old file); `MMRY_STATE_ROOT`/`MMRY_MIGRATE` and `--state-root`/`--migrate`.
+- `mmry supersede` with `--expected-revision`; `--expires`, `--why`, `--source`, `--machine` (`.` = this machine) on `add`.
+- Contested memories for concurrent edits from two machines; `mmry doctor [--all] [--json]` reports them and damaged lines.
+- `mmry preview [--json]`: deterministic session-start selection and the exact text to inject; published schemas in `examples/`.
+- `mmry sync init|status|pull|push`: opt-in git sync of the store, with optional `[sync]` auto pull/commit/push.
+- `mmry cleanup propose|apply`: reviewed removal of duplicates, near-duplicates and expired memories.
+- AGENT_CTX v2 provenance fields are recorded with each event.
+
+### Changed
+
+- `add`, `supersede` and `rm` print the stored entry with `--json`.
+- The repository now follows the byteowlz repository standard (`just check-all`, strict clippy, schema generation).
+
 ## 0.12.0
 
 ### Changed

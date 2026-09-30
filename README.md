@@ -35,73 +35,26 @@ mmry preview                      # exact text to inject at session start
 mmry preview --json --cwd DIR --max-tokens 1200 --limit 20
 ```
 
-`preview --json` (schema: `examples/preview.schema.json`) returns the selected `entries`, the exact `rendered` bytes to inject, a `selection_hash`, `omitted`, withheld `contested` memories and `warnings` (e.g. a pending migration). Selection is deterministic: repository memories before general ones, newest first; expired, contested and other-machine memories are left out; the budget is estimated at 4 bytes per token. The rendered text contains dates, not relative ages, so the hash only changes when the ledgers do. `preview` never prompts or migrates. `add`, `supersede`, `rm`, `list` and `search` print entries in one schema (`examples/memory.schema.json`) with `--json`. Harnesses should use this CLI contract, never read ledger files.
+`preview --json` returns the selected entries, the exact `rendered` text and a `selection_hash` (schema: `examples/preview.schema.json`). It never prompts or migrates; contested, expired and other-machine memories are left out. Mutating commands print one entry schema with `--json` (`examples/memory.schema.json`). Harnesses should use this CLI contract, never the ledger files. [pi-mmry](https://github.com/byteowlz/pi-agent-extensions/tree/main/pi-mmry) is the Pi extension built on it. Details: [docs/ledger.md](docs/ledger.md).
 
 ## Storage
 
-By default memories live in a per-user central store (`state_root`, default `$XDG_STATE_HOME/mmry`, i.e. `~/.local/state/mmry`):
+Memories live in a per-user central store, by default `~/.local/state/mmry` (`$XDG_STATE_HOME/mmry`): `general/` for memories that apply everywhere and one `repos/<name>--<id>/` ledger per repository, identified by its git root commit so clones and worktrees share it. `mmry init --tracked` instead keeps a repository's ledger in `.mmry/mmry.jsonl` to commit with it.
 
-```text
-general/mmry.jsonl              personal memories that apply everywhere
-repos/<name>--<id>/mmry.jsonl   one ledger per repository
-repos/<name>--<id>/repo.json    identity (git root commit, else path) + name; never rewritten
-local/checkouts.json            this machine's checkout paths (not synced)
-```
-
-Repositories are identified by their git root commit, not their directory: clones and worktrees share a ledger, while `~/work/app` and `~/byteowlz/app` from unrelated histories get different `app--<id>` directories. The `<id>` comes from the identity, so every machine picks the same directory name. If two machines checked out one repository under different names, the directories are merged by event id on next use. Repositories without git fall back to their path, which is machine-specific.
-
-A repository is in exactly one mode:
-
-- **central** (default): `mmry init` registers it; nothing is written into the repository.
-- **tracked**: `mmry init --tracked` keeps the ledger in `.mmry/mmry.jsonl` to commit with the repository. A ledger already committed to git is treated as tracked too.
-
-### Switching to the central store
+Existing `.mmry` ledgers are not read until you migrate them:
 
 ```bash
-mmry setup --dry-run              # scan home (+ [[roots]]) for .mmry ledgers and show the plan
-mmry setup                        # confirm, migrate them all, set migrate = "auto" in the config
-mmry setup --scan ~/work --scan /data --depth 8
+mmry setup --dry-run              # find .mmry ledgers under home (+ [[roots]]) and show the plan
+mmry setup                        # confirm, migrate them all, set migrate = "auto"
 ```
 
-Until you decide, an untracked `.mmry/mmry.jsonl` is not read (`migrate = "prompt"`, the default: ask once on a terminal, otherwise warn and continue). `"auto"` migrates on first use, `"off"` only warns. The config file is only edited by `mmry setup`, keeping its comments. Per repository:
+Migration merges by event id, verifies the result and keeps the old file as a backup. Layout, repository identity, per-repository migration and the legacy SQLite importer: [docs/storage.md](docs/storage.md).
 
-```bash
-mmry migrate --dry-run            # current repository; --all for every repo under [[roots]]
-mmry migrate --untrack            # also move a git-committed ledger (leaves `git rm --cached` uncommitted)
-```
+## Sync and cleanup
 
-Events are merged by id (re-running is a no-op), the central ledger is verified to contain every active local memory, and only then is the local file renamed to `.mmry/mmry.jsonl.migrated-<timestamp>` (kept as backup) with a `.mmry/MIGRATED` note. An event id present in both ledgers with different content aborts the migration with nothing moved.
+`mmry sync init --remote URL` makes the store a git repository you sync with `mmry sync` (opt-in; optional auto pull/commit/push in `[sync]`). Use a private remote: history keeps removed memories. Concurrent edits from two machines are marked contested instead of silently overwritten. See [docs/sync.md](docs/sync.md).
 
-## Cleanup
-
-```bash
-mmry cleanup propose [--json] [--all|--repo NAME|--general]   # never writes
-mmry cleanup apply prop_<id> [...] [--dry-run]
-mmry cleanup apply --file proposals.json                         # from a cleanup agent; '-' for stdin
-```
-
-Built-in proposals are deterministic and model-free: exact duplicates (e.g. the same fact recorded on two machines), near-duplicates (token similarity >= 0.8; review both texts) and expired entries. Other tools, such as an agent or a model you chose, can write proposals in the same schema (`examples/cleanup.schema.json`; `id` may be empty). mmry sends nothing anywhere. Applying records ordinary supersede/deprecate events with the proposal as reason, and refuses when the memory changed since the proposal.
-
-## Syncing between machines
-
-Opt-in: the state root becomes a git repository with a remote you choose. Authentication is whatever git already uses (ssh keys, credential helpers); mmry never prompts or stores credentials.
-
-```bash
-mmry sync init --remote git@github.com:you/mmry-state.git   # also merges an existing remote
-mmry sync                          # commit, pull, push
-mmry sync status [--json]          # remote, pending commits, last pull/push, last error
-mmry sync pull | push
-```
-
-```toml
-[sync]
-auto_pull = true      # at session start (mmry preview)
-auto_commit = true    # after every write
-auto_push = true      # after an automatic commit
-timeout_secs = 10
-```
-
-Ledgers merge with `merge=union` (written to `.gitattributes`): events are append-only lines with unique ids, so keeping both sides is correct, and concurrent edits of one memory show up as contested. `local/` (checkout paths, sync status) is never synced. Offline or rejected pushes keep everything committed locally and report pending commits; a rejected push pulls once and retries. mmry never force-pushes or resets; a conflict outside the ledgers aborts the merge and is reported. Use a private remote: memories, `why`, sources and provenance (`agent_ctx`) are all in there, and `mmry rm` does not erase history.
+`mmry cleanup propose` lists duplicates, near-duplicates and expired memories without writing; `mmry cleanup apply <id>` applies the ones you choose. No model is called.
 
 ## Configuration
 
@@ -118,24 +71,11 @@ max_depth = 2
 
 `mmry repos` lists every known ledger. Discovery never searches the home directory unless configured, skips dependency/build/cache trees and does not follow symlinks.
 
-## File format
+## Limitations
 
-Each line is a versioned event (`memory.add`, `memory.supersede`, `memory.deprecate`). Active memories are obtained by replaying events sorted by `(ts, id)`, so line order does not matter. A supersede keeps the memory id and increments its revision; `--expected-revision` rejects stale writers.
-
-Edits record the revision they were made against. When ledgers from two machines are merged and an edit turns out to be based on an older revision (both machines superseded the same version, or one removed a version the other changed), the memory is **contested**: it stays visible, is marked `CONTESTED` / `"contested": true`, is never injected automatically, and is listed by `mmry doctor`. A `supersede` or `rm` on the current revision resolves it. There is no last-writer-wins. Damaged lines (e.g. a truncated write) and one event id with two payloads are reported by `mmry doctor [--all] [--json]` instead of making the ledger unreadable. Ordering uses event timestamps, so large clock skew between machines can misorder edits. Malformed lines are errors and are never silently skipped. Appends use an exclusive file lock and durable flush.
-
-## Legacy SQLite migration
-
-Back up both the database and target ledger first:
-
-```bash
-cp legacy.db legacy.db.backup
-cp .mmry/mmry.jsonl .mmry/mmry.jsonl.backup 2>/dev/null || true
-scripts/migrate_legacy_mmry_to_jsonl.py legacy.db --dry-run
-scripts/migrate_legacy_mmry_to_jsonl.py legacy.db -o .mmry/mmry.jsonl
-```
-
-The migration reports fields that cannot be represented before writing. It exports every active supported memory by default and refuses unsupported schemas rather than silently dropping records. Restore the two backup files to roll back. The migration helper is transitional and is scheduled for removal in the next major release.
+- Ordering uses event timestamps; large clock skew between machines can misorder edits.
+- Search is plain text matching, not semantic.
+- Repositories without git are identified by path, so their memories do not follow them to other machines.
 
 ## Development
 

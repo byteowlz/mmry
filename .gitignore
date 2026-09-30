@@ -23,7 +23,6 @@ __pycache__/
 build/
 dist/
 wheels/
-docs/
 
 # bv (beads viewer) local config and caches
 .bv/
