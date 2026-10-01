@@ -17,6 +17,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read as _;
 use std::path::Path;
@@ -256,6 +257,24 @@ impl Sync {
         Ok(())
     }
 
+    /// Unmerged paths missing on one side (modify/delete conflicts).
+    fn one_sided_conflicts(&self) -> crate::Result<Vec<String>> {
+        let mut stages: BTreeMap<String, Vec<char>> = BTreeMap::new();
+        for line in self.git_ok(&["ls-files", "-u", "-z"])?.split('\0') {
+            // "<mode> <object> <stage>\t<path>"
+            if let Some((meta, path)) = line.split_once('\t')
+                && let Some(stage) = meta.chars().last()
+            {
+                stages.entry(path.to_owned()).or_default().push(stage);
+            }
+        }
+        Ok(stages
+            .into_iter()
+            .filter(|(_, stages)| !(stages.contains(&'2') && stages.contains(&'3')))
+            .map(|(path, _)| path)
+            .collect())
+    }
+
     fn commit_staged(&self, message: &str) -> crate::Result<()> {
         let identity_known = self.git(&["config", "user.email"])?.ok;
         let mut args = vec!["-c", "commit.gpgsign=false"];
@@ -345,17 +364,31 @@ impl Sync {
             .git_ok(&["diff", "--name-only", "--diff-filter=U", "-z"])
             .map_err(|error| error.to_string())?;
         let conflicts: Vec<&str> = conflicts.split('\0').filter(|p| !p.is_empty()).collect();
-        // Resolvable: machine-local files (drop them) and the rule files mmry
-        // owns (write the current version). Anything else aborts.
+        // Resolvable: machine-local files (drop them), the rule files mmry
+        // owns (write the current version) and synced files one side deleted
+        // while the other changed them (keep them: a duplicate directory merged
+        // on one machine while the other still wrote to it; the next register
+        // merges it again). Anything else aborts.
         let rules = [(".gitattributes", GITATTRIBUTES), (".gitignore", GITIGNORE)];
-        let (owned, local): (Vec<&str>, Vec<&str>) = conflicts
+        let deleted_on_one_side = self
+            .one_sided_conflicts()
+            .map_err(|error| error.to_string())?;
+        let (owned, rest): (Vec<&str>, Vec<&str>) = conflicts
             .iter()
             .partition(|p| rules.iter().any(|(name, _)| name == *p));
+        let (keep, local): (Vec<&str>, Vec<&str>) = rest
+            .into_iter()
+            .partition(|p| synced(p) && deleted_on_one_side.iter().any(|d| d == p));
         if !conflicts.is_empty() && local.iter().all(|p| foreign.iter().any(|f| f == p)) {
             let resolved = (|| -> crate::Result<()> {
                 for (name, content) in rules.iter().filter(|(name, _)| owned.contains(name)) {
                     fs::write(self.root.join(name), content)?;
                     self.git_ok(&["add", "--", name])?;
+                }
+                if !keep.is_empty() {
+                    let mut args = vec!["add", "--"];
+                    args.extend(&keep);
+                    self.git_ok(&args)?;
                 }
                 if !local.is_empty() {
                     let mut args = vec!["rm", "-q", "-f", "--"];
@@ -564,6 +597,7 @@ mod tests {
     use super::*;
     use crate::AgentCtx;
     use crate::MemoryEvent;
+    use crate::MemoryFile;
     use crate::MemoryType;
     use crate::store::Store;
     use std::collections::HashMap;
@@ -743,6 +777,52 @@ mod tests {
             );
         }
         assert!(m.a.0.root().join("stores/legacy.db").exists());
+    }
+
+    #[test]
+    fn ledger_deleted_here_but_appended_there_is_kept() {
+        let m = machines();
+        let url = m.remote.to_str().unwrap();
+        let dup = |store: &Store| {
+            let dir = store.root().join("repos/oqto--abc");
+            fs::create_dir_all(&dir).unwrap();
+            MemoryFile::new(dir.join("mmry.jsonl"))
+        };
+        let first = MemoryEvent::add(
+            "x".into(),
+            MemoryType::Semantic,
+            Vec::new(),
+            &AgentCtx::default(),
+        );
+        dup(&m.a.0).append(&first).unwrap();
+        m.a.1.init(Some(url)).unwrap();
+        m.b.1.init(Some(url)).unwrap();
+        // a merged the duplicate away; b, not yet pulled, appended to it.
+        fs::remove_dir_all(m.a.0.root().join("repos/oqto--abc")).unwrap();
+        assert_eq!(m.a.1.sync().unwrap().error, None);
+        let late = MemoryEvent::add(
+            "late".into(),
+            MemoryType::Semantic,
+            Vec::new(),
+            &AgentCtx::default(),
+        );
+        dup(&m.b.0).append(&late).unwrap();
+
+        assert_eq!(m.b.1.sync().unwrap().error, None);
+        assert_eq!(m.a.1.sync().unwrap().error, None);
+        for store in [&m.a.0, &m.b.0] {
+            let mut ids: Vec<_> = dup(store)
+                .replay()
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|e| e.memory_id)
+                .collect();
+            ids.sort();
+            let mut expected = vec![first.memory_id.clone(), late.memory_id.clone()];
+            expected.sort();
+            assert_eq!(ids, expected);
+        }
     }
 
     #[test]

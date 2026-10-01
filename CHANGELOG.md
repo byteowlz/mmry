@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - `mmry sync` no longer gets stuck on machine-local files committed by 0.14.0 (e.g. `service.pid`/`service.port` left by the removed daemon): they are untracked on the next sync, add/add conflicts in them and in `.gitignore` are resolved, and local copies are kept.
+- A ledger one machine removed (duplicate directory merged) while another still appended to it no longer blocks sync: the changed file is kept and merged again on the next write.
 
 ## 0.14.0
 
