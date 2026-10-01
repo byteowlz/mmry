@@ -23,7 +23,7 @@ mmry list                         # general + current repository (alias: ls)
 mmry search "fmt"
 mmry supersede mem_<id> "Run just fmt && just lint" --reason "lint added" --expected-revision 1
 mmry rm mem_<id> --reason obsolete
-mmry doctor                       # state root, repository mode, pending migration
+mmry doctor                       # store, repository mode, pending migration
 ```
 
 `list`/`search` read the current scope (general + current repository); `--general`, `--repo NAME` and `--all` select other scopes, `list --include-expired` shows expired entries. Output is wrapped and attributed for humans; `--plain` gives stable tab-separated records and `--json` structured output with `scope`, `repo`, `repo_path`, `revision` and `memory_id`.
@@ -58,10 +58,10 @@ Migration merges by event id, verifies the result and keeps the old file as a ba
 
 ## Configuration
 
-Precedence: `--state-root`/`--migrate` flags, then `MMRY_STATE_ROOT`/`MMRY_MIGRATE`, then the config file. There is deliberately no repo-local config. The file is `$XDG_CONFIG_HOME/mmry/config.toml` (default `~/.config/mmry/config.toml`). A commented default is created on first run; `--config PATH` or `MMRY_CONFIG` selects another file, which must exist. See `examples/config.toml`:
+Precedence: `--store-root`/`--migrate` flags, then `MMRY_STORE_ROOT`/`MMRY_MIGRATE`, then the config file. There is deliberately no repo-local config. The file is `$XDG_CONFIG_HOME/mmry/config.toml` (default `~/.config/mmry/config.toml`). A commented default is created on first run; `--config PATH` or `MMRY_CONFIG` selects another file, which must exist. See `examples/config.toml`:
 
 ```toml
-# state_root = "~/.local/share/mmry"
+# store_root = "~/.local/share/mmry"
 # migrate = "prompt"
 
 [[roots]]            # where `--all`, `--repo` and `migrate --all` look for tracked/legacy ledgers

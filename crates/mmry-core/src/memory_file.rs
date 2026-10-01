@@ -211,7 +211,7 @@ pub struct MemoryFile {
 }
 
 impl MemoryFile {
-    /// A ledger stored at an arbitrary path (e.g. inside the central state root).
+    /// A ledger stored at an arbitrary path (e.g. inside the central store).
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }

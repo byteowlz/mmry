@@ -38,9 +38,9 @@ use std::path::PathBuf;
 struct Cli {
     #[arg(long, global = true, env = "MMRY_CONFIG", value_name = "PATH")]
     config: Option<PathBuf>,
-    /// Central store root (overrides MMRY_STATE_ROOT and `state_root`).
+    /// Central store root (overrides MMRY_STORE_ROOT and `store_root`).
     #[arg(long, global = true, value_name = "PATH")]
-    state_root: Option<PathBuf>,
+    store_root: Option<PathBuf>,
     /// Repo-local ledger handling (overrides MMRY_MIGRATE and `migrate`).
     #[arg(long, global = true, value_name = "MODE")]
     migrate: Option<MigrateMode>,
@@ -246,7 +246,7 @@ struct SyncArgs {
 
 #[derive(Subcommand)]
 enum SyncAction {
-    /// Make the state root a git repository and optionally connect a remote.
+    /// Make the store a git repository and optionally connect a remote.
     Init {
         /// Remote URL (uses your git credentials; nothing is stored by mmry).
         #[arg(long)]
@@ -319,13 +319,13 @@ fn main() -> anyhow::Result<()> {
     let config_path = Config::resolve_path(cli.config.as_deref())?;
     let mut config = Config::load(cli.config.as_deref())?;
     config.apply_env(|key| std::env::var(key).ok())?;
-    if let Some(root) = cli.state_root {
-        config.state_root = Some(mmry_core::config::expand_tilde(&root)?);
+    if let Some(root) = cli.store_root {
+        config.store_root = Some(mmry_core::config::expand_tilde(&root)?);
     }
     if let Some(mode) = cli.migrate {
         config.migrate = mode;
     }
-    let store = Store::new(config.state_root()?);
+    let store = Store::new(config.store_root()?);
     let checkout = Checkout::detect(&std::env::current_dir()?)?;
     let env = Env {
         config_path,
@@ -895,7 +895,7 @@ fn migrate(env: &Env, args: &MigrateArgs) -> anyhow::Result<()> {
 #[derive(Serialize)]
 struct SetupReport {
     config: PathBuf,
-    state_root: PathBuf,
+    store_root: PathBuf,
     dry_run: bool,
     reports: Vec<MigrationReport>,
     unreadable: Vec<PathBuf>,
@@ -939,7 +939,7 @@ fn setup(env: &Env, args: &SetupArgs) -> anyhow::Result<()> {
     if !args.json || args.dry_run {
         let report = SetupReport {
             config: env.config_path.clone(),
-            state_root: env.store.root().to_path_buf(),
+            store_root: env.store.root().to_path_buf(),
             dry_run: true,
             reports: plan,
             unreadable: scan.unreadable.clone(),
@@ -980,7 +980,7 @@ fn setup(env: &Env, args: &SetupArgs) -> anyhow::Result<()> {
         .collect::<Result<Vec<_>, _>>()?;
     let report = SetupReport {
         config: env.config_path.clone(),
-        state_root: env.store.root().to_path_buf(),
+        store_root: env.store.root().to_path_buf(),
         dry_run: false,
         reports,
         unreadable: scan.unreadable,
@@ -1005,7 +1005,7 @@ fn setup(env: &Env, args: &SetupArgs) -> anyhow::Result<()> {
 }
 
 fn print_setup(report: &SetupReport) {
-    println!("central store: {}", report.state_root.display());
+    println!("central store: {}", report.store_root.display());
     println!("config:        {}", report.config.display());
     if report.reports.is_empty() {
         println!("no repo-local .mmry ledgers found");
@@ -1073,7 +1073,7 @@ fn preview(env: &Env, args: &PreviewArgs) -> anyhow::Result<()> {
 
 #[derive(Serialize)]
 struct DoctorReport {
-    state_root: PathBuf,
+    store_root: PathBuf,
     config: PathBuf,
     migrate: &'static str,
     repository: Option<RepositoryStatus>,
@@ -1142,7 +1142,7 @@ fn doctor(env: &Env, args: &DoctorArgs) -> anyhow::Result<()> {
         .iter()
         .all(|ledger| ledger.contested.is_empty() && ledger.issues.is_empty());
     let report = DoctorReport {
-        state_root: env.store.root().to_path_buf(),
+        store_root: env.store.root().to_path_buf(),
         config: env.config_path.clone(),
         migrate: env.config.migrate.as_str(),
         repository,
@@ -1152,7 +1152,7 @@ fn doctor(env: &Env, args: &DoctorArgs) -> anyhow::Result<()> {
     if args.json {
         return print_json(&report);
     }
-    println!("state root: {}", report.state_root.display());
+    println!("store: {}", report.store_root.display());
     println!(
         "config: {} (migrate = {})",
         report.config.display(),

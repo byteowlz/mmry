@@ -1,6 +1,6 @@
 //! Opt-in git sync of the central store.
 //!
-//! The state root becomes a git repository. Ledgers merge with git's
+//! The store becomes a git repository. Ledgers merge with git's
 //! `merge=union` driver: events are append-only lines with unique ids and
 //! replay sorts them, so keeping both sides' lines is a correct merge.
 //! Semantic conflicts (two machines editing one memory) surface as contested
@@ -101,7 +101,7 @@ pub struct SyncOutcome {
     pub status: SyncStatus,
 }
 
-/// Git sync of one state root.
+/// Git sync of one store.
 #[derive(Debug, Clone)]
 pub struct Sync {
     root: PathBuf,
@@ -128,7 +128,7 @@ impl Sync {
         self.root.join(".git").exists()
     }
 
-    /// Make the state root a git repository (idempotent), write
+    /// Make the store a git repository (idempotent), write
     /// `.gitattributes`/`.gitignore`, commit existing ledgers and, with a
     /// remote, merge its history (unrelated histories allowed: ledgers from
     /// both machines are unioned) and push.

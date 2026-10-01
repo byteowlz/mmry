@@ -1,4 +1,4 @@
-//! End-to-end tests of the `mmry` binary with an isolated state root.
+//! End-to-end tests of the `mmry` binary with an isolated store.
 
 #![cfg(test)]
 
@@ -25,7 +25,7 @@ impl Sandbox {
         fs::create_dir_all(&home).unwrap();
         fs::write(
             &config,
-            format!("state_root = '{}'\n{extra_config}", state.display()),
+            format!("store_root = '{}'\n{extra_config}", state.display()),
         )
         .unwrap();
         Self {
@@ -634,7 +634,7 @@ fn setup_plans_asks_and_migrates_everything() {
     assert!(!one.join(".mmry/mmry.jsonl").exists() && !two.join(".mmry/mmry.jsonl").exists());
     let config = fs::read_to_string(&sb.config).unwrap();
     assert!(
-        config.contains("state_root = ") && config.contains("migrate = \"auto\""),
+        config.contains("store_root = ") && config.contains("migrate = \"auto\""),
         "{config}"
     );
     assert_eq!(
@@ -660,7 +660,7 @@ fn flags_override_env_override_config() {
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", &sb.home)
             .env("MMRY_CONFIG", &sb.config)
-            .env("MMRY_STATE_ROOT", env_value)
+            .env("MMRY_STORE_ROOT", env_value)
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -670,7 +670,7 @@ fn flags_override_env_override_config() {
     assert!(env_root.join("general/mmry.jsonl").exists());
     let flag = flag_root.to_str().unwrap();
     run(
-        &["--state-root", flag, "add", "--general", "via flag"],
+        &["--store-root", flag, "add", "--general", "via flag"],
         &env_root,
     );
     assert!(flag_root.join("general/mmry.jsonl").exists());

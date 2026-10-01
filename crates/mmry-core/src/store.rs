@@ -1,12 +1,12 @@
 //! Where ledgers live and how repo-local ledgers move into the central store.
 //!
-//! Layout of the per-user state root:
+//! Layout of the per-user store:
 //!
 //! ```text
-//! <state_root>/general/mmry.jsonl
-//! <state_root>/repos/<name>--<id>/mmry.jsonl
-//! <state_root>/repos/<name>--<id>/repo.json      # {identity, name}, written once
-//! <state_root>/local/checkouts.json              # this machine's checkout paths
+//! <store_root>/general/mmry.jsonl
+//! <store_root>/repos/<name>--<id>/mmry.jsonl
+//! <store_root>/repos/<name>--<id>/repo.json      # {identity, name}, written once
+//! <store_root>/local/checkouts.json              # this machine's checkout paths
 //! ```
 //!
 //! Everything outside `local/` is safe to sync between machines: directory

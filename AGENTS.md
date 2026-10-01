@@ -20,13 +20,13 @@ This file provides guidance to AI Agents when working with code in this reposito
 
 - `crates/mmry-core` — ledger format and replay (`memory_file.rs`: add/supersede/deprecate, revisions, expiry), central store layout + repo identity + migration (`store.rs`), ledger sources and aggregation (`repos.rs`), typed config + schema (`config.rs`), XDG base dirs (`paths.rs`).
 - Storage: central `$XDG_DATA_HOME/mmry/{general,repos/<name>}/mmry.jsonl` by default; tracked repos keep `.mmry/mmry.jsonl`. Never read or write both for one repo. oqto uses `mmry-core` via git dependency — `MemoryFile` stays a plain ledger-at-a-path type.
-- `crates/mmry-cli` — the `mmry` binary (clap); rendering lives in `main.rs`; end-to-end tests in `tests/cli.rs` (isolated HOME/state root, real git repos).
+- `crates/mmry-cli` — the `mmry` binary (clap); rendering lives in `main.rs`; end-to-end tests in `tests/cli.rs` (isolated HOME/store, real git repos).
 - `examples/config.toml` + `examples/config.schema.json` — generated/validated from `Config` (`just generate-config`, `just validate-config`). Central copy: `byteowlz/schemas/mmry/`.
 - `scripts/migrate_legacy_mmry_to_jsonl.py` — transitional SQLite migration (unittest in `scripts/`).
 
 ## Configuration precedence
 
-`--state-root`/`--migrate` flags > `MMRY_STATE_ROOT`/`MMRY_MIGRATE` env > config file (`--config`/`MMRY_CONFIG`, else XDG global). Deliberate exception to the repository standard: there is no repo-local config layer, because a cloned repository must not be able to redirect the state root or force migration.
+`--store-root`/`--migrate` flags > `MMRY_STORE_ROOT`/`MMRY_MIGRATE` env > config file (`--config`/`MMRY_CONFIG`, else XDG global). Deliberate exception to the repository standard: there is no repo-local config layer, because a cloned repository must not be able to redirect the store or force migration.
 
 ## Required checks
 

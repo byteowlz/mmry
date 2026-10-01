@@ -1,7 +1,7 @@
 # Storage and migration
 
 
-By default memories live in a per-user central store (`state_root`, default `$XDG_DATA_HOME/mmry`, i.e. `~/.local/share/mmry`):
+By default memories live in a per-user central store (`store_root`, default `$XDG_DATA_HOME/mmry`, i.e. `~/.local/share/mmry`):
 
 ```text
 general/mmry.jsonl              personal memories that apply everywhere

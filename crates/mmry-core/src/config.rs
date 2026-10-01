@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 const CONFIG_FILE: &str = "config.toml";
 
-/// Environment override for [`Config::state_root`].
-pub const ENV_STATE_ROOT: &str = "MMRY_STATE_ROOT";
+/// Environment override for [`Config::store_root`].
+pub const ENV_STORE_ROOT: &str = "MMRY_STORE_ROOT";
 /// Environment override for [`Config::migrate`] (`auto`, `prompt`, `off`).
 pub const ENV_MIGRATE: &str = "MMRY_MIGRATE";
 
@@ -16,7 +16,7 @@ pub const DEFAULT_CONFIG: &str = "\
 #:schema https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/mmry/mmry.config.schema.json
 
 # Central per-user store: general/ and repos/<name>/ ledgers.
-# state_root = \"~/.local/share/mmry\"
+# store_root = \"~/.local/share/mmry\"
 
 # Repo-local .mmry/mmry.jsonl ledgers that belong in the central store:
 # \"prompt\" (default: ask on a terminal, otherwise warn and continue),
@@ -24,7 +24,7 @@ pub const DEFAULT_CONFIG: &str = "\
 # Repos with .mmry/tracked or a git-committed ledger stay repo-local.
 # migrate = \"prompt\"
 
-# Git sync of the state root; set up with `mmry sync init --remote URL`.
+# Git sync of the store; set up with `mmry sync init --remote URL`.
 # [sync]
 # auto_pull = false      # pull at session start (mmry preview)
 # auto_commit = false    # commit after every write
@@ -44,13 +44,13 @@ pub const DEFAULT_CONFIG: &str = "\
 pub struct Config {
     /// Per-user central store (general + per-repo ledgers). Defaults to
     /// `$XDG_DATA_HOME/mmry`.
-    pub state_root: Option<PathBuf>,
+    pub store_root: Option<PathBuf>,
     /// What to do when a repository still has a repo-local ledger that belongs
     /// in the central store.
     pub migrate: MigrateMode,
     /// Bounded directories searched by cross-repository commands.
     pub roots: Vec<DiscoveryRoot>,
-    /// Git sync of the state root (`mmry sync init` sets it up).
+    /// Git sync of the store (`mmry sync init` sets it up).
     pub sync: SyncConfig,
 }
 
@@ -123,12 +123,12 @@ impl Config {
         explicit.map_or_else(config_path, |path| Ok(path.to_path_buf()))
     }
 
-    /// Apply `MMRY_STATE_ROOT` / `MMRY_MIGRATE` from `lookup` (normally
+    /// Apply `MMRY_STORE_ROOT` / `MMRY_MIGRATE` from `lookup` (normally
     /// `std::env::var`). Environment overrides the config file; empty values
     /// are ignored. Command-line flags are applied by the caller afterwards.
     pub fn apply_env(&mut self, lookup: impl Fn(&str) -> Option<String>) -> crate::Result<()> {
-        if let Some(root) = lookup(ENV_STATE_ROOT).filter(|value| !value.is_empty()) {
-            self.state_root = Some(expand_tilde(Path::new(&root))?);
+        if let Some(root) = lookup(ENV_STORE_ROOT).filter(|value| !value.is_empty()) {
+            self.store_root = Some(expand_tilde(Path::new(&root))?);
         }
         if let Some(mode) = lookup(ENV_MIGRATE).filter(|value| !value.is_empty()) {
             self.migrate = mode.parse()?;
@@ -142,8 +142,8 @@ impl Config {
         })?;
         let mut config: Self = toml::from_str(&content)
             .map_err(|error| crate::Error::Config(format!("{}: {error}", path.display())))?;
-        if let Some(state_root) = &config.state_root {
-            config.state_root = Some(expand_tilde(state_root)?);
+        if let Some(store_root) = &config.store_root {
+            config.store_root = Some(expand_tilde(store_root)?);
         }
         for root in &mut config.roots {
             root.path = expand_tilde(&root.path)?;
@@ -151,9 +151,9 @@ impl Config {
         Ok(config)
     }
 
-    /// The central store root: `state_root` or `$XDG_DATA_HOME/mmry`.
-    pub fn state_root(&self) -> crate::Result<PathBuf> {
-        match &self.state_root {
+    /// The central store root: `store_root` or `$XDG_DATA_HOME/mmry`.
+    pub fn store_root(&self) -> crate::Result<PathBuf> {
+        match &self.store_root {
             Some(root) => Ok(root.clone()),
             None => Ok(crate::paths::data_base()?.join("mmry")),
         }
@@ -313,21 +313,21 @@ mod tests {
 
     #[test]
     fn env_overrides_config_file() {
-        let mut config: Config = toml::from_str("state_root = '/file'\nmigrate = 'auto'").unwrap();
+        let mut config: Config = toml::from_str("store_root = '/file'\nmigrate = 'auto'").unwrap();
         config.apply_env(|_| None).unwrap();
         assert_eq!(
-            (config.state_root.clone(), config.migrate),
+            (config.store_root.clone(), config.migrate),
             (Some("/file".into()), MigrateMode::Auto)
         );
         config
             .apply_env(|key| match key {
-                ENV_STATE_ROOT => Some("/env".into()),
+                ENV_STORE_ROOT => Some("/env".into()),
                 ENV_MIGRATE => Some("off".into()),
                 _ => None,
             })
             .unwrap();
         assert_eq!(
-            (config.state_root.clone(), config.migrate),
+            (config.store_root.clone(), config.migrate),
             (Some("/env".into()), MigrateMode::Off)
         );
         config.apply_env(|_| Some(String::new())).unwrap();

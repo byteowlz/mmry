@@ -1,6 +1,6 @@
 # Syncing between machines
 
-Opt-in: the state root becomes a git repository with a remote you choose. Authentication is whatever git already uses (ssh keys, credential helpers); mmry never prompts or stores credentials.
+Opt-in: the store becomes a git repository with a remote you choose. Authentication is whatever git already uses (ssh keys, credential helpers); mmry never prompts or stores credentials.
 
 ```bash
 mmry sync init --remote git@github.com:you/mmry-state.git   # also merges an existing remote
