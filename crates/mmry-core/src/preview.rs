@@ -89,7 +89,7 @@ pub struct Preview {
     pub warnings: Vec<String>,
 }
 
-const HEADER: &str = "Personal operative memory (mmry). Notes from earlier sessions; \
+const HEADER: &str = "Persistent memories (mmry) for this repository and in general. Notes from earlier sessions; \
 verify before relying on them. Update with `mmry supersede <id>`, remove with `mmry rm <id>`.";
 
 /// Select and render memories of `sources` for a session starting now.
@@ -378,7 +378,7 @@ mod tests {
 
     const GOLDEN: &str = "\
 <mmry>
-Personal operative memory (mmry). Notes from earlier sessions; verify before relying on them. Update with `mmry supersede <id>`, remove with `mmry rm <id>`.
+Persistent memories (mmry) for this repository and in general. Notes from earlier sessions; verify before relying on them. Update with `mmry supersede <id>`, remove with `mmry rm <id>`.
 - [repo app] mem_r2 (2026-09-12): Integration tests need a real git binary
 - [repo app] mem_r1 (2026-09-10): Run just check-all before pushing
   why: CI runs the same gate

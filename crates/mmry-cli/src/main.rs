@@ -33,7 +33,7 @@ use std::path::PathBuf;
 #[command(
     name = "mmry",
     version,
-    about = "Personal operative memory: general and per-repository ledgers"
+    about = "Persistent memories for each repository and in general, outside git and issue trackers"
 )]
 struct Cli {
     #[arg(long, global = true, env = "MMRY_CONFIG", value_name = "PATH")]

@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - The default store moves to `$XDG_DATA_HOME/mmry` (`~/.local/share/mmry`): memories are user data. Existing stores: `mv ~/.local/state/mmry/{general,repos,local,.git,.gitattributes,.gitignore} ~/.local/share/mmry/` (or set `store_root`).
 - Sync only tracks `general/`, `repos/` and its rule files (allowlist `.gitignore`).
 - Renamed "state root" to "store root" to match: `--store-root`, `MMRY_STORE_ROOT`, config key `store_root`; `mmry doctor` prints `store:`. The old names are gone.
+- `preview` header and `--help` describe mmry as persistent memories for each repository and in general, outside git and issue trackers.
 
 ### Fixed
 
