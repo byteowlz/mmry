@@ -37,11 +37,31 @@ pub const GITATTRIBUTES: &str = "\
 ";
 
 pub const GITIGNORE: &str = "\
-# machine-local state (checkout paths, sync status)
-/local/
+# Only ledgers and repository metadata are synced. Everything else in the
+# store (local/, files of other tools or older mmry versions) is machine-local.
+/*
+!/.gitattributes
+!/.gitignore
+!/general/
+!/repos/
 *.tmp
 *.tmp-*
 ";
+
+/// Whether a store path (relative, `/`-separated) is synced: the rule that
+/// [`GITIGNORE`] encodes, used to untrack files committed by older versions.
+fn synced(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let temporary = Path::new(file)
+        .extension()
+        .is_some_and(|extension| extension == "tmp")
+        || file.contains(".tmp-");
+    !temporary
+        && (path == ".gitattributes"
+            || path == ".gitignore"
+            || path.starts_with("general/")
+            || path.starts_with("repos/"))
+}
 
 /// Last sync outcome, stored machine-locally in `local/sync.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,8 +136,6 @@ impl Sync {
         if !self.is_enabled() {
             self.git_ok(&["init", "-q", "-b", BRANCH])?;
         }
-        fs::write(self.root.join(".gitattributes"), GITATTRIBUTES)?;
-        fs::write(self.root.join(".gitignore"), GITIGNORE)?;
         if let Some(url) = remote {
             if self.remote_url()?.is_some() {
                 self.git_ok(&["remote", "set-url", REMOTE, url])?;
@@ -205,21 +223,49 @@ impl Sync {
         if !self.is_enabled() {
             return Err(not_enabled());
         }
+        // Keep the rules current so stores set up by older versions heal.
+        for (name, content) in [(".gitattributes", GITATTRIBUTES), (".gitignore", GITIGNORE)] {
+            let path = self.root.join(name);
+            if fs::read_to_string(&path).ok().as_deref() != Some(content) {
+                fs::write(path, content)?;
+            }
+        }
         self.git_ok(&["add", "-A"])?;
+        self.untrack_unsynced()?;
         let staged = self.git(&["diff", "--cached", "--quiet"])?;
         if staged.ok {
             return Ok(false);
         }
-        let message = format!("mmry: {}", self.machine);
+        self.commit_staged(&format!("mmry: {}", self.machine))?;
+        Ok(true)
+    }
+
+    /// Remove tracked paths outside the synced set from the index (files
+    /// stay on disk).
+    fn untrack_unsynced(&self) -> crate::Result<()> {
+        let tracked = self.git_ok(&["ls-files", "-z"])?;
+        let unsynced: Vec<&str> = tracked
+            .split('\0')
+            .filter(|p| !p.is_empty() && !synced(p))
+            .collect();
+        if !unsynced.is_empty() {
+            let mut args = vec!["rm", "--cached", "-q", "--"];
+            args.extend(unsynced);
+            self.git_ok(&args)?;
+        }
+        Ok(())
+    }
+
+    fn commit_staged(&self, message: &str) -> crate::Result<()> {
         let identity_known = self.git(&["config", "user.email"])?.ok;
         let mut args = vec!["-c", "commit.gpgsign=false"];
         let email = format!("user.email=mmry@{}", self.machine);
         if !identity_known {
             args.extend(["-c", "user.name=mmry", "-c", email.as_str()]);
         }
-        args.extend(["commit", "-q", "-m", message.as_str()]);
+        args.extend(["commit", "-q", "--no-edit", "-m", message]);
         self.git_ok(&args)?;
-        Ok(true)
+        Ok(())
     }
 
     fn pull_inner(&self) -> Result<(), String> {
@@ -237,6 +283,36 @@ impl Sync {
         {
             return Ok(()); // empty remote
         }
+        // Machine-local files another machine committed (older versions
+        // synced everything) must neither block nor overwrite ours: move local
+        // copies aside, merge, drop those paths from tracking, restore.
+        let theirs = self
+            .git_ok(&["ls-tree", "-r", "-z", "--name-only", &remote_ref])
+            .map_err(|error| error.to_string())?;
+        let foreign: Vec<String> = theirs
+            .split('\0')
+            .filter(|p| !p.is_empty() && !synced(p))
+            .map(str::to_owned)
+            .collect();
+        let mut saved = Vec::new();
+        for path in &foreign {
+            let file = self.root.join(path);
+            if let Ok(bytes) = fs::read(&file) {
+                saved.push((file.clone(), bytes));
+                let _ = fs::remove_file(&file);
+            }
+        }
+        let result = self.merge(&remote_ref, &foreign);
+        for (file, bytes) in saved {
+            if let Some(parent) = file.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(file, bytes);
+        }
+        result
+    }
+
+    fn merge(&self, remote_ref: &str, foreign: &[String]) -> Result<(), String> {
         let merge = self
             .git(&[
                 "-c",
@@ -249,11 +325,49 @@ impl Sync {
                 "-q",
                 "--no-edit",
                 "--allow-unrelated-histories",
-                &remote_ref,
+                remote_ref,
             ])
             .map_err(|error| error.to_string())?;
+        let healed = |sync: &Self| -> crate::Result<()> {
+            sync.untrack_unsynced()?;
+            if !sync.git(&["diff", "--cached", "--quiet"])?.ok {
+                sync.commit_staged(&format!(
+                    "mmry: {} (untrack machine-local files)",
+                    sync.machine
+                ))?;
+            }
+            Ok(())
+        };
         if merge.ok {
-            return Ok(());
+            return healed(self).map_err(|error| error.to_string());
+        }
+        let conflicts = self
+            .git_ok(&["diff", "--name-only", "--diff-filter=U", "-z"])
+            .map_err(|error| error.to_string())?;
+        let conflicts: Vec<&str> = conflicts.split('\0').filter(|p| !p.is_empty()).collect();
+        // Resolvable: machine-local files (drop them) and the rule files mmry
+        // owns (write the current version). Anything else aborts.
+        let rules = [(".gitattributes", GITATTRIBUTES), (".gitignore", GITIGNORE)];
+        let (owned, local): (Vec<&str>, Vec<&str>) = conflicts
+            .iter()
+            .partition(|p| rules.iter().any(|(name, _)| name == *p));
+        if !conflicts.is_empty() && local.iter().all(|p| foreign.iter().any(|f| f == p)) {
+            let resolved = (|| -> crate::Result<()> {
+                for (name, content) in rules.iter().filter(|(name, _)| owned.contains(name)) {
+                    fs::write(self.root.join(name), content)?;
+                    self.git_ok(&["add", "--", name])?;
+                }
+                if !local.is_empty() {
+                    let mut args = vec!["rm", "-q", "-f", "--"];
+                    args.extend(&local);
+                    self.git_ok(&args)?;
+                }
+                self.commit_staged(&format!("mmry: merge {remote_ref}"))?;
+                healed(self)
+            })();
+            if resolved.is_ok() {
+                return Ok(());
+            }
         }
         // Never leave a half-merged store: abort and report.
         let _ = self.git(&["merge", "--abort"]);
@@ -591,6 +705,65 @@ mod tests {
         assert!(repo.join(STATE_FILE).exists());
         let tracked = m.a.1.git_ok(&["ls-files"]).unwrap();
         assert!(!tracked.contains("local/"), "{tracked}");
+    }
+
+    #[test]
+    fn machine_local_files_committed_by_old_versions_heal() {
+        let m = machines();
+        let url = m.remote.to_str().unwrap();
+        // Both machines committed their own service.pid (old .gitignore).
+        for (store, sync, pid) in [(&m.a.0, &m.a.1, "111"), (&m.b.0, &m.b.1, "222")] {
+            note(store, "x");
+            sync.git_ok(&["init", "-q", "-b", BRANCH]).unwrap();
+            sync.git_ok(&["remote", "add", REMOTE, url]).unwrap();
+            fs::write(store.root().join("service.pid"), pid).unwrap();
+            fs::write(store.root().join(".gitignore"), "/local/\n").unwrap();
+            sync.git_ok(&["add", "-A"]).unwrap();
+            sync.commit_staged("old version").unwrap();
+        }
+        m.a.1.git_ok(&["push", "-q", "-u", REMOTE, BRANCH]).unwrap();
+        fs::create_dir_all(m.a.0.root().join("stores")).unwrap();
+        fs::write(m.a.0.root().join("stores/legacy.db"), "x").unwrap();
+
+        // b: add/add conflict on service.pid is resolved, not fatal.
+        assert_eq!(m.b.1.sync().unwrap().error, None);
+        assert_eq!(m.a.1.sync().unwrap().error, None);
+        for (store, sync, pid) in [(&m.a.0, &m.a.1, "111"), (&m.b.0, &m.b.1, "222")] {
+            let tracked = sync.git_ok(&["ls-files"]).unwrap();
+            assert!(tracked.lines().all(synced), "{tracked}");
+            assert_eq!(
+                fs::read_to_string(store.root().join("service.pid")).unwrap(),
+                pid
+            );
+            assert_eq!(event_counts(store).len(), 2);
+            let status = sync.status().unwrap();
+            assert_eq!(
+                (status.pending_commits, status.behind, status.uncommitted),
+                (0, 0, false)
+            );
+        }
+        assert!(m.a.0.root().join("stores/legacy.db").exists());
+    }
+
+    #[test]
+    fn synced_paths() {
+        for path in [
+            ".gitignore",
+            ".gitattributes",
+            "general/mmry.jsonl",
+            "repos/a--1/repo.json",
+        ] {
+            assert!(synced(path), "{path}");
+        }
+        for path in [
+            "service.pid",
+            "local/sync.json",
+            "stores/x.db",
+            "repos/a--1/mmry.jsonl.tmp-9",
+            "repo.tmp",
+        ] {
+            assert!(!synced(path), "{path}");
+        }
     }
 
     #[test]

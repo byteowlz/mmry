@@ -16,7 +16,7 @@ pub const DEFAULT_CONFIG: &str = "\
 #:schema https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/mmry/mmry.config.schema.json
 
 # Central per-user store: general/ and repos/<name>/ ledgers.
-# state_root = \"~/.local/state/mmry\"
+# state_root = \"~/.local/share/mmry\"
 
 # Repo-local .mmry/mmry.jsonl ledgers that belong in the central store:
 # \"prompt\" (default: ask on a terminal, otherwise warn and continue),
@@ -43,7 +43,7 @@ pub const DEFAULT_CONFIG: &str = "\
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Per-user central store (general + per-repo ledgers). Defaults to
-    /// `$XDG_STATE_HOME/mmry`.
+    /// `$XDG_DATA_HOME/mmry`.
     pub state_root: Option<PathBuf>,
     /// What to do when a repository still has a repo-local ledger that belongs
     /// in the central store.
@@ -151,11 +151,11 @@ impl Config {
         Ok(config)
     }
 
-    /// The central store root: `state_root` or `$XDG_STATE_HOME/mmry`.
+    /// The central store root: `state_root` or `$XDG_DATA_HOME/mmry`.
     pub fn state_root(&self) -> crate::Result<PathBuf> {
         match &self.state_root {
             Some(root) => Ok(root.clone()),
-            None => Ok(crate::paths::state_base()?.join("mmry")),
+            None => Ok(crate::paths::data_base()?.join("mmry")),
         }
     }
 

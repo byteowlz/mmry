@@ -90,6 +90,7 @@ impl Sandbox {
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("XDG_STATE_HOME", self.home.join(".local/state"))
+            .env("XDG_DATA_HOME", self.home.join(".local/share"))
             .env("MMRY_CONFIG", &self.config)
             .stdin(Stdio::null())
             .output()

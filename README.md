@@ -39,7 +39,7 @@ mmry preview --json --cwd DIR --max-tokens 1200 --limit 20
 
 ## Storage
 
-Memories live in a per-user central store, by default `~/.local/state/mmry` (`$XDG_STATE_HOME/mmry`): `general/` for memories that apply everywhere and one `repos/<name>--<id>/` ledger per repository, identified by its git root commit so clones and worktrees share it. `mmry init --tracked` instead keeps a repository's ledger in `.mmry/mmry.jsonl` to commit with it.
+Memories live in a per-user central store, by default `~/.local/share/mmry` (`$XDG_DATA_HOME/mmry`): `general/` for memories that apply everywhere and one `repos/<name>--<id>/` ledger per repository, identified by its git root commit so clones and worktrees share it. `mmry init --tracked` instead keeps a repository's ledger in `.mmry/mmry.jsonl` to commit with it.
 
 Existing `.mmry` ledgers are not read until you migrate them:
 
@@ -61,7 +61,7 @@ Migration merges by event id, verifies the result and keeps the old file as a ba
 Precedence: `--state-root`/`--migrate` flags, then `MMRY_STATE_ROOT`/`MMRY_MIGRATE`, then the config file. There is deliberately no repo-local config. The file is `$XDG_CONFIG_HOME/mmry/config.toml` (default `~/.config/mmry/config.toml`). A commented default is created on first run; `--config PATH` or `MMRY_CONFIG` selects another file, which must exist. See `examples/config.toml`:
 
 ```toml
-# state_root = "~/.local/state/mmry"
+# state_root = "~/.local/share/mmry"
 # migrate = "prompt"
 
 [[roots]]            # where `--all`, `--repo` and `migrate --all` look for tracked/legacy ledgers
