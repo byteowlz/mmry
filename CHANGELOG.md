@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.14.1
+
+### Changed
+
+- The default store moves to `$XDG_DATA_HOME/mmry` (`~/.local/share/mmry`): memories are user data. Existing stores: `mv ~/.local/state/mmry/{general,repos,local,.git,.gitattributes,.gitignore} ~/.local/share/mmry/` (or set `state_root`).
+- Sync only tracks `general/`, `repos/` and its rule files (allowlist `.gitignore`).
+
+### Fixed
+
+- `mmry sync` no longer gets stuck on machine-local files committed by 0.14.0 (e.g. `service.pid`/`service.port` left by the removed daemon): they are untracked on the next sync, add/add conflicts in them and in `.gitignore` are resolved, and local copies are kept.
+- A ledger one machine removed (duplicate directory merged) while another still appended to it no longer blocks sync: the changed file is kept and merged again on the next write.
+
 ## 0.14.0
 
 Breaking: memories move from repo-local `.mmry/mmry.jsonl` to a per-user central store. Run `mmry setup --dry-run`, then `mmry setup`. Until then repo-local ledgers are not read (`migrate = "prompt"` asks once on a terminal, otherwise warns).

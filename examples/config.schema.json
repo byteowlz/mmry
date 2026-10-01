@@ -21,7 +21,7 @@
       }
     },
     "state_root": {
-      "description": "Per-user central store (general + per-repo ledgers). Defaults to `$XDG_STATE_HOME/mmry`.",
+      "description": "Per-user central store (general + per-repo ledgers). Defaults to `$XDG_DATA_HOME/mmry`.",
       "default": null,
       "type": [
         "string",

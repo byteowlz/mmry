@@ -19,7 +19,7 @@ This file provides guidance to AI Agents when working with code in this reposito
 ## Architecture
 
 - `crates/mmry-core` — ledger format and replay (`memory_file.rs`: add/supersede/deprecate, revisions, expiry), central store layout + repo identity + migration (`store.rs`), ledger sources and aggregation (`repos.rs`), typed config + schema (`config.rs`), XDG base dirs (`paths.rs`).
-- Storage: central `$XDG_STATE_HOME/mmry/{general,repos/<name>}/mmry.jsonl` by default; tracked repos keep `.mmry/mmry.jsonl`. Never read or write both for one repo. oqto uses `mmry-core` via git dependency — `MemoryFile` stays a plain ledger-at-a-path type.
+- Storage: central `$XDG_DATA_HOME/mmry/{general,repos/<name>}/mmry.jsonl` by default; tracked repos keep `.mmry/mmry.jsonl`. Never read or write both for one repo. oqto uses `mmry-core` via git dependency — `MemoryFile` stays a plain ledger-at-a-path type.
 - `crates/mmry-cli` — the `mmry` binary (clap); rendering lives in `main.rs`; end-to-end tests in `tests/cli.rs` (isolated HOME/state root, real git repos).
 - `examples/config.toml` + `examples/config.schema.json` — generated/validated from `Config` (`just generate-config`, `just validate-config`). Central copy: `byteowlz/schemas/mmry/`.
 - `scripts/migrate_legacy_mmry_to_jsonl.py` — transitional SQLite migration (unittest in `scripts/`).
