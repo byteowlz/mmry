@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+
+- `mmry sync auto`: show or change the automatic sync steps (`--on`, `--off`, or one of `--pull`/`--commit`/`--push`, each taking an optional `false`) without editing the config; writes the `[sync]` table and is refused while the store is not a git repository. `mmry sync status` shows the current flags.
+- `mmry stats [--json]`: active, expired and contested memory counts per known ledger plus totals, no content.
+- `mmry list --limit N`: cap list output at the N newest memories (default unchanged: everything). Restores the bound downstream callers rely on (e.g. `agntz memory list --limit N`).
+
 ## 0.14.1
 
 ### Changed

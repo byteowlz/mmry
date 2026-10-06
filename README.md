@@ -23,6 +23,7 @@ mmry list                         # general + current repository (alias: ls)
 mmry search "fmt"
 mmry supersede mem_<id> "Run just fmt && just lint" --reason "lint added" --expected-revision 1
 mmry rm mem_<id> --reason obsolete
+mmry stats                       # memory counts per ledger
 mmry doctor                       # store, repository mode, pending migration
 ```
 
@@ -52,7 +53,7 @@ Migration merges by event id, verifies the result and keeps the old file as a ba
 
 ## Sync and cleanup
 
-`mmry sync init --remote URL` makes the store a git repository you sync with `mmry sync` (opt-in; optional auto pull/commit/push in `[sync]`). Use a private remote: history keeps removed memories. Concurrent edits from two machines are marked contested instead of silently overwritten. See [docs/sync.md](docs/sync.md).
+`mmry sync init --remote URL` makes the store a git repository you sync with `mmry sync` (opt-in). `mmry sync auto` turns the automatic steps on or off without editing the config: `--on` enables pull (at session start, via `mmry preview`), commit (after every write) and push; `--off` disables all three; `--pull`/`--commit`/`--push` set one step each (`--push false` disables just pushing). With no flags it prints the current state; `mmry sync status` shows it too. Use a private remote: history keeps removed memories. Concurrent edits from two machines are marked contested instead of silently overwritten. See [docs/sync.md](docs/sync.md).
 
 `mmry cleanup propose` lists duplicates, near-duplicates and expired memories without writing; `mmry cleanup apply <id>` applies the ones you choose. No model is called.
 

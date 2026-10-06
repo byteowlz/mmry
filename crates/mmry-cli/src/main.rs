@@ -12,6 +12,7 @@ use mmry_core::MemoryEvent;
 use mmry_core::MemoryType;
 use mmry_core::config::Config;
 use mmry_core::config::MigrateMode;
+use mmry_core::config::SyncConfig;
 use mmry_core::memory_file::parse_expiry;
 use mmry_core::repos::Source;
 use mmry_core::repos::SourcedHit;
@@ -81,6 +82,11 @@ enum Command {
     Migrate(MigrateArgs),
     /// Show store, repository mode, and ledger health.
     Doctor(DoctorArgs),
+    /// Count memories per known ledger (general, central repos, tracked repos).
+    Stats {
+        #[arg(long)]
+        json: bool,
+    },
     /// List known ledgers (general, central repos, tracked repos under roots).
     Repos {
         #[arg(long)]
@@ -261,6 +267,28 @@ enum SyncAction {
     Pull,
     /// Commit local changes and push (pulls once if the push is rejected).
     Push,
+    /// Show or change the automatic steps: pull at session start, commit and
+    /// push after every write. Writes the `[sync]` table of the config file.
+    Auto(AutoArgs),
+}
+
+#[derive(Args)]
+struct AutoArgs {
+    /// Enable pull, commit and push together.
+    #[arg(long, conflicts_with_all = ["off", "pull", "commit", "push"])]
+    on: bool,
+    /// Disable all automatic steps.
+    #[arg(long, conflicts_with_all = ["pull", "commit", "push"])]
+    off: bool,
+    /// Pull at session start (`mmry preview`); `--pull false` disables.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pull: Option<bool>,
+    /// Commit after every write; `--commit false` disables.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    commit: Option<bool>,
+    /// Push after an automatic commit; `--push false` disables.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    push: Option<bool>,
 }
 
 #[derive(Args)]
@@ -342,6 +370,7 @@ fn main() -> anyhow::Result<()> {
             | Command::Setup(_)
             | Command::Preview(_)
             | Command::Doctor(_)
+            | Command::Stats { .. }
             | Command::Repos { .. }
     ) {
         auto_migrate(&env)?;
@@ -369,6 +398,7 @@ fn main() -> anyhow::Result<()> {
         Command::Rm(args) => remove(&env, &args),
         Command::Migrate(args) => migrate(&env, &args),
         Command::Doctor(args) => doctor(&env, &args),
+        Command::Stats { json } => stats(&env, json),
         Command::Repos { json } => show_repos(&env, json),
     };
     if writes && result.is_ok() {
@@ -496,7 +526,30 @@ fn sync(env: &Env, args: &SyncArgs) -> anyhow::Result<()> {
             if args.json {
                 return print_json(&status);
             }
-            print_sync_status(&status);
+            print_sync_status(&status, &env.config.sync);
+            return Ok(());
+        }
+        Some(SyncAction::Auto(auto)) => {
+            let changed = auto.on
+                || auto.off
+                || auto.pull.is_some()
+                || auto.commit.is_some()
+                || auto.push.is_some();
+            let target = if changed {
+                sync_auto(env, auto)?
+            } else {
+                env.config.sync.clone()
+            };
+            if args.json {
+                return print_json(&AutoSyncStatus::new(
+                    mmry_core::sync::is_enabled(env.store.root()),
+                    &target,
+                ));
+            }
+            if !mmry_core::sync::is_enabled(env.store.root()) {
+                println!("sync: off (run `mmry sync init --remote URL`)");
+            }
+            print_auto(&target);
             return Ok(());
         }
         Some(SyncAction::Init { remote }) => sync.init(remote.as_deref())?,
@@ -507,7 +560,7 @@ fn sync(env: &Env, args: &SyncArgs) -> anyhow::Result<()> {
     if args.json {
         print_json(&outcome)?;
     } else {
-        print_sync_status(&outcome.status);
+        print_sync_status(&outcome.status, &env.config.sync);
     }
     if let Some(error) = outcome.error {
         bail!("{error} (local changes are kept and committed)");
@@ -515,13 +568,83 @@ fn sync(env: &Env, args: &SyncArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_sync_status(status: &mmry_core::sync::SyncStatus) {
+/// Resolve the `[sync]` auto flags the user asked for and persist each change.
+fn sync_auto(env: &Env, args: &AutoArgs) -> anyhow::Result<SyncConfig> {
+    let turning_on =
+        args.on || args.pull == Some(true) || args.commit == Some(true) || args.push == Some(true);
+    if turning_on && !mmry_core::sync::is_enabled(env.store.root()) {
+        bail!("sync is not initialized for this store; run `mmry sync init --remote URL` first");
+    }
+    let mut target = env.config.sync.clone();
+    if args.on {
+        target.auto_pull = true;
+        target.auto_commit = true;
+        target.auto_push = true;
+    }
+    if args.off {
+        target.auto_pull = false;
+        target.auto_commit = false;
+        target.auto_push = false;
+    }
+    if let Some(value) = args.pull {
+        target.auto_pull = value;
+    }
+    if let Some(value) = args.commit {
+        target.auto_commit = value;
+    }
+    if let Some(value) = args.push {
+        target.auto_push = value;
+    }
+    if target.auto_pull != env.config.sync.auto_pull {
+        mmry_core::config::set_sync_flag(&env.config_path, "auto_pull", target.auto_pull)?;
+    }
+    if target.auto_commit != env.config.sync.auto_commit {
+        mmry_core::config::set_sync_flag(&env.config_path, "auto_commit", target.auto_commit)?;
+    }
+    if target.auto_push != env.config.sync.auto_push {
+        mmry_core::config::set_sync_flag(&env.config_path, "auto_push", target.auto_push)?;
+    }
+    Ok(target)
+}
+
+/// Machine view of `mmry sync auto [--json]`.
+#[derive(Serialize)]
+struct AutoSyncStatus {
+    initialized: bool,
+    auto_pull: bool,
+    auto_commit: bool,
+    auto_push: bool,
+}
+
+impl AutoSyncStatus {
+    const fn new(initialized: bool, sync: &SyncConfig) -> Self {
+        Self {
+            initialized,
+            auto_pull: sync.auto_pull,
+            auto_commit: sync.auto_commit,
+            auto_push: sync.auto_push,
+        }
+    }
+}
+
+fn print_auto(sync: &SyncConfig) {
+    let state = |on: bool| if on { "on" } else { "off" };
+    println!(
+        "auto-sync: pull {}, commit {}, push {}",
+        state(sync.auto_pull),
+        state(sync.auto_commit),
+        state(sync.auto_push)
+    );
+}
+
+fn print_sync_status(status: &mmry_core::sync::SyncStatus, sync: &SyncConfig) {
     if !status.enabled {
         println!("sync: off (run `mmry sync init --remote URL`)");
         return;
     }
     println!("sync: {}", status.root.display());
     println!("remote: {}", status.remote.as_deref().unwrap_or("none"));
+    print_auto(sync);
     println!(
         "pending commits: {}, behind: {}{}",
         status.pending_commits,
@@ -1201,6 +1324,96 @@ fn doctor(env: &Env, args: &DoctorArgs) -> anyhow::Result<()> {
         bail!("problems found");
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct StatsReport {
+    store_root: PathBuf,
+    ledgers: Vec<LedgerStats>,
+    total_active: usize,
+    total_expired: usize,
+    total_contested: usize,
+}
+
+#[derive(Serialize)]
+struct LedgerStats {
+    scope: repos::Scope,
+    name: String,
+    repo_path: Option<PathBuf>,
+    active: usize,
+    expired: usize,
+    contested: usize,
+}
+
+/// Active, expired and contested counts per known ledger, no content.
+fn stats(env: &Env, json: bool) -> anyhow::Result<()> {
+    let sources = repos::all_sources(&env.store, &env.config.roots)?;
+    let now = chrono::Utc::now();
+    let mut ledgers = Vec::new();
+    for source in &sources {
+        let file = source.file();
+        let active = file.current_memories(now)?;
+        let expired = file.active_memories()?.len() - active.len();
+        ledgers.push(LedgerStats {
+            scope: source.scope,
+            name: source.name.clone(),
+            repo_path: source.repo_path.clone(),
+            active: active.len(),
+            expired,
+            contested: active.iter().filter(|memory| memory.contested).count(),
+        });
+    }
+    ledgers.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.cmp(&b.name)));
+    let report = StatsReport {
+        total_active: ledgers.iter().map(|ledger| ledger.active).sum(),
+        total_expired: ledgers.iter().map(|ledger| ledger.expired).sum(),
+        total_contested: ledgers.iter().map(|ledger| ledger.contested).sum(),
+        store_root: env.store.root().to_path_buf(),
+        ledgers,
+    };
+    if json {
+        print_json(&report)
+    } else {
+        print_stats(&report);
+        Ok(())
+    }
+}
+
+fn print_stats(report: &StatsReport) {
+    println!("store: {}", report.store_root.display());
+    let width = report
+        .ledgers
+        .iter()
+        .map(|ledger| ledger.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for ledger in &report.ledgers {
+        let expired = if ledger.expired > 0 {
+            format!(", {} expired", ledger.expired)
+        } else {
+            String::new()
+        };
+        let contested = if ledger.contested > 0 {
+            format!(", {} CONTESTED", ledger.contested)
+        } else {
+            String::new()
+        };
+        println!(
+            "{name:<width$}  {active:>4} active{expired}{contested}",
+            name = ledger.name,
+            active = ledger.active,
+        );
+        if let Some(path) = &ledger.repo_path {
+            println!("{:width$}  {}", "", path.display(), width = width + 2);
+        }
+    }
+    println!(
+        "total: {} active, {} expired, {} contested across {} ledger(s)",
+        report.total_active,
+        report.total_expired,
+        report.total_contested,
+        report.ledgers.len()
+    );
 }
 
 fn show_repos(env: &Env, json: bool) -> anyhow::Result<()> {

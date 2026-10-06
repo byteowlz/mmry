@@ -5,8 +5,12 @@ Opt-in: the store becomes a git repository with a remote you choose. Authenticat
 ```bash
 mmry sync init --remote git@github.com:you/mmry-state.git   # also merges an existing remote
 mmry sync                          # commit, pull, push
-mmry sync status [--json]          # remote, pending commits, last pull/push, last error
+mmry sync status [--json]          # remote, pending commits, last pull/push, last error, auto flags
 mmry sync pull | push
+mmry sync auto                     # show auto flags
+mmry sync auto --on                # pull at session start, commit + push after every write
+mmry sync auto --commit --push=false   # or set one step at a time
+mmry sync auto --off
 ```
 
 ```toml

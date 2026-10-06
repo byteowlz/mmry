@@ -236,6 +236,78 @@ fn list_limit_bounds_output_while_default_stays_complete() {
 }
 
 #[test]
+fn sync_auto_enables_disables_and_reports_state() {
+    let sb = Sandbox::new("");
+    let app = sb.repo("app");
+
+    // Uninitialized store: turning on is refused with the fix, state works.
+    let refused = sb.run(&app, &["sync", "auto", "--on"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("sync init"));
+    let state = sb.ok(&app, &["sync", "auto"]);
+    assert!(state.contains("sync: off"), "{state}");
+    assert!(state.contains("pull off, commit off, push off"), "{state}");
+
+    sb.ok(&app, &["sync", "init"]);
+    sb.ok(&app, &["sync", "auto", "--on"]);
+    let config = fs::read_to_string(&sb.config).unwrap();
+    assert!(config.contains("[sync]"), "{config}");
+    assert!(config.contains("auto_commit = true"), "{config}");
+    let status = sb.ok(&app, &["sync", "status"]);
+    assert!(status.contains("pull on, commit on, push on"), "{status}");
+
+    // Individual flags flip one step without touching the others.
+    sb.ok(&app, &["sync", "auto", "--push", "false"]);
+    let state = sb.json(&app, &["sync", "auto", "--json"]);
+    assert_eq!(state["initialized"], true);
+    assert_eq!(state["auto_push"], false);
+    assert_eq!(state["auto_commit"], true);
+
+    // --off disables everything, including a table mmry created itself.
+    sb.ok(&app, &["sync", "auto", "--off"]);
+    let state = sb.json(&app, &["sync", "auto", "--json"]);
+    assert_eq!(state["auto_pull"], false);
+    assert_eq!(state["auto_commit"], false);
+    assert_eq!(state["auto_push"], false);
+}
+
+#[test]
+fn stats_counts_active_and_expired_per_ledger() {
+    let sb = Sandbox::new("");
+    let app = sb.repo("app");
+    let other = sb.repo("other");
+    sb.ok(&app, &["add", "one"]);
+    sb.ok(&app, &["add", "two", "--expires", "2000-01-01T00:00:00Z"]);
+    sb.ok(&other, &["add", "three"]);
+    sb.ok(&app, &["add", "--general", "four"]);
+
+    let report = sb.json(&app, &["stats", "--json"]);
+    let ledgers = report["ledgers"].as_array().unwrap();
+    assert_eq!(ledgers.len(), 3);
+    let ledger = |prefix: &str| {
+        ledgers
+            .iter()
+            .find(|ledger| ledger["name"].as_str().unwrap().starts_with(prefix))
+            .unwrap()
+    };
+    assert_eq!(ledger("general")["active"], 1);
+    let app_ledger = ledger("app--");
+    assert_eq!(app_ledger["active"], 1);
+    assert_eq!(app_ledger["expired"], 1);
+    assert_eq!(ledger("other--")["active"], 1);
+    assert_eq!(report["total_active"], 3);
+    assert_eq!(report["total_expired"], 1);
+    assert_eq!(report["total_contested"], 0);
+
+    let human = sb.ok(&app, &["stats"]);
+    assert!(
+        human.contains("total: 3 active, 1 expired, 0 contested across 3 ledger(s)"),
+        "{human}"
+    );
+    assert!(human.contains("expired"), "{human}");
+}
+
+#[test]
 fn supersede_checks_revision_and_rm_deprecates() {
     let sb = Sandbox::new("");
     let app = sb.repo("app");

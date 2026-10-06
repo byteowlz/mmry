@@ -206,10 +206,39 @@ pub fn set_config_value(path: &Path, key: &str, value: &str) -> crate::Result<()
     } else {
         insert_top_level(&text, key, &toml_edit::value(value).to_string())
     };
-    toml::from_str::<Config>(&updated)
+    write_validated(path, &updated)
+}
+
+/// Set a boolean `key` in the `[sync]` table of the TOML file at `path`.
+///
+/// The table is created at the end of the file when absent (the shipped
+/// default config keeps `[sync]` fully commented out). Comments and
+/// formatting are preserved; the result is validated against [`Config`].
+pub fn set_sync_flag(path: &Path, key: &str, value: bool) -> crate::Result<()> {
+    ensure_default_config(path)?;
+    let text = std::fs::read_to_string(path)?;
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| crate::Error::Config(format!("{}: {error}", path.display())))?;
+    if !document.contains_key("sync") {
+        document["sync"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let toml_edit::Item::Table(sync) = &mut document["sync"] else {
+        return Err(crate::Error::Config(format!(
+            "{}: [sync] is not a table",
+            path.display()
+        )));
+    };
+    sync[key] = toml_edit::value(value);
+    write_validated(path, &document.to_string())
+}
+
+/// Validate `updated` against [`Config`], then atomically replace `path`.
+fn write_validated(path: &Path, updated: &str) -> crate::Result<()> {
+    toml::from_str::<Config>(updated)
         .map_err(|error| crate::Error::Config(format!("{}: {error}", path.display())))?;
     let temp = path.with_extension("toml.tmp");
-    std::fs::write(&temp, &updated)?;
+    std::fs::write(&temp, updated)?;
     std::fs::rename(&temp, path)?;
     Ok(())
 }
@@ -296,6 +325,31 @@ mod tests {
         let error = Config::load(Some(&missing)).unwrap_err();
         assert!(error.to_string().contains("missing.toml"), "{error}");
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn set_sync_flag_creates_table_flips_values_and_keeps_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Fresh default config: [sync] exists only as commented-out lines.
+        ensure_default_config(&path).unwrap();
+        set_sync_flag(&path, "auto_commit", true).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# auto_commit = false"), "{text}");
+        assert!(Config::load(Some(&path)).unwrap().sync.auto_commit);
+        // Second flag lands in the same table; existing values survive.
+        set_sync_flag(&path, "auto_push", true).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[sync]"), "{text}");
+        let sync = Config::load(Some(&path)).unwrap().sync;
+        assert_eq!((sync.auto_commit, sync.auto_push), (true, true));
+        // Flipping back to false writes a real boolean.
+        set_sync_flag(&path, "auto_commit", false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("auto_commit = false"), "{text}");
+        // A [sync] entry that is not a table is an error, not a clobber.
+        std::fs::write(&path, "sync = 3").unwrap();
+        assert!(set_sync_flag(&path, "auto_commit", true).is_err());
     }
 
     #[test]
