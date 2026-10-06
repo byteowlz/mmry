@@ -196,6 +196,46 @@ fn repo_and_general_memories_are_scoped_and_labelled() {
 }
 
 #[test]
+fn list_limit_bounds_output_while_default_stays_complete() {
+    let sb = Sandbox::new("");
+    let app = sb.repo("app");
+    for index in 0..5 {
+        sb.ok(&app, &["add", &format!("memory {index}")]);
+    }
+
+    // Newest first: the bound keeps the most recent memories, in list order.
+    let bounded = sb.json(&app, &["list", "--json", "--limit", "3"]);
+    let contents: Vec<_> = bounded
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["content"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(contents, ["memory 4", "memory 3", "memory 2"]);
+
+    // The default (no --limit) still lists everything.
+    assert_eq!(
+        sb.json(&app, &["list", "--json"]).as_array().unwrap().len(),
+        5
+    );
+
+    // A bound of zero returns nothing; --all and --plain compose (1 line per record).
+    assert_eq!(
+        sb.json(&app, &["list", "--json", "--limit", "0"])
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        sb.ok(&app, &["list", "--all", "--plain", "--limit", "2"])
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn supersede_checks_revision_and_rm_deprecates() {
     let sb = Sandbox::new("");
     let app = sb.repo("app");

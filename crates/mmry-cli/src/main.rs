@@ -158,6 +158,9 @@ struct ListArgs {
     /// Include expired memories.
     #[arg(long)]
     include_expired: bool,
+    /// Maximum number of memories (newest first).
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
 }
 
 #[derive(Args)]
@@ -773,11 +776,14 @@ fn add(env: &Env, args: AddArgs) -> anyhow::Result<()> {
 
 fn list(env: &Env, args: &ListArgs) -> anyhow::Result<()> {
     let sources = selected_sources(env, &args.scope)?;
-    let memories = if args.include_expired {
+    let mut memories = if args.include_expired {
         repos::list_including_expired(&sources)?
     } else {
         repos::list(&sources)?
     };
+    if let Some(limit) = args.limit {
+        memories.truncate(limit);
+    }
     if args.scope.json {
         print_json(&memories)?;
     } else if args.scope.plain {

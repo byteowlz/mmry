@@ -26,7 +26,7 @@ mmry rm mem_<id> --reason obsolete
 mmry doctor                       # store, repository mode, pending migration
 ```
 
-`list`/`search` read the current scope (general + current repository); `--general`, `--repo NAME` and `--all` select other scopes, `list --include-expired` shows expired entries. Output is wrapped and attributed for humans; `--plain` gives stable tab-separated records and `--json` structured output with `scope`, `repo`, `repo_path`, `revision` and `memory_id`.
+`list`/`search` read the current scope (general + current repository); `--general`, `--repo NAME` and `--all` select other scopes, `list --include-expired` shows expired entries, and `list --limit N` caps the output at the N newest memories (`search --limit` bounds matches). Output is wrapped and attributed for humans; `--plain` gives stable tab-separated records and `--json` structured output with `scope`, `repo`, `repo_path`, `revision` and `memory_id`.
 
 ## Harness integration
 
