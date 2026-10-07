@@ -12,6 +12,9 @@ pub struct AgentCtx {
     pub platform_version: Option<String>,
     pub harness: Option<String>,
     pub run_mode: Option<String>,
+    /// Producer-supplied execution environment/profile label (open vocabulary;
+    /// absent means unknown).
+    pub exec_env: Option<String>,
     pub platform_session_id: Option<String>,
     pub harness_session_id: Option<String>,
     pub session_name: Option<String>,
@@ -39,6 +42,13 @@ fn clean(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Validate `AGENT_CTX_EXEC_ENV` against the v3 bounded-string contract:
+/// max length 256 and no control characters. Out-of-bounds values are treated
+/// as unknown (None), never a fabricated or malformed profile.
+fn bounded_exec_env_ok(value: &str) -> bool {
+    value.chars().count() <= 256 && !value.chars().any(|c| c.is_control())
+}
+
 impl AgentCtx {
     /// Read `AGENT_CTX_*` from the process environment. Any
     /// `AGENT_CTX_VERSION` is accepted; unknown variables are ignored.
@@ -49,12 +59,18 @@ impl AgentCtx {
     /// Like [`AgentCtx::from_env`] with an explicit variable lookup.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let read = |name: &str| clean(lookup(&format!("AGENT_CTX_{name}")));
+        let read_exec_env = |name: &str| {
+            lookup(&format!("AGENT_CTX_{name}"))
+                .and_then(|v| clean(Some(v)))
+                .filter(|v| bounded_exec_env_ok(v))
+        };
         Self {
             version: read("VERSION"),
             platform_name: read("PLATFORM_NAME"),
             platform_version: read("PLATFORM_VERSION"),
             harness: read("HARNESS"),
             run_mode: read("RUN_MODE"),
+            exec_env: read_exec_env("EXEC_ENV"),
             platform_session_id: read("PLATFORM_SESSION_ID"),
             harness_session_id: read("HARNESS_SESSION_ID"),
             session_name: read("SESSION_NAME"),
@@ -137,5 +153,72 @@ mod tests {
         );
         assert_eq!(current_machine(&context).as_deref(), Some("m-42"));
         assert!(current_machine(&AgentCtx::default()).is_some());
+    }
+
+    #[test]
+    fn reads_v3_exec_env_from_env() {
+        let context = AgentCtx::from_lookup(|key| match key {
+            "AGENT_CTX_VERSION" => Some("3".into()),
+            "AGENT_CTX_EXEC_ENV" => Some("linux-container".into()),
+            _ => None,
+        });
+        let json = context.as_json();
+        assert_eq!(json["version"], "3");
+        assert_eq!(json["exec_env"], "linux-container");
+        // EXEC_ENV absent from the env means unknown, not a fabricated value.
+        assert!(AgentCtx::from_lookup(|_| None).as_json().get("exec_env").is_none());
+    }
+
+    #[test]
+    fn exec_env_bounded_validation() {
+        let from = |value: &str| AgentCtx::from_lookup(|k| {
+            (k == "AGENT_CTX_EXEC_ENV").then(|| value.to_string())
+        });
+        let cases: &[(&str, bool)] = &[
+            ("linux-container", true),
+            ("new-runtime-profile", true),
+            ("", false),
+            ("   ", false),
+            ("bad\nvalue", false),
+        ];
+        for (value, expected_present) in cases {
+            let json = from(value).as_json();
+            assert_eq!(
+                json.get("exec_env").is_some(),
+                *expected_present,
+                "value={value:?}"
+            );
+        }
+        // Oversize (257 chars) is treated as unknown; 256 is the boundary.
+        assert!(from(&"x".repeat(257)).as_json().get("exec_env").is_none());
+        assert_eq!(from(&"y".repeat(256)).as_json()["exec_env"], "y".repeat(256));
+    }
+
+    #[test]
+    fn stored_record_new_and_old_round_trips() {
+        // New record with exec_env serializes and deserializes.
+        let new = AgentCtx {
+            version: Some("3".into()),
+            exec_env: Some("windows-vm".into()),
+            harness: Some("pi".into()),
+            ..AgentCtx::default()
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        let parsed: AgentCtx = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.exec_env.as_deref(), Some("windows-vm"));
+        assert_eq!(parsed.harness.as_deref(), Some("pi"));
+
+        // Legacy stored record with run_mode and no exec_env field still loads;
+        // exec_env is None, run_mode is preserved, neither relabeled.
+        let mut legacy = serde_json::json!({
+            "version": "2",
+            "run_mode": "local",
+            "harness": "pi",
+        });
+        legacy.as_object_mut().unwrap().remove("exec_env");
+        let old: AgentCtx = serde_json::from_value(legacy).unwrap();
+        assert!(old.exec_env.is_none());
+        assert_eq!(old.run_mode.as_deref(), Some("local"));
+        assert_eq!(old.harness.as_deref(), Some("pi"));
     }
 }
